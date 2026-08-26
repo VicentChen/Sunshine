@@ -41,6 +41,7 @@
 build/
 cmake-*/
 docs/doxyconfig*
+build-*/
 
 # npm
 node_modules/
@@ -57,3 +58,7 @@ node_modules/
 *.pyc
 .venv/
 venv/
+
+# rkmpp
+docs/rkmpp/codereview/
+runtime-home/

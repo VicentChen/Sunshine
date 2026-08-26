@@ -80,6 +80,49 @@ if(CUDA_FOUND)
     add_compile_definitions(SUNSHINE_BUILD_CUDA)
 endif()
 
+# Rockchip MPP is only supported by this backend on Linux arm64. Detection is
+# based on the installed headers and link library; the pkg-config version is
+# intentionally not a feature gate.
+set(_RKMPP_PLATFORM_FILES
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/hdmirx.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/hdmirx.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/rkmpp.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/rkmpp.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/rkmpp_annexb.cpp")
+
+# CMake can retain target link properties between reconfiguration runs, while
+# the current platform lists are rebuilt. Remove this feature's prior target
+# edge before appending the result of the current detection.
+list(REMOVE_ITEM PLATFORM_LIBRARIES RockchipMPP::rockchip_mpp)
+list(REMOVE_ITEM PLATFORM_TARGET_FILES ${_RKMPP_PLATFORM_FILES})
+foreach(_RKMPP_TARGET sunshine test_sunshine)
+    if(TARGET ${_RKMPP_TARGET})
+        get_property(_RKMPP_TARGET_LINK_LIBRARIES TARGET ${_RKMPP_TARGET} PROPERTY LINK_LIBRARIES)
+        list(REMOVE_ITEM _RKMPP_TARGET_LINK_LIBRARIES RockchipMPP::rockchip_mpp)
+        set_property(TARGET ${_RKMPP_TARGET} PROPERTY LINK_LIBRARIES "${_RKMPP_TARGET_LINK_LIBRARIES}")
+    endif()
+endforeach()
+
+set(RKMPP_FOUND OFF)
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _SUNSHINE_SYSTEM_PROCESSOR)
+if(SUNSHINE_ENABLE_RKMPP AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND _SUNSHINE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+    find_package(RockchipMPP QUIET)
+    if(RockchipMPP_FOUND)
+        set(RKMPP_FOUND ON)
+    else()
+        message(WARNING "SUNSHINE_ENABLE_RKMPP is ON, but Rockchip MPP headers or library were not found; RKMPP support is disabled")
+    endif()
+endif()
+unset(_SUNSHINE_SYSTEM_PROCESSOR)
+if(RKMPP_FOUND)
+    add_compile_definitions(SUNSHINE_BUILD_RKMPP)
+    list(APPEND PLATFORM_LIBRARIES RockchipMPP::rockchip_mpp)
+    list(APPEND PLATFORM_TARGET_FILES ${_RKMPP_PLATFORM_FILES})
+endif()
+unset(_RKMPP_PLATFORM_FILES)
+unset(_RKMPP_TARGET)
+unset(_RKMPP_TARGET_LINK_LIBRARIES)
+
 # libdrm is required for DRM (KMS). Only the headers are required for Wayland,
 # Vulkan, and PipeWire (KWin, Portal).
 if(${SUNSHINE_ENABLE_DRM} OR ${SUNSHINE_ENABLE_WAYLAND} OR ${SUNSHINE_ENABLE_VULKAN}

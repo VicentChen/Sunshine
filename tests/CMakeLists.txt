@@ -169,6 +169,21 @@ if(SUNSHINE_ENABLE_TRAY AND (WIN32 OR APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux
         endif()
     endif()
 endif()
+# The HDMI RX smoke has its own main() and is intentionally not part of gtest.
+list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/rkmpp_hdmirx_smoke.cpp)
+list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/rkmpp_rkmpp_smoke.cpp)
+# The layout probe owns its main() and is built as its own RKMPP-only executable.
+list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/rkmpp_rkmpp_layout_test.cpp)
+# The Annex B probe also owns its main() and must never be pulled into the
+# generic test target by the recursive source glob. Its dedicated executable
+# is created only when the current configure pass enabled RKMPP below.
+list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/rkmpp_rkmpp_annexb_test.cpp)
+# These sources depend on RKMPP headers and are excluded entirely when support
+# is disabled; the ON build supplies them through the platform source list and
+# the dedicated layout target below.
+if(NOT RKMPP_FOUND)
+    list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_hdmirx.cpp)
+endif()
 # Add macOS-specific test files only when building tests for macOS
 if (APPLE)
     file(GLOB_RECURSE MACOS_TEST_SOURCES CONFIGURE_DEPENDS
@@ -246,10 +261,45 @@ if(GCOV_LINK_LIBRARY)
     list(APPEND TEST_LINK_LIBRARIES ${GCOV_LINK_LIBRARY})
 endif()
 
+if(RKMPP_FOUND)
+    add_executable(rkmpp_rkmpp_annexb_test
+        "${CMAKE_SOURCE_DIR}/tests/rkmpp_rkmpp_annexb_test.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/rkmpp_annexb.cpp")
+    target_compile_definitions(rkmpp_rkmpp_annexb_test PRIVATE SUNSHINE_BUILD_RKMPP)
+    target_compile_options(rkmpp_rkmpp_annexb_test PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
+
+    add_executable(rkmpp_rkmpp_layout_test
+        ${CMAKE_SOURCE_DIR}/tests/rkmpp_rkmpp_layout_test.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/rkmpp.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/rkmpp_annexb.cpp)
+    target_link_libraries(rkmpp_rkmpp_layout_test PRIVATE RockchipMPP::rockchip_mpp Boost::asio Boost::format Boost::log Boost::process)
+    target_compile_definitions(rkmpp_rkmpp_layout_test PRIVATE SUNSHINE_BUILD_RKMPP)
+    target_compile_options(rkmpp_rkmpp_layout_test PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
+
+    add_executable(rkmpp_rkmpp_smoke
+        ${CMAKE_SOURCE_DIR}/tests/rkmpp_rkmpp_smoke.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/hdmirx.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/rkmpp.cpp)
+    target_link_libraries(rkmpp_rkmpp_smoke PRIVATE RockchipMPP::rockchip_mpp Boost::asio Boost::format Boost::log Boost::process)
+    target_compile_definitions(rkmpp_rkmpp_smoke PRIVATE SUNSHINE_BUILD_RKMPP)
+    target_compile_options(rkmpp_rkmpp_smoke PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
+endif()
+
 target_link_libraries(${PROJECT_NAME} ${TEST_LINK_LIBRARIES})
 target_compile_definitions(${PROJECT_NAME} PUBLIC ${SUNSHINE_DEFINITIONS} ${TEST_DEFINITIONS})
 target_compile_options(${PROJECT_NAME} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${SUNSHINE_COMPILE_OPTIONS}>;$<$<COMPILE_LANGUAGE:CUDA>:${SUNSHINE_COMPILE_OPTIONS_CUDA};-std=c++17>)  # cmake-lint: disable=C0301
 target_link_options(${PROJECT_NAME} PRIVATE ${SUNSHINE_LINK_OPTIONS})
+
+# Hardware-only RKMPP smoke.  It is intentionally independent of gtest so
+# it can be run directly on a Rockchip HDMI RX host without the full test suite.
+if(RKMPP_FOUND)
+    add_executable(rkmpp_hdmirx_smoke
+        ${CMAKE_SOURCE_DIR}/tests/rkmpp_hdmirx_smoke.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/hdmirx.cpp)
+    target_link_libraries(rkmpp_hdmirx_smoke PRIVATE RockchipMPP::rockchip_mpp)
+    target_compile_definitions(rkmpp_hdmirx_smoke PRIVATE SUNSHINE_BUILD_RKMPP)
+    target_compile_options(rkmpp_hdmirx_smoke PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
+endif()
 
 if (WIN32)
     # prefer static libraries since we're linking statically

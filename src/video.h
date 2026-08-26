@@ -287,6 +287,16 @@ namespace video {
   /**
    * @brief Encoder name and feature flags advertised by Sunshine.
    */
+  struct encoder_platform_formats_rkmpp: encoder_platform_formats_t {
+    encoder_platform_formats_rkmpp() {
+      dev_type = platf::mem_type_e::rkmpp;
+      pix_fmt_8bit = platf::pix_fmt_e::unknown;
+      pix_fmt_10bit = platf::pix_fmt_e::unknown;
+      pix_fmt_yuv444_8bit = platf::pix_fmt_e::unknown;
+      pix_fmt_yuv444_10bit = platf::pix_fmt_e::unknown;
+    }
+  };
+
   struct encoder_t {
     std::string_view name;  ///< Encoder name used in logs, configuration, and capability probes.
 
@@ -466,6 +476,9 @@ namespace video {
 
 #if defined(__linux__) || defined(linux) || defined(__linux) || defined(__FreeBSD__)
   extern encoder_t vaapi;
+#ifdef SUNSHINE_BUILD_RKMPP
+  extern encoder_t rkmpp;
+#endif
 #endif
 
 #ifdef __APPLE__

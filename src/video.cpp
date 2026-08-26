@@ -8,6 +8,7 @@
 #include <atomic>
 #include <bitset>
 #include <list>
+#include <limits>
 #include <thread>
 #include <utility>
 
@@ -35,6 +36,10 @@ extern "C" {
 #include "platform/common.h"
 #include "sync.h"
 #include "video.h"
+#ifdef SUNSHINE_BUILD_RKMPP
+  #include "platform/linux/hdmirx.h"
+  #include "platform/linux/rkmpp.h"
+#endif
 
 #ifdef _WIN32
 extern "C" {
@@ -80,6 +85,23 @@ namespace video {
   /**
    * @brief Release context resources.
    */
+#ifdef SUNSHINE_BUILD_RKMPP
+  class packet_raw_rkmpp final: public packet_raw_t {
+  public:
+    packet_raw_rkmpp(platf::rkmpp::encoded_packet_t &&packet, int64_t frame_index, bool idr):
+        packet_ {std::move(packet)}, frame_index_ {frame_index}, idr_ {idr} {}
+    bool is_idr() override { return idr_; }
+    int64_t frame_index() override { return frame_index_; }
+    uint8_t *data() override { return packet_.data(); }
+    size_t data_size() override { return packet_.size(); }
+  private:
+    // Destroyed by the network consumer thread after RTP/FEC payload creation.
+    platf::rkmpp::encoded_packet_t packet_;
+    int64_t frame_index_;
+    bool idr_;
+  };
+#endif
+
   void free_ctx(AVCodecContext *ctx) {
     avcodec_free_context(&ctx);
   }
@@ -683,6 +705,10 @@ namespace video {
   auto capture_thread_async = safe::make_shared<capture_thread_async_ctx_t>(start_capture_async, end_capture_async);  ///< Capture thread async.
   auto capture_thread_sync = safe::make_shared<capture_thread_sync_ctx_t>(start_capture_sync, end_capture_sync);  ///< Capture thread sync.
 
+#ifdef SUNSHINE_BUILD_RKMPP
+  std::atomic_bool rkmpp_session_active {false};
+#endif
+
 #ifdef _WIN32
   /**
    * @brief NVENC.
@@ -1186,6 +1212,17 @@ namespace video {
   /**
    * @brief VA-API.
    */
+#ifdef SUNSHINE_BUILD_RKMPP
+  encoder_t rkmpp {
+    "rkmpp"sv,
+    std::make_unique<encoder_platform_formats_rkmpp>(),
+    {{}, {}, {}, {}, {}, {}, {}},
+    {{}, {}, {}, {}, {}, {}, "hevc_rkmpp"s},
+    {{}, {}, {}, {}, {}, {}, "h264_rkmpp"s},
+    0
+  };
+#endif
+
   encoder_t vaapi {
     "vaapi"sv,
     std::make_unique<encoder_platform_formats_avcodec>(
@@ -1403,6 +1440,9 @@ namespace video {
     &mediafoundation,
 #endif
 #if defined(__linux__) || defined(linux) || defined(__linux) || defined(__FreeBSD__)
+  #ifdef SUNSHINE_BUILD_RKMPP
+    &rkmpp,
+  #endif
   #ifdef SUNSHINE_BUILD_VULKAN
     &vulkan,
   #endif
@@ -1770,6 +1810,46 @@ namespace video {
    * @param frame_timestamp Capture timestamp associated with the encoded frame.
    * @return 0 when packets are queued; nonzero when encoding or packetization fails.
    */
+#ifdef SUNSHINE_BUILD_RKMPP
+  class rkmpp_encode_session_t final: public encode_session_t {
+  public:
+    rkmpp_encode_session_t(const config_t &config, const platf::hdmirx::capture_format_t &format):
+        encoder_(platf::rkmpp::encoder_t::create(make_encoder_config(config, format))),
+        video_format_(config.videoFormat) {}
+    int convert(platf::img_t &img) override { image_ = dynamic_cast<platf::hdmirx::hdmirx_img_t *>(&img); return image_ && image_->frame ? 0 : -1; }
+    void request_idr_frame() override { force_idr_ = true; }
+    void request_normal_frame() override { force_idr_ = false; }
+    void invalidate_ref_frames(int64_t, int64_t) override {}
+    platf::rkmpp::encoded_packet_t encode() {
+      if (!image_ || !image_->frame) throw std::runtime_error("RKMPP encode called without an HDMI RX frame");
+      if (force_idr_) {
+        encoder_.request_idr();
+        force_idr_ = false;
+      }
+      auto packet = encoder_.encode_packet(*image_->frame);
+      image_->frame.reset();
+      image_ = nullptr;
+      return packet;
+    }
+    int video_format() const noexcept { return video_format_; }
+  private:
+    static platf::rkmpp::encoder_config_t make_encoder_config(const config_t &config, const platf::hdmirx::capture_format_t &format) {
+      if (config.numRefFrames != 0) throw std::invalid_argument("RKMPP does not support a requested reference-frame count");
+      if (config.slicesPerFrame > 1) throw std::invalid_argument("RKMPP does not support more than one slice per frame");
+      if (config.bitrate <= 0 || static_cast<std::uint64_t>(config.bitrate) > std::numeric_limits<std::uint32_t>::max() / 1000U) {
+        throw std::invalid_argument("RKMPP bitrate in kbit/s is out of range");
+      }
+      const auto fps = config.framerateX100 > 0 ? framerateX100_to_rational(config.framerateX100) : AVRational {config.framerate, 1};
+      if (fps.num <= 0 || fps.den <= 0) throw std::invalid_argument("RKMPP frame rate is invalid");
+      return {config.videoFormat == 0 ? platf::rkmpp::codec_e::h264 : platf::rkmpp::codec_e::h265,
+              &format, static_cast<std::uint32_t>(fps.num), static_cast<std::uint32_t>(fps.den),
+              static_cast<std::uint32_t>(config.bitrate) * 1000U, static_cast<std::uint32_t>(config.framerate)};
+    }
+    platf::rkmpp::encoder_t encoder_; platf::hdmirx::hdmirx_img_t *image_ {}; bool force_idr_ {}; int video_format_ {};
+  };
+
+#endif
+
   int encode_avcodec(int64_t frame_nr, avcodec_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
     auto &frame = session.device->frame;
     frame->pts = frame_nr;
@@ -1889,6 +1969,24 @@ namespace video {
       return encode_avcodec(frame_nr, *avcodec_session, packets, channel_data, frame_timestamp);
     } else if (auto nvenc_session = dynamic_cast<nvenc_encode_session_t *>(&session)) {
       return encode_nvenc(frame_nr, *nvenc_session, packets, channel_data, frame_timestamp);
+#ifdef SUNSHINE_BUILD_RKMPP
+    } else if (auto rkmpp_session = dynamic_cast<rkmpp_encode_session_t *>(&session)) {
+      try {
+        auto encoded = rkmpp_session->encode();
+        if (!encoded) return -1;
+        const bool annexb_idr = platf::rkmpp::detail::annexb_first_vcl_is_idr(
+          encoded.data(), encoded.size(),
+          rkmpp_session->video_format() == 0 ? platf::rkmpp::codec_e::h264 : platf::rkmpp::codec_e::h265, false
+        );
+        const bool idr = encoded.output_intra() && annexb_idr;
+        auto packet = std::make_unique<packet_raw_rkmpp>(std::move(encoded), frame_nr, idr);
+        packet->channel_data = channel_data;
+        packet->frame_timestamp = frame_timestamp;
+        packets->raise(std::move(packet));
+        return 0;
+      }
+      catch (const std::exception &e) { BOOST_LOG(error) << "RKMPP encode failed: " << e.what(); return -1; }
+#endif
     }
 
     return -1;
@@ -2326,6 +2424,23 @@ namespace video {
     } else if (dynamic_cast<platf::nvenc_encode_device_t *>(encode_device.get())) {
       auto nvenc_encode_device = boost::dynamic_pointer_cast<platf::nvenc_encode_device_t>(std::move(encode_device));
       return make_nvenc_encode_session(config, std::move(nvenc_encode_device));
+#ifdef SUNSHINE_BUILD_RKMPP
+    } else if (auto rkmpp_device = dynamic_cast<platf::rkmpp_encode_device_t *>(encode_device.get())) {
+      if (config.videoFormat > 1 || config.dynamicRange || config.chromaSamplingType) {
+        BOOST_LOG(error) << "RKMPP supports only 8-bit SDR 4:2:0 H.264 or HEVC";
+        return nullptr;
+      }
+      if (config.numRefFrames != 0) {
+        BOOST_LOG(error) << "RKMPP does not support a requested reference-frame count";
+        return nullptr;
+      }
+      if (config.slicesPerFrame > 1) {
+        BOOST_LOG(error) << "RKMPP does not support more than one slice per frame";
+        return nullptr;
+      }
+      auto format = static_cast<const platf::hdmirx::capture_format_t *>(rkmpp_device->input_format());
+      return format ? std::make_unique<rkmpp_encode_session_t>(config, *format) : nullptr;
+#endif
     }
 
     return nullptr;
@@ -2387,15 +2502,12 @@ namespace video {
     auto idr_events = mail->event<bool>(mail::idr);
     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
 
-    {
-      // Load a dummy image into the AVFrame to ensure we have something to encode
-      // even if we timeout waiting on the first frame. This is a relatively large
-      // allocation which can be freed immediately after convert(), so we do this
-      // in a separate scope.
-      auto dummy_img = disp->alloc_img();
-      if (!dummy_img || disp->dummy_img(dummy_img.get()) || session->convert(*dummy_img)) {
-        return;
-      }
+    // convert() may retain references into its input until the following encode().
+    // Keep the dummy image alive for that interval, just like captured images in
+    // the main loop below.
+    auto dummy_img = disp->alloc_img();
+    if (!dummy_img || disp->dummy_img(dummy_img.get()) || session->convert(*dummy_img)) {
+      return;
     }
 
     while (true) {
@@ -2560,6 +2672,11 @@ namespace video {
       result = disp.make_avcodec_encode_device(pix_fmt);
     } else if (dynamic_cast<const encoder_platform_formats_nvenc *>(encoder.platform_formats.get())) {
       result = disp.make_nvenc_encode_device(pix_fmt);
+#ifdef SUNSHINE_BUILD_RKMPP
+    } else if (dynamic_cast<const encoder_platform_formats_rkmpp *>(encoder.platform_formats.get())) {
+      if (config.videoFormat > 1 || config.dynamicRange || config.chromaSamplingType) return {};
+      result = disp.make_rkmpp_encode_device();
+#endif
     }
 
     if (result) {
@@ -2662,6 +2779,16 @@ namespace video {
       if (disp) {
         break;
       }
+#ifdef SUNSHINE_BUILD_RKMPP
+      // HDMI RX cannot scale. A display-open failure therefore includes a
+      // client request whose dimensions do not match the active input. Do not
+      // keep retrying after that client has disconnected: the synchronous
+      // session's join event is only raised when this function returns.
+      if (encoder.name == "rkmpp") {
+        BOOST_LOG(error) << "RKMPP/HDMI RX capture setup failed; ending the streaming session";
+        break;
+      }
+#endif
     }
 
     if (!disp) {
@@ -2687,6 +2814,14 @@ namespace video {
     while (encode_session_ctx_queue.running()) {
       auto push_captured_image_callback = [&](std::shared_ptr<platf::img_t> &&img, bool frame_captured) -> bool {
         while (encode_session_ctx_queue.peek()) {
+#ifdef SUNSHINE_BUILD_RKMPP
+          if (encoder.name == "rkmpp") {
+            BOOST_LOG(error) << "RKMPP/HDMI RX currently supports one streaming session at a time";
+            auto rejected = encode_session_ctx_queue.pop();
+            if (rejected) { rejected->shutdown_event->raise(true); rejected->join_event->raise(true); }
+            continue;
+          }
+#endif
           auto encode_session_ctx = encode_session_ctx_queue.pop();
           if (!encode_session_ctx) {
             return false;
@@ -2807,7 +2942,15 @@ namespace video {
 
     std::vector<std::string> display_names;
     int display_p = -1;
-    while (encode_run_sync(synced_session_ctxs, ctx, display_names, display_p) == encode_e::reinit) {}
+    while (encode_run_sync(synced_session_ctxs, ctx, display_names, display_p) == encode_e::reinit) {
+#ifdef SUNSHINE_BUILD_RKMPP
+      // HDMI source-change notifications can arrive before new DV timings are
+      // stable. Avoid reopening the V4L2 device in a tight loop.
+      if (chosen_encoder && chosen_encoder->name == "rkmpp") {
+        std::this_thread::sleep_for(200ms);
+      }
+#endif
+    }
   }
 
   /**
@@ -2913,6 +3056,17 @@ namespace video {
     config_t config,
     void *channel_data
   ) {
+#ifdef SUNSHINE_BUILD_RKMPP
+    const bool rkmpp = chosen_encoder && chosen_encoder->name == "rkmpp";
+    if (rkmpp) {
+      bool expected = false;
+      if (!rkmpp_session_active.compare_exchange_strong(expected, true)) {
+        BOOST_LOG(error) << "RKMPP/HDMI RX rejects a second streaming session while one is active";
+        return;
+      }
+    }
+    auto rkmpp_guard = util::fail_guard([&]() { if (rkmpp) rkmpp_session_active.store(false); });
+#endif
     auto idr_events = mail->event<bool>(mail::idr);
 
     idr_events->raise(true);
@@ -2964,12 +3118,11 @@ namespace video {
       return -1;
     }
 
-    {
-      // Image buffers are large, so we use a separate scope to free it immediately after convert()
-      auto img = disp->alloc_img();
-      if (!img || disp->dummy_img(img.get()) || session->convert(*img)) {
-        return -1;
-      }
+    // The encoder contract permits convert() to retain references into the input
+    // until encode() consumes it. Keep the probe image alive through that call.
+    auto img = disp->alloc_img();
+    if (!img || disp->dummy_img(img.get()) || session->convert(*img)) {
+      return -1;
     }
 
     session->request_idr_frame();
@@ -2987,6 +3140,18 @@ namespace video {
 
       return -1;
     }
+
+#ifdef SUNSHINE_BUILD_RKMPP
+    if (encoder.name == "rkmpp") {
+      if (!platf::rkmpp::detail::annexb_first_vcl_is_idr(
+            packet->data(), packet->data_size(),
+            config.videoFormat == 0 ? platf::rkmpp::codec_e::h264 : platf::rkmpp::codec_e::h265, true
+          )) {
+        BOOST_LOG(error) << "RKMPP probe packet is missing required parameter sets or a real IDR NAL"sv;
+        return -1;
+      }
+    }
+#endif
 
     int flag = 0;
 
@@ -3009,7 +3174,16 @@ namespace video {
    * @brief Validate encoder before it is used.
    */
   bool validate_encoder(encoder_t &encoder, bool expect_failure) {
-    const auto output_name {display_device::map_output_name(config::video.output_name)};
+    auto output_name {display_device::map_output_name(config::video.output_name)};
+    // HDMI RX has one logical display. During startup validation the normal
+    // output setting is commonly empty, but unlike the desktop backends the
+    // HDMI RX display requires its enumerated name.
+    if (config::video.capture == "hdmirx" && output_name.empty()) {
+      const auto display_names = platf::display_names(encoder.platform_formats->dev_type);
+      if (!display_names.empty()) {
+        output_name = display_names.front();
+      }
+    }
     std::shared_ptr<platf::display_t> disp;
 
     BOOST_LOG(info) << "Trying encoder ["sv << encoder.name << ']';

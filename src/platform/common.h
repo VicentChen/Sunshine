@@ -308,6 +308,7 @@ namespace platf {
     cuda,  ///< CUDA
     videotoolbox,  ///< VideoToolbox
     vulkan,  ///< Vulkan
+    rkmpp,  ///< Rockchip MPP / HDMI RX DMA-BUF
     unknown  ///< Unknown
   };
 
@@ -645,6 +646,10 @@ namespace platf {
   /**
    * @brief Enumerates supported capture options.
    */
+  struct rkmpp_encode_device_t: encode_device_t {
+    virtual const void *input_format() const = 0;
+  };
+
   enum class capture_e : int {
     ok,  ///< Success
     reinit,  ///< Need to reinitialize
@@ -732,6 +737,10 @@ namespace platf {
      *
      * @return True when the active display mode is HDR.
      */
+    virtual std::unique_ptr<rkmpp_encode_device_t> make_rkmpp_encode_device() {
+      return nullptr;
+    }
+
     virtual bool is_hdr() {
       return false;
     }

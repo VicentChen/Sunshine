@@ -18,6 +18,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <span>
 #include <sstream>
 
 // platform includes
@@ -63,6 +64,9 @@
 #include "src/logging.h"
 #include "src/platform/common.h"
 #include "vaapi.h"
+#ifdef SUNSHINE_BUILD_RKMPP
+  #include "hdmirx.h"
+#endif
 
 #ifdef __GNUC__
   #define SUNSHINE_GNUC_EXTENSION __extension__
@@ -1125,6 +1129,9 @@ namespace platf {
 #ifdef SUNSHINE_BUILD_PORTAL
       PORTAL,  ///< XDG PORTAL
 #endif
+#ifdef SUNSHINE_BUILD_RKMPP
+      HDMIRX,  ///< RK3588 HDMI RX
+#endif
       MAX_FLAGS  ///< The maximum number of flags
     };
   }  // namespace source
@@ -1209,6 +1216,9 @@ namespace platf {
    * @brief List display names accepted by the selected capture backend.
    */
   std::vector<std::string> display_names(mem_type_e hwdevice_type) {
+#ifdef SUNSHINE_BUILD_RKMPP
+    if (sources[source::HDMIRX] && hwdevice_type == mem_type_e::rkmpp) return {"HDMI RX"};
+#endif
 #ifdef SUNSHINE_BUILD_CUDA
     // display using NvFBC only supports mem_type_e::cuda
     if (sources[source::NVFBC] && hwdevice_type == mem_type_e::cuda) {
@@ -1262,6 +1272,12 @@ namespace platf {
   }
 
   std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
+#ifdef SUNSHINE_BUILD_RKMPP
+    if (sources[source::HDMIRX] && hwdevice_type == mem_type_e::rkmpp) {
+      if (display_name != "HDMI RX") { BOOST_LOG(error) << "hdmirx accepts only the HDMI RX display"; return nullptr; }
+      return hdmirx_display(config);
+    }
+#endif
     // Keep KMS as first element to check before dropping CAP_SYS_ADMIN
 #ifdef SUNSHINE_BUILD_DRM
     if (sources[source::KMS]) {
@@ -1324,6 +1340,24 @@ namespace platf {
 
     // These are allowed to fail.
     gbm::init();
+
+    const bool wants_hdmirx = config::video.capture == "hdmirx";
+    const bool wants_rkmpp = config::video.encoder == "rkmpp";
+#ifndef SUNSHINE_BUILD_RKMPP
+    if (wants_hdmirx || wants_rkmpp) {
+      BOOST_LOG(error) << "capture=hdmirx and encoder=rkmpp require a Sunshine build with RKMPP support";
+      return nullptr;
+    }
+#else
+    if (wants_hdmirx != wants_rkmpp) {
+      BOOST_LOG(error) << "RKMPP requires capture=hdmirx together with encoder=rkmpp";
+      return nullptr;
+    }
+    if (wants_hdmirx) {
+      sources[source::HDMIRX] = true;
+      BOOST_LOG(info) << "Using RK3588 HDMI RX capture source";
+    }
+#endif
 
     window_system = window_system_e::NONE;
 #ifdef SUNSHINE_BUILD_WAYLAND
