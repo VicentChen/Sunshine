@@ -68,6 +68,8 @@ elseif(UNIX)  # Linux
             "Enable Vulkan video encoding." ON)
     option(SUNSHINE_ENABLE_RKMPP
             "Enable Rockchip MPP support when building for Linux aarch64." OFF)
+    option(SUNSHINE_ENABLE_RGA
+            "Enable librga hardware blitting when its headers, library, and required API are available on Linux aarch64." ON)
     option(SUNSHINE_ENABLE_WAYLAND
             "Enable building wayland specific code." ON)
     option(SUNSHINE_ENABLE_X11

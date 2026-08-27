@@ -2,38 +2,11 @@
 #include <cstdint>
 #include <iostream>
 
-#include <src/platform/linux/hdmirx.h>
 #include <src/platform/linux/rkmpp.h>
 
-// The layout and Annex-B helpers are tested without opening a V4L2 device.
-// rkmpp.cpp also contains the production encoder methods, so provide the
-// small HDMI RX interfaces those uncalled methods reference at link time.
-namespace platf::hdmirx {
-bool capture_format_is_valid(const capture_format_t &) noexcept {
-  return true;
-}
-
-void captured_frame_t::release() {}
-bool captured_frame_t::released() const noexcept {
-  return true;
-}
-std::chrono::steady_clock::time_point captured_frame_t::timestamp() const noexcept {
-  return {};
-}
-const std::vector<frame_plane_t> &captured_frame_t::planes() const noexcept {
-  static const std::vector<frame_plane_t> empty;
-  return empty;
-}
-}  // namespace platf::hdmirx
-
 namespace {
-platf::hdmirx::capture_format_t layout(MppFrameFormat format, std::uint32_t height, std::uint32_t rows) {
-  platf::hdmirx::capture_format_t result;
-  result.width = 1920;
-  result.height = height;
-  result.mpp_format = format;
-  result.planes.push_back({5760, 5760 * rows, 5760 * rows});
-  return result;
+platf::rkmpp::input_layout_t layout(MppFrameFormat format, std::uint32_t height, std::uint32_t rows) {
+  return {1920, height, format == MPP_FMT_BGR888 ? 5760U : 1920U, rows, format};
 }
 }  // namespace
 
@@ -43,10 +16,11 @@ int main() {
     return condition;
   };
   bool passed = true;
-  passed = expect(platf::rkmpp::detail::derive_vertical_stride(layout(MPP_FMT_BGR888, 1080, 1080)) == 1080, "BGR vertical stride") && passed;
-  passed = expect(platf::rkmpp::detail::derive_vertical_stride(layout(MPP_FMT_YUV420SP, 1080, 1620)) == 1080, "NV12 vertical stride") && passed;
-  passed = expect(platf::rkmpp::detail::derive_vertical_stride(layout(MPP_FMT_YUV422SP, 1080, 2160)) == 1080, "NV16 vertical stride") && passed;
-  passed = expect(platf::rkmpp::detail::derive_vertical_stride(layout(MPP_FMT_YUV444SP, 1080, 3240)) == 1080, "NV24 vertical stride") && passed;
+  passed = expect(platf::rkmpp::detail::minimum_allocation_size(layout(MPP_FMT_BGR888, 1080, 1080)) == 5'760U * 1'080U, "BGR allocation") && passed;
+  passed = expect(platf::rkmpp::detail::minimum_allocation_size(layout(MPP_FMT_YUV420SP, 1080, 1080)) == 1'920U * 1'620U, "NV12 allocation") && passed;
+  passed = expect(platf::rkmpp::detail::minimum_allocation_size(layout(MPP_FMT_YUV422SP, 1080, 1080)) == 1'920U * 2'160U, "NV16 allocation") && passed;
+  passed = expect(platf::rkmpp::detail::minimum_allocation_size(layout(MPP_FMT_YUV444SP, 1080, 1080)) == 1'920U * 3'240U, "NV24 allocation") && passed;
+  passed = expect(platf::rkmpp::validate_input_layout(layout(MPP_FMT_YUV420SP, 1080, 1080)) == platf::rkmpp::input_status_e::ok, "NV12 layout validation") && passed;
   passed = expect(platf::rkmpp::detail::is_access_unit_complete(false, false), "non-partition packet completion") && passed;
   passed = expect(!platf::rkmpp::detail::is_access_unit_complete(true, false), "incomplete partition") && passed;
   passed = expect(platf::rkmpp::detail::is_access_unit_complete(true, true), "EOI partition completion") && passed;

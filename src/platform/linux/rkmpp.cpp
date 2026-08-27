@@ -1,6 +1,6 @@
 #include "src/platform/linux/rkmpp.h"
 
-#include "src/platform/linux/hdmirx.h"
+#include "src/platform/hdmirx_policy.h"
 
 #include <mpp_buffer.h>
 #include <mpp_frame.h>
@@ -34,13 +34,6 @@ MppCodingType coding(codec_e codec) {
   return codec == codec_e::h264 ? MPP_VIDEO_CodingAVC : MPP_VIDEO_CodingHEVC;
 }
 
-std::uint32_t horizontal_stride(const hdmirx::capture_format_t &format) {
-  if (format.planes.size() != 1 || !format.planes.front().bytesperline) {
-    throw std::runtime_error("Stage 3 accepts only a single-plane HDMI RX layout with a byte stride");
-  }
-  return format.planes.front().bytesperline;
-}
-
 struct frame_t {
   MppFrame value {};
   frame_t() { check(mpp_frame_init(&value), "mpp_frame_init"); }
@@ -49,13 +42,13 @@ struct frame_t {
 
 struct buffer_t {
   MppBuffer value {};
-  explicit buffer_t(const hdmirx::frame_plane_t &plane) {
+  explicit buffer_t(const input_frame_t &frame) {
     MppBufferInfo info {};
     info.type = MPP_BUFFER_TYPE_EXT_DMA;
-    // EXT_DMA borrows the V4L2-owned descriptor. The capture state closes it
-    // only after stream teardown, and this frame stays alive through EOI.
-    info.fd = plane.dma_buf_fd;
-    info.size = plane.allocation_size;
+    // EXT_DMA borrows the producer descriptor. input_frame_t::holder pins its
+    // owner until synchronous MPP consumption completes below.
+    info.fd = frame.dma_buf_fd;
+    info.size = static_cast<std::size_t>(frame.allocation_size);
     check(mpp_buffer_import(&value, &info), "mpp_buffer_import(EXT_DMA)");
   }
   ~buffer_t() { if (value) mpp_buffer_put(value); }
@@ -93,6 +86,128 @@ struct packet_t {
 };
 }  // namespace
 
+std::uint64_t detail::minimum_allocation_size(const input_layout_t &layout) noexcept {
+  const auto stride = static_cast<std::uint64_t>(layout.horizontal_stride);
+  const auto rows = static_cast<std::uint64_t>(layout.vertical_stride);
+  constexpr auto maximum = std::numeric_limits<std::uint64_t>::max();
+  if (rows != 0 && stride > maximum / rows) {
+    return 0;
+  }
+  const auto luma_size = stride * rows;
+  switch (layout.format) {
+    case MPP_FMT_BGR888:
+    case MPP_FMT_RGB888:
+      return layout.horizontal_stride % 3U == 0 ? luma_size : 0;
+    case MPP_FMT_YUV420SP:
+      if ((layout.visible_width & 1U) != 0 || (layout.visible_height & 1U) != 0 || (layout.horizontal_stride & 1U) != 0 || (layout.vertical_stride & 1U) != 0) return 0;
+      return luma_size <= maximum - luma_size / 2U ? luma_size + luma_size / 2U : 0;
+    case MPP_FMT_YUV422SP:
+      if ((layout.visible_width & 1U) != 0 || (layout.horizontal_stride & 1U) != 0) return 0;
+      return luma_size <= maximum / 2U ? luma_size * 2U : 0;
+    case MPP_FMT_YUV444SP:
+      return luma_size <= maximum / 3U ? luma_size * 3U : 0;
+    default:
+      return 0;
+  }
+}
+
+std::optional<input_layout_t> make_input_layout_from_plane(std::uint32_t visible_width, std::uint32_t visible_height, MppFrameFormat format, std::uint32_t horizontal_stride, std::uint64_t plane_extent) noexcept {
+  if (horizontal_stride == 0 || plane_extent == 0 || plane_extent % horizontal_stride != 0) {
+    return std::nullopt;
+  }
+  const auto rows = plane_extent / horizontal_stride;
+  if (rows > std::numeric_limits<std::uint32_t>::max()) {
+    return std::nullopt;
+  }
+  std::uint32_t vertical_stride {};
+  switch (format) {
+    case MPP_FMT_BGR888:
+    case MPP_FMT_RGB888:
+      if (horizontal_stride % 3U != 0) return std::nullopt;
+      vertical_stride = static_cast<std::uint32_t>(rows);
+      break;
+    case MPP_FMT_YUV420SP:
+      if (rows % 3U != 0) return std::nullopt;
+      vertical_stride = static_cast<std::uint32_t>(rows / 3U * 2U);
+      break;
+    case MPP_FMT_YUV422SP:
+      if (rows % 2U != 0) return std::nullopt;
+      vertical_stride = static_cast<std::uint32_t>(rows / 2U);
+      break;
+    case MPP_FMT_YUV444SP:
+      if (rows % 3U != 0) return std::nullopt;
+      vertical_stride = static_cast<std::uint32_t>(rows / 3U);
+      break;
+    default:
+      return std::nullopt;
+  }
+  input_layout_t layout {visible_width, visible_height, horizontal_stride, vertical_stride, format};
+  return validate_input_layout(layout) == input_status_e::ok ? std::optional<input_layout_t> {layout} : std::nullopt;
+}
+
+input_status_e validate_input_layout(const input_layout_t &layout) noexcept {
+  if (!hdmirx::is_valid_resolution({layout.visible_width, layout.visible_height})) {
+    return input_status_e::invalid_visible_size;
+  }
+  const auto bytes_per_pixel = layout.format == MPP_FMT_BGR888 || layout.format == MPP_FMT_RGB888 ? 3U : 1U;
+  switch (layout.format) {
+    case MPP_FMT_BGR888:
+    case MPP_FMT_RGB888:
+    case MPP_FMT_YUV420SP:
+    case MPP_FMT_YUV422SP:
+    case MPP_FMT_YUV444SP:
+      break;
+    default:
+      return input_status_e::unsupported_format;
+  }
+  const auto allocation_size = detail::minimum_allocation_size(layout);
+  if (layout.visible_width > std::numeric_limits<std::uint32_t>::max() / bytes_per_pixel || layout.horizontal_stride < layout.visible_width * bytes_per_pixel || layout.vertical_stride < layout.visible_height || layout.horizontal_stride > std::numeric_limits<RK_S32>::max() || layout.vertical_stride > std::numeric_limits<RK_S32>::max() || allocation_size == 0) {
+    return input_status_e::stride_too_small;
+  }
+  return input_status_e::ok;
+}
+
+input_status_e validate_input_frame(const input_frame_t &frame, const input_layout_t &expected_layout) noexcept {
+  if (const auto status = validate_input_layout(frame.layout); status != input_status_e::ok) {
+    return status;
+  }
+  if (frame.layout != expected_layout) {
+    return input_status_e::layout_mismatch;
+  }
+  if (frame.dma_buf_fd < 0) {
+    return input_status_e::invalid_dma_buf;
+  }
+  if (!frame.holder) {
+    return input_status_e::missing_holder;
+  }
+  if (frame.allocation_size > std::numeric_limits<std::size_t>::max()) {
+    return input_status_e::allocation_not_representable;
+  }
+  if (frame.allocation_size < detail::minimum_allocation_size(frame.layout)) {
+    return input_status_e::allocation_too_small;
+  }
+  return input_status_e::ok;
+}
+
+encoder_config_status_e validate_encoder_config(const encoder_config_t &settings) noexcept {
+  if (settings.codec != codec_e::h264 && settings.codec != codec_e::h265) {
+    return encoder_config_status_e::invalid_codec;
+  }
+  if (validate_input_layout(settings.input_layout) != input_status_e::ok) {
+    return encoder_config_status_e::invalid_input;
+  }
+  if (!hdmirx::is_valid_resolution({settings.coded_width, settings.coded_height}) || (settings.coded_width & 1U) != 0 || (settings.coded_height & 1U) != 0) {
+    return encoder_config_status_e::invalid_coded_size;
+  }
+  if (settings.input_layout.visible_width != settings.coded_width || settings.input_layout.visible_height != settings.coded_height) {
+    return encoder_config_status_e::converter_required;
+  }
+  if (!settings.fps_num || !settings.fps_den || !settings.gop || !settings.bitrate || settings.bitrate > std::numeric_limits<std::uint32_t>::max() - settings.bitrate / 2U) {
+    return encoder_config_status_e::invalid_rate_control;
+  }
+  return encoder_config_status_e::ok;
+}
+
 struct encoded_packet_t::state_t {
   MppPacket packet {};
   MppBuffer buffer {};
@@ -116,33 +231,6 @@ std::size_t encoded_packet_t::size() const noexcept {
 }
 bool encoded_packet_t::output_intra() const noexcept { return state_ && state_->intra; }
 encoded_packet_t::operator bool() const noexcept { return size() != 0; }
-
-std::uint32_t detail::derive_vertical_stride(const hdmirx::capture_format_t &format) {
-  if (format.planes.size() != 1) {
-    throw std::runtime_error("Stage 3 rejects multi-plane HDMI RX: MppFrame exposes one MppBuffer only");
-  }
-  const auto &plane = format.planes.front();
-  if (!plane.bytesperline || !plane.sizeimage || plane.sizeimage % plane.bytesperline) {
-    throw std::runtime_error("HDMI RX sizeimage is not an integral byte-stride layout");
-  }
-  const auto rows = plane.sizeimage / plane.bytesperline;
-  switch (format.mpp_format) {
-    case MPP_FMT_BGR888:
-    case MPP_FMT_RGB888:
-      return rows;
-    case MPP_FMT_YUV420SP:
-      if (rows % 3U) throw std::runtime_error("NV12 sizeimage is not 3/2 of the luma layout");
-      return rows * 2U / 3U;
-    case MPP_FMT_YUV422SP:
-      if (rows % 2U) throw std::runtime_error("NV16 sizeimage is not twice the luma layout");
-      return rows / 2U;
-    case MPP_FMT_YUV444SP:
-      if (rows % 3U) throw std::runtime_error("NV24 sizeimage is not three times the luma layout");
-      return rows / 3U;
-    default:
-      throw std::runtime_error("unsupported MPP DMA-BUF format");
-  }
-}
 
 bool detail::is_access_unit_complete(bool partition, bool eoi) noexcept {
   // MPP marks only split packets with SOI/EOI. A non-partition packet already
@@ -172,19 +260,21 @@ encoder_t &encoder_t::operator=(encoder_t &&) noexcept = default;
 encoder_t::~encoder_t() = default;
 
 encoder_t encoder_t::create(const encoder_config_t &settings) {
-  if (!settings.input_format || !settings.fps_num || !settings.fps_den || !settings.gop || !settings.bitrate || !hdmirx::capture_format_is_valid(*settings.input_format)) {
-    throw std::invalid_argument("incomplete RKMPP encoder configuration");
-  }
-  if (settings.bitrate > std::numeric_limits<std::uint32_t>::max() - settings.bitrate / 2U) {
-    throw std::invalid_argument("RKMPP bitrate is too high for MPP rate control");
+  switch (validate_encoder_config(settings)) {
+    case encoder_config_status_e::ok:
+      break;
+    case encoder_config_status_e::converter_required:
+      throw std::runtime_error("RKMPP input conversion required: input layout does not match requested coded size");
+    case encoder_config_status_e::invalid_input:
+    case encoder_config_status_e::invalid_coded_size:
+    case encoder_config_status_e::invalid_rate_control:
+    case encoder_config_status_e::invalid_codec:
+      throw std::invalid_argument("incomplete RKMPP encoder configuration");
   }
   auto state = std::make_unique<state_t>();
   state->settings = settings;
-  state->horizontal_stride = horizontal_stride(*settings.input_format);
-  state->vertical_stride = detail::derive_vertical_stride(*settings.input_format);
-  if (state->horizontal_stride < settings.input_format->width || state->vertical_stride < settings.input_format->height) {
-    throw std::runtime_error("HDMI RX stride is smaller than its visible dimensions");
-  }
+  state->horizontal_stride = settings.input_layout.horizontal_stride;
+  state->vertical_stride = settings.input_layout.vertical_stride;
 
   check(mpp_create(&state->context, &state->api), "mpp_create");
   RK_S64 timeout_ms = 2000;
@@ -194,11 +284,11 @@ encoder_t encoder_t::create(const encoder_config_t &settings) {
   check(mpp_enc_cfg_init(&state->config), "mpp_enc_cfg_init");
   const auto set = [&](const char *key, RK_S32 value) { check(mpp_enc_cfg_set_s32(state->config, key, value), key); };
   const auto set_unsigned = [&](const char *key, RK_U32 value) { check(mpp_enc_cfg_set_u32(state->config, key, value), key); };
-  set("prep:width", settings.input_format->width);
-  set("prep:height", settings.input_format->height);
+  set("prep:width", settings.input_layout.visible_width);
+  set("prep:height", settings.input_layout.visible_height);
   set("prep:hor_stride", state->horizontal_stride);
   set("prep:ver_stride", state->vertical_stride);
-  set("prep:format", settings.input_format->mpp_format);
+  set("prep:format", settings.input_layout.format);
   set("rc:mode", MPP_ENC_RC_MODE_CBR);
   set("rc:bps_target", settings.bitrate);
   set("rc:bps_max", settings.bitrate * 3U / 2U);
@@ -227,30 +317,29 @@ encoder_t encoder_t::create(const encoder_config_t &settings) {
   return encoder_t(std::move(state));
 }
 
-encoded_packet_t encoder_t::encode_packet(hdmirx::captured_frame_t &captured) {
-  if (!state_ || captured.released()) throw std::runtime_error("RKMPP encode requires a live HDMI RX frame");
-  if (captured.planes().size() != 1 || captured.planes().front().data_offset != 0) {
-    throw std::runtime_error("RKMPP rejects multi-plane or non-zero-offset DMA-BUF import");
+encoded_packet_t encoder_t::encode_packet(const input_frame_t &input) {
+  if (!state_) throw std::runtime_error("RKMPP encoder is not initialized");
+  if (const auto status = validate_input_frame(input, state_->settings.input_layout); status != input_status_e::ok) {
+    throw std::runtime_error("RKMPP input frame is invalid (status=" + std::to_string(static_cast<int>(status)) + ')');
   }
-  const auto &plane = captured.planes().front();
-  if (plane.dma_buf_fd < 0 || plane.allocation_size < plane.sizeimage || plane.sizeimage != state_->settings.input_format->planes.front().sizeimage) {
-    throw std::runtime_error("HDMI RX DMA-BUF metadata changed after encoder setup");
-  }
+  // Preserve the producer lease even if the caller releases its input frame
+  // object while MPP synchronously processes the borrowed descriptor.
+  auto holder = input.holder;
 
   try {
-    buffer_t input_buffer(plane);
+    buffer_t input_buffer(input);
     frame_t input_frame;
     output_t encoded_output;
-    mpp_frame_set_width(input_frame.value, state_->settings.input_format->width);
-    mpp_frame_set_height(input_frame.value, state_->settings.input_format->height);
+    mpp_frame_set_width(input_frame.value, input.layout.visible_width);
+    mpp_frame_set_height(input_frame.value, input.layout.visible_height);
     mpp_frame_set_hor_stride(input_frame.value, state_->horizontal_stride);
-    if (state_->settings.input_format->mpp_format == MPP_FMT_BGR888 || state_->settings.input_format->mpp_format == MPP_FMT_RGB888) {
+    if (input.layout.format == MPP_FMT_BGR888 || input.layout.format == MPP_FMT_RGB888) {
       mpp_frame_set_hor_stride_pixel(input_frame.value, state_->horizontal_stride / 3U);
     }
     mpp_frame_set_ver_stride(input_frame.value, state_->vertical_stride);
-    mpp_frame_set_fmt(input_frame.value, state_->settings.input_format->mpp_format);
-    mpp_frame_set_pts(input_frame.value, captured.timestamp().time_since_epoch().count());
-    mpp_frame_set_buf_size(input_frame.value, plane.allocation_size);
+    mpp_frame_set_fmt(input_frame.value, input.layout.format);
+    mpp_frame_set_pts(input_frame.value, input.pts);
+    mpp_frame_set_buf_size(input_frame.value, static_cast<std::size_t>(input.allocation_size));
     mpp_frame_set_buffer(input_frame.value, input_buffer.value);
     check(mpp_meta_set_packet(mpp_frame_get_meta(input_frame.value), KEY_OUTPUT_PACKET, encoded_output.packet), "mpp_meta_set_packet(KEY_OUTPUT_PACKET)");
     if (!state_->stats.frames) check(state_->api->control(state_->context, MPP_ENC_SET_IDR_FRAME, nullptr), "MPP_ENC_SET_IDR_FRAME");
@@ -284,7 +373,7 @@ encoded_packet_t encoder_t::encode_packet(hdmirx::captured_frame_t &captured) {
       state_->stats.bytes += length;
       if (state_->stats.min_packet_bytes == 0 || length < state_->stats.min_packet_bytes) state_->stats.min_packet_bytes = static_cast<std::uint32_t>(length);
       if (length > state_->stats.max_packet_bytes) state_->stats.max_packet_bytes = static_cast<std::uint32_t>(length);
-      captured.release();  // MPP has consumed the DMA-BUF before the packet reaches the network thread.
+      holder.reset();  // MPP has synchronously consumed the DMA-BUF before the packet reaches the network thread.
       ++state_->stats.frames;
       return encoded_packet_t(std::move(state));
     }
@@ -294,8 +383,8 @@ encoded_packet_t encoder_t::encode_packet(hdmirx::captured_frame_t &captured) {
   }
 }
 
-void encoder_t::encode(hdmirx::captured_frame_t &captured, std::ostream &output) {
-  auto packet = encode_packet(captured);
+void encoder_t::encode(const input_frame_t &input, std::ostream &output) {
+  auto packet = encode_packet(input);
   output.write(static_cast<const char *>(static_cast<const void *>(packet.data())), static_cast<std::streamsize>(packet.size()));
   if (!output) throw std::runtime_error("failed to write RKMPP bitstream");
 }
@@ -305,11 +394,11 @@ void encoder_t::request_idr() {
   check(state_->api->control(state_->context, MPP_ENC_SET_IDR_FRAME, nullptr), "MPP_ENC_SET_IDR_FRAME");
 }
 
-std::vector<std::uint8_t> encoder_t::encode_to_vector(hdmirx::captured_frame_t &captured) {
+std::vector<std::uint8_t> encoder_t::encode_to_vector(const input_frame_t &input) {
   // Stage 4 deliberately uses a temporary byte vector. Stage 5 owns the
   // MppPacket-to-network zero-copy handoff.
   std::ostringstream output(std::ios::out | std::ios::binary);
-  encode(captured, output);
+  encode(input, output);
   const auto bytes = output.str();
   return {bytes.begin(), bytes.end()};
 }

@@ -116,3 +116,44 @@ DISPLAY=:99 ./start-sunshine.sh     # 捕获 Xvfb :99 虚拟桌面
 ~~~
 
 Web UI 默认监听 https://<Rock-IP-or-hostname>:47990。脚本不会启动 Xvfb 或 HDMI 预览；这两者需按 RKMPP 运行场景单独启动。
+
+## RGA 视频缩放与格式转换
+目前已接入 Rockchip 2D 图形加速器 (RGA) 支持。当 Moonlight 请求的分辨率与 HDMI RX 实际接收的分辨率不一致时，Sunshine 会自动使用 RGA 对图像进行缩放与裁剪 (信箱模式或居中裁剪)，并在发送给 MPP 编码器前完成 NV12 格式转换。对于相同尺寸的请求，系统依然使用零拷贝直通路径以保证最低延迟。在等待 EDID 协商或短暂无信号期间，屏幕将显示一个绿色的占位帧以防串流断开。
+
+## EDID 协商 (可选支持)
+若 HDMI 输入设备支持自动解析，系统能够在新的 Moonlight 客户端连接时，修改系统的 EDID 倾向以请求符合所需分辨率及帧率。
+- 只有成功写入 EDID 并且设备服从新的分辨率后，才使用硬件零拷贝路径。
+- 如果上游设备不服从 EDID 或不支持此能力，Sunshine 会记录日志并自动回退到 RGA 转换模式。
+- 会话结束后，原有的 EDID 将被自动恢复。
+
+## 日志检查与性能耗时
+可以通过设置 Trace/Debug 级别的日志以获取每帧的详细 RGA、MPP 以及捕获发送 (capture-to-send) 延迟信息。
+- **RGA timings**: 包含 , ,  的微秒级耗时。
+- **MPP encode latency**: MPP 硬件编码的消耗时间。
+- **RKMPP capture-to-send latency**: 帧从 HDMI RX 被捕获，到完成打包准备发送之间的总体端到端延迟。
+
+## 故障排查 (Troubleshooting)
+- **卡在绿屏**: 表明未成功锁定到有效的 HDMI 视频时序或处于无信号状态。检查 HDMI 连接或尝试拔插。
+- **RGA conversion failed**: 检查是否有不支持的格式被传递给 RGA，或者申请了超大的缩放比。日志中将输出具体的 RGA I (输入) 和 T (目标) 尺寸。
+- **资源泄漏 (Fd/Handle单调增加)**: 正常情况下拔插和变更分辨率不应引发 FD 增长。如果在长时间连续测试后观察到问题，请通过  数量并带上复现步骤提交 Issue。
+
+
+## RGA 视频缩放与格式转换
+目前已接入 Rockchip 2D 图形加速器 (RGA) 支持。当 Moonlight 请求的分辨率与 HDMI RX 实际接收的分辨率不一致时，Sunshine 会自动使用 RGA 对图像进行缩放与裁剪 (信箱模式或居中裁剪)，并在发送给 MPP 编码器前完成 NV12 格式转换。对于相同尺寸的请求，系统依然使用零拷贝直通路径以保证最低延迟。在等待 EDID 协商或短暂无信号期间，屏幕将显示一个绿色的占位帧以防串流断开。
+
+## EDID 协商 (可选支持)
+若 HDMI 输入设备支持自动解析，系统能够在新的 Moonlight 客户端连接时，修改系统的 EDID 倾向以请求符合所需分辨率及帧率。
+- 只有成功写入 EDID 并且设备服从新的分辨率后，才使用硬件零拷贝路径。
+- 如果上游设备不服从 EDID 或不支持此能力，Sunshine 会记录日志并自动回退到 RGA 转换模式。
+- 会话结束后，原有的 EDID 将被自动恢复。
+
+## 日志检查与性能耗时
+可以通过设置 Trace/Debug 级别的日志以获取每帧的详细 RGA、MPP 以及捕获发送 (capture-to-send) 延迟信息。
+- **RGA timings**: 包含 `setup`, `fill`, `process/resize` 的微秒级耗时。
+- **MPP encode latency**: MPP 硬件编码的消耗时间。
+- **RKMPP capture-to-send latency**: 帧从 HDMI RX 被捕获，到完成打包准备发送之间的总体端到端延迟。
+
+## 故障排查 (Troubleshooting)
+- **卡在绿屏**: 表明未成功锁定到有效的 HDMI 视频时序或处于无信号状态。检查 HDMI 连接或尝试拔插。
+- **RGA conversion failed**: 检查是否有不支持的格式被传递给 RGA，或者申请了超大的缩放比。日志中将输出具体的 RGA I (输入) 和 T (目标) 尺寸。
+- **资源泄漏 (Fd/Handle单调增加)**: 正常情况下拔插和变更分辨率不应引发 FD 增长。如果在长时间连续测试后观察到问题，请通过 `/proc/<pid>/fd` 数量并带上复现步骤提交 Issue。

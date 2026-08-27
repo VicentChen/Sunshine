@@ -1,18 +1,94 @@
 /** @file src/platform/linux/rkmpp.h */
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <ostream>
 #include <vector>
 
-namespace platf::hdmirx { class captured_frame_t; struct capture_format_t; }
+#include <mpp_frame.h>
 
 namespace platf::rkmpp {
+  /** @brief Video codec emitted by the RKMPP encoder. */
   enum class codec_e { h264, h265 };
+
+  /**
+   * @brief Describes the pixels MPP receives through one DMA-BUF.
+   *
+   * This is input-side metadata.  It deliberately does not describe the
+   * requested coded output size, which belongs to `encoder_config_t`.
+   */
+  struct input_layout_t {
+    std::uint32_t visible_width {};  ///< Visible input width in pixels.
+    std::uint32_t visible_height {};  ///< Visible input height in pixels.
+    std::uint32_t horizontal_stride {};  ///< Input row stride in bytes.
+    std::uint32_t vertical_stride {};  ///< Allocated luma rows represented by the DMA-BUF.
+    MppFrameFormat format {};  ///< MPP pixel format of the imported DMA-BUF.
+
+    friend constexpr bool operator==(const input_layout_t &, const input_layout_t &) = default;
+  };
+
+  /**
+   * @brief Owns the lifetime pin for a DMA-BUF frame submitted to MPP.
+   *
+   * The type is intentionally opaque: an HDMI RX capture frame, an RGA pool
+   * lease, or another producer may provide it.  `encoder_t::encode_packet()`
+   * copies this holder before it submits the frame and drops its copy only
+   * after synchronous MPP consumption completes.  The caller may therefore
+   * return or recycle the producer object immediately after that method
+   * returns, but never before.
+   */
+  using input_holder_t = std::shared_ptr<void>;
+
+  /**
+   * @brief A single DMA-BUF input frame submitted to RKMPP.
+   *
+   * `dma_buf_fd` is borrowed and is never closed by RKMPP.  `allocation_size`
+   * is the full allocation, not only populated bytes.  `holder` owns the
+   * producer lease that keeps the descriptor and pixels valid through the
+   * synchronous encode operation.
+   */
+  struct input_frame_t {
+    input_layout_t layout;  ///< Actual producer layout, which must match encoder input layout.
+    int dma_buf_fd {-1};  ///< Borrowed DMA-BUF file descriptor.
+    std::uint64_t allocation_size {};  ///< Complete DMA-BUF allocation in bytes.
+    std::int64_t pts {};  ///< Producer presentation timestamp passed to MPP unchanged.
+    input_holder_t holder;  ///< Lifetime pin for the borrowed DMA-BUF.
+  };
+
+  /** @brief Result of validating a generic RKMPP input layout or frame. */
+  enum class input_status_e {
+    ok,  ///< The input meets RKMPP's direct-DMA-BUF contract.
+    invalid_visible_size,  ///< Visible dimensions are outside the stage-1 policy limits.
+    unsupported_format,  ///< The MPP format has no supported single-buffer layout.
+    stride_too_small,  ///< Horizontal or vertical stride cannot cover visible pixels.
+    allocation_too_small,  ///< DMA-BUF allocation cannot cover the declared layout.
+    invalid_dma_buf,  ///< The borrowed descriptor is invalid.
+    missing_holder,  ///< No producer lifetime pin was supplied.
+    layout_mismatch,  ///< Frame layout differs from the encoder's configured input layout.
+    allocation_not_representable,  ///< Allocation cannot be passed losslessly to the local MPP ABI.
+  };
+
+  /** @brief Result of validating RKMPP encoder configuration. */
+  enum class encoder_config_status_e {
+    ok,  ///< The encoder can be created without conversion.
+    invalid_input,  ///< The configured input layout is invalid.
+    invalid_coded_size,  ///< The requested coded output size is invalid.
+    converter_required,  ///< Input and coded dimensions differ; stage 4 must supply a converted frame.
+    invalid_rate_control,  ///< Frame rate, bitrate, or GOP is invalid.
+    invalid_codec,  ///< Codec enum is not H.264 or H.265.
+  };
+
   namespace detail {
-    /** Derive MPP's vertical stride from a single-plane V4L2 allocation. */
-    std::uint32_t derive_vertical_stride(const hdmirx::capture_format_t &format);
+    /**
+     * @brief Return the minimum allocation for an input layout, or zero when invalid.
+     *
+     * @param layout Layout whose format-specific plane extent is calculated.
+     * @return Required allocation in bytes, or zero when it is unrepresentable.
+     */
+    std::uint64_t minimum_allocation_size(const input_layout_t &layout) noexcept;
     /** A non-partition packet is complete; partitions end only at EOI. */
     bool is_access_unit_complete(bool partition, bool eoi) noexcept;
     /**
@@ -21,21 +97,70 @@ namespace platf::rkmpp {
      */
     bool annexb_first_vcl_is_idr(const std::vector<std::uint8_t> &bytes, codec_e codec, bool require_parameter_sets) noexcept;
     bool annexb_first_vcl_is_idr(const std::uint8_t *bytes, std::size_t size, codec_e codec, bool require_parameter_sets) noexcept;
-  }
+  }  // namespace detail
+  /**
+   * @brief Derive a generic layout from one producer's single-plane extent.
+   *
+   * The helper validates format-specific plane ratios and chroma alignment
+   * without knowing whether the producer is HDMI RX, RGA, or another DMA-BUF
+   * source. `plane_extent` is the populated format extent, normally V4L2
+   * `sizeimage`, rather than the complete allocation.
+   *
+   * @param visible_width Visible width in pixels.
+   * @param visible_height Visible height in pixels.
+   * @param format MPP format of the producer plane.
+   * @param horizontal_stride Producer byte stride.
+   * @param plane_extent Bytes occupied by all planes in the single DMA-BUF.
+   * @return Layout with derived vertical stride, or `std::nullopt` when invalid.
+   */
+  std::optional<input_layout_t> make_input_layout_from_plane(std::uint32_t visible_width, std::uint32_t visible_height, MppFrameFormat format, std::uint32_t horizontal_stride, std::uint64_t plane_extent) noexcept;
+  /**
+   * @brief Validate generic input layout metadata before creating an encoder.
+   *
+   * @param layout Input layout to validate.
+   * @return Status explaining whether MPP can import this single DMA-BUF layout.
+   */
+  input_status_e validate_input_layout(const input_layout_t &layout) noexcept;
+  /**
+   * @brief Validate a producer frame against the layout configured for an encoder.
+   *
+   * @param frame Producer frame with DMA-BUF lifetime pin.
+   * @param expected_layout Layout configured when the encoder was created.
+   * @return Status explaining whether MPP may consume the frame.
+   */
+  input_status_e validate_input_frame(const input_frame_t &frame, const input_layout_t &expected_layout) noexcept;
+  /**
+   * @brief Validate that direct input can produce the requested coded size in this stage.
+   *
+   * @param config Encoder configuration to validate.
+   * @return `converter_required` when input I and coded T differ.
+   */
+  encoder_config_status_e validate_encoder_config(const struct encoder_config_t &config) noexcept;
+  /**
+   * @brief Cumulative statistics for one RKMPP encoder instance.
+   */
   struct encoder_stats_t {
-    std::uint64_t frames {};
-    std::uint64_t packets {};
-    std::uint64_t bytes {};
-    std::uint32_t min_packet_bytes {};
-    std::uint32_t max_packet_bytes {};
+    std::uint64_t frames {};  ///< Number of input frames consumed by MPP.
+    std::uint64_t packets {};  ///< Number of complete coded access units produced.
+    std::uint64_t bytes {};  ///< Total coded bytes retained by output packets.
+    std::uint32_t min_packet_bytes {};  ///< Smallest complete coded packet, or zero before output.
+    std::uint32_t max_packet_bytes {};  ///< Largest complete coded packet, or zero before output.
   };
+  /**
+   * @brief Immutable RKMPP encoder setup for one stream.
+   *
+   * Input layout I and coded output T are separate fields. Until stage 4
+   * connects RGA, their dimensions must be equal for direct input.
+   */
   struct encoder_config_t {
-    codec_e codec {};
-    const hdmirx::capture_format_t *input_format {};
-    std::uint32_t fps_num {60};
-    std::uint32_t fps_den {1};
-    std::uint32_t bitrate {12'000'000};
-    std::uint32_t gop {60};
+    codec_e codec {};  ///< Requested H.264 or H.265 output codec.
+    input_layout_t input_layout;  ///< Exact direct or converted input layout accepted by MPP.
+    std::uint32_t coded_width {};  ///< Moonlight-requested coded output width T.
+    std::uint32_t coded_height {};  ///< Moonlight-requested coded output height T.
+    std::uint32_t fps_num {60};  ///< Input and output frame-rate numerator.
+    std::uint32_t fps_den {1};  ///< Input and output frame-rate denominator.
+    std::uint32_t bitrate {12'000'000};  ///< Target CBR bitrate in bits per second.
+    std::uint32_t gop {60};  ///< GOP length in frames.
   };
   /**
    * Owns the MPP output allocation until Sunshine's network consumer drops the
@@ -64,15 +189,40 @@ namespace platf::rkmpp {
   };
   class encoder_t {
   public:
+    /**
+     * @brief Create an encoder using a validated direct or converted layout.
+     *
+     * @param config Input layout, coded size, and rate-control configuration.
+     * @return Newly initialized RKMPP encoder.
+     * @throws std::runtime_error When a converter is required in this stage.
+     */
     static encoder_t create(const encoder_config_t &config);
     encoder_t(); encoder_t(const encoder_t &) = delete; encoder_t &operator=(const encoder_t &) = delete;
     encoder_t(encoder_t &&) noexcept; encoder_t &operator=(encoder_t &&) noexcept; ~encoder_t();
-    void encode(hdmirx::captured_frame_t &frame, std::ostream &output);
-    std::vector<std::uint8_t> encode_to_vector(hdmirx::captured_frame_t &frame);
+    /**
+     * @brief Synchronously encode one pinned DMA-BUF frame into a stream.
+     *
+     * @param frame Input frame whose holder remains pinned through MPP consumption.
+     * @param output Destination stream that receives a temporary byte copy.
+     */
+    void encode(const input_frame_t &frame, std::ostream &output);
+    /**
+     * @brief Synchronously encode one pinned DMA-BUF frame into a byte vector.
+     *
+     * @param frame Input frame whose holder remains pinned through MPP consumption.
+     * @return Encoded bytes copied from the zero-copy MPP output packet.
+     */
+    std::vector<std::uint8_t> encode_to_vector(const input_frame_t &frame);
     void request_idr();
     std::uint64_t encoded_frames() const noexcept;
     encoder_stats_t stats() const noexcept;
-    encoded_packet_t encode_packet(hdmirx::captured_frame_t &frame);
+    /**
+     * @brief Synchronously encode one pinned DMA-BUF without copying its packet payload.
+     *
+     * @param frame Input frame whose holder remains pinned through MPP consumption.
+     * @return Move-only packet that keeps MPP-owned coded bytes alive for networking.
+     */
+    encoded_packet_t encode_packet(const input_frame_t &frame);
   private:
     struct state_t; explicit encoder_t(std::unique_ptr<state_t> state) noexcept; std::unique_ptr<state_t> state_;
   };

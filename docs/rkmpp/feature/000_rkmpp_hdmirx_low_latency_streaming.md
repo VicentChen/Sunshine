@@ -37,7 +37,7 @@ HDMI 信号源
 - HDMI RX 音频采集。
 - CPU 颜色转换。
 - RGA 格式转换或缩放。
-- 任意输出分辨率缩放。编码图像尺寸跟随 RX active timings。
+- 任意输出分辨率缩放 (已通过 RGA 实现)。
 - HDR / 10-bit 输出能力宣告。
 - 新增 Web UI 配置项。
 - 修改 Sunshine 现有网络发送协议。

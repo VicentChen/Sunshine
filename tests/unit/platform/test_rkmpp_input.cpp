@@ -1,0 +1,199 @@
+/**
+ * @file tests/unit/platform/test_rkmpp_input.cpp
+ * @brief Unit tests for RKMPP's generic DMA-BUF input contract.
+ */
+#ifdef SUNSHINE_BUILD_RKMPP
+
+  #include <limits>
+  #include <utility>
+
+  #include <gtest/gtest.h>
+
+  #include <src/platform/linux/rkmpp.h>
+
+namespace {
+  /**
+   * @brief Build a valid 1080p NV12 input layout.
+   *
+   * @return Generic direct-DMA-BUF layout.
+   */
+  platf::rkmpp::input_layout_t nv12_layout() {
+    return {1920, 1080, 1920, 1080, MPP_FMT_YUV420SP};
+  }
+
+  /**
+   * @brief Build a validated generic frame with a test DMA-BUF descriptor.
+   *
+   * @param layout Producer layout to attach to the frame.
+   * @param holder Producer lifetime pin to attach to the frame.
+   * @return Input frame suitable for metadata validation.
+   */
+  platf::rkmpp::input_frame_t input_frame(platf::rkmpp::input_layout_t layout, platf::rkmpp::input_holder_t holder) {
+    return {layout, 42, platf::rkmpp::detail::minimum_allocation_size(layout), 1234, std::move(holder)};
+  }
+
+  TEST(RkmppInputLayout, ValidatesDirectAndConvertedLayoutsIndependentlyFromCodedSize) {
+    const auto direct = nv12_layout();
+    const platf::rkmpp::input_layout_t converted {1280, 720, 1280, 720, MPP_FMT_YUV420SP};
+    EXPECT_EQ(platf::rkmpp::validate_input_layout(direct), platf::rkmpp::input_status_e::ok);
+    EXPECT_EQ(platf::rkmpp::validate_input_layout(converted), platf::rkmpp::input_status_e::ok);
+
+    const platf::rkmpp::encoder_config_t direct_config {platf::rkmpp::codec_e::h264, direct, 1920, 1080};
+    const platf::rkmpp::encoder_config_t converted_config {platf::rkmpp::codec_e::h265, converted, 1280, 720};
+    EXPECT_EQ(platf::rkmpp::validate_encoder_config(direct_config), platf::rkmpp::encoder_config_status_e::ok);
+    EXPECT_EQ(platf::rkmpp::validate_encoder_config(converted_config), platf::rkmpp::encoder_config_status_e::ok);
+    EXPECT_EQ(direct_config.coded_width, 1920U);
+    EXPECT_EQ(converted_config.coded_width, 1280U);
+  }
+
+  TEST(RkmppInputLayout, RejectsLayoutsThatCannotCoverVisiblePixels) {
+    auto layout = nv12_layout();
+    layout.horizontal_stride = 1919;
+    EXPECT_EQ(platf::rkmpp::validate_input_layout(layout), platf::rkmpp::input_status_e::stride_too_small);
+
+    layout = nv12_layout();
+    layout.vertical_stride = 1079;
+    EXPECT_EQ(platf::rkmpp::validate_input_layout(layout), platf::rkmpp::input_status_e::stride_too_small);
+  }
+
+  TEST(RkmppInputLayout, EnforcesFormatSpecificChromaAndPackedAlignment) {
+    auto layout = nv12_layout();
+    layout.visible_width = 1919;
+    EXPECT_EQ(platf::rkmpp::validate_input_layout(layout), platf::rkmpp::input_status_e::stride_too_small);
+
+    layout = nv12_layout();
+    layout.visible_height = 1079;
+    EXPECT_EQ(platf::rkmpp::validate_input_layout(layout), platf::rkmpp::input_status_e::stride_too_small);
+
+    layout = nv12_layout();
+    ++layout.horizontal_stride;
+    EXPECT_EQ(platf::rkmpp::validate_input_layout(layout), platf::rkmpp::input_status_e::stride_too_small);
+
+    layout = nv12_layout();
+    ++layout.vertical_stride;
+    EXPECT_EQ(platf::rkmpp::validate_input_layout(layout), platf::rkmpp::input_status_e::stride_too_small);
+
+    const platf::rkmpp::input_layout_t nv16 {1921, 1080, 1921, 1080, MPP_FMT_YUV422SP};
+    EXPECT_EQ(platf::rkmpp::validate_input_layout(nv16), platf::rkmpp::input_status_e::stride_too_small);
+
+    const platf::rkmpp::input_layout_t bgr {1920, 1080, 5761, 1080, MPP_FMT_BGR888};
+    EXPECT_EQ(platf::rkmpp::detail::minimum_allocation_size(bgr), 0U);
+    EXPECT_EQ(platf::rkmpp::validate_input_layout(bgr), platf::rkmpp::input_status_e::stride_too_small);
+  }
+
+  TEST(RkmppInputLayout, DerivesProducerPlaneLayoutsWithoutTruncatingPlaneRatios) {
+    const auto bgr = platf::rkmpp::make_input_layout_from_plane(1920, 1080, MPP_FMT_BGR888, 5760, 5'760U * 1'080U);
+    const auto nv12 = platf::rkmpp::make_input_layout_from_plane(1920, 1080, MPP_FMT_YUV420SP, 1920, 1'920U * 1'620U);
+    const auto nv16 = platf::rkmpp::make_input_layout_from_plane(1920, 1080, MPP_FMT_YUV422SP, 1920, 1'920U * 2'160U);
+    const auto nv24 = platf::rkmpp::make_input_layout_from_plane(1920, 1080, MPP_FMT_YUV444SP, 1920, 1'920U * 3'240U);
+    ASSERT_TRUE(bgr.has_value());
+    ASSERT_TRUE(nv12.has_value());
+    ASSERT_TRUE(nv16.has_value());
+    ASSERT_TRUE(nv24.has_value());
+    EXPECT_EQ(bgr->vertical_stride, 1080U);
+    EXPECT_EQ(nv12->vertical_stride, 1080U);
+    EXPECT_EQ(nv16->vertical_stride, 1080U);
+    EXPECT_EQ(nv24->vertical_stride, 1080U);
+
+    EXPECT_FALSE(platf::rkmpp::make_input_layout_from_plane(1920, 1080, MPP_FMT_BGR888, 5759, 5759U * 1080U));
+    EXPECT_FALSE(platf::rkmpp::make_input_layout_from_plane(1920, 1080, MPP_FMT_YUV420SP, 1920, 1'920U * 1'620U - 1U));
+    EXPECT_FALSE(platf::rkmpp::make_input_layout_from_plane(1920, 1080, MPP_FMT_YUV422SP, 1920, 1'920U * 2'160U - 1'920U));
+    EXPECT_FALSE(platf::rkmpp::make_input_layout_from_plane(1920, 1080, MPP_FMT_YUV444SP, 1920, 1'920U * 3'240U - 1'920U));
+  }
+
+  TEST(RkmppInputLayout, RejectsUnsupportedFormatAndUndersizedAllocation) {
+    auto layout = nv12_layout();
+    layout.format = MPP_FMT_YUV420P;
+    EXPECT_EQ(platf::rkmpp::validate_input_layout(layout), platf::rkmpp::input_status_e::unsupported_format);
+
+    const auto valid_layout = nv12_layout();
+    auto frame = input_frame(valid_layout, std::make_shared<int>(1));
+    --frame.allocation_size;
+    EXPECT_EQ(platf::rkmpp::validate_input_frame(frame, valid_layout), platf::rkmpp::input_status_e::allocation_too_small);
+  }
+
+  TEST(RkmppInputFrame, RejectsMissingLifetimePinBadDescriptorAndLayoutMismatch) {
+    const auto layout = nv12_layout();
+    auto frame = input_frame(layout, {});
+    EXPECT_EQ(platf::rkmpp::validate_input_frame(frame, layout), platf::rkmpp::input_status_e::missing_holder);
+
+    frame = input_frame(layout, std::make_shared<int>(1));
+    frame.dma_buf_fd = -1;
+    EXPECT_EQ(platf::rkmpp::validate_input_frame(frame, layout), platf::rkmpp::input_status_e::invalid_dma_buf);
+
+    frame = input_frame(layout, std::make_shared<int>(1));
+    frame.layout.visible_width = 1280;
+    EXPECT_EQ(platf::rkmpp::validate_input_frame(frame, layout), platf::rkmpp::input_status_e::layout_mismatch);
+
+    frame = input_frame(layout, std::make_shared<int>(1));
+    frame.layout = *platf::rkmpp::make_input_layout_from_plane(1920, 1080, MPP_FMT_YUV420SP, 1984, 1984U * 1620U);
+    EXPECT_EQ(platf::rkmpp::validate_input_frame(frame, layout), platf::rkmpp::input_status_e::layout_mismatch);
+  }
+
+  TEST(RkmppInputFrame, PreservesLargeAllocationMetadataUntilMppAbiValidation) {
+    const auto layout = nv12_layout();
+    auto frame = input_frame(layout, std::make_shared<int>(1));
+    frame.allocation_size = std::uint64_t {1} << 32U;
+    if constexpr (sizeof(std::size_t) >= sizeof(std::uint64_t)) {
+      EXPECT_EQ(platf::rkmpp::validate_input_frame(frame, layout), platf::rkmpp::input_status_e::ok);
+    } else {
+      EXPECT_EQ(platf::rkmpp::validate_input_frame(frame, layout), platf::rkmpp::input_status_e::allocation_not_representable);
+    }
+  }
+
+  TEST(RkmppInputLayout, ReportsConverterRequiredWithoutCreatingWrongEncoderConfiguration) {
+    const auto input = nv12_layout();
+    const platf::rkmpp::encoder_config_t mismatch {platf::rkmpp::codec_e::h264, input, 1280, 720};
+    EXPECT_EQ(platf::rkmpp::validate_encoder_config(mismatch), platf::rkmpp::encoder_config_status_e::converter_required);
+  }
+
+  TEST(RkmppEncoderConfig, RejectsEveryInvalidConfigurationStatus) {
+    const auto input = nv12_layout();
+    auto config = platf::rkmpp::encoder_config_t {platf::rkmpp::codec_e::h264, input, 1920, 1080};
+
+    config.codec = static_cast<platf::rkmpp::codec_e>(99);
+    EXPECT_EQ(platf::rkmpp::validate_encoder_config(config), platf::rkmpp::encoder_config_status_e::invalid_codec);
+
+    config = {platf::rkmpp::codec_e::h264, input, 1920, 1080};
+    config.input_layout.horizontal_stride = 1919;
+    EXPECT_EQ(platf::rkmpp::validate_encoder_config(config), platf::rkmpp::encoder_config_status_e::invalid_input);
+
+    for (const auto &coded_size : {std::pair {0U, 1080U}, std::pair {1921U, 1080U}, std::pair {1920U, 1079U}, std::pair {32'770U, 1080U}}) {
+      config = {platf::rkmpp::codec_e::h264, input, coded_size.first, coded_size.second};
+      EXPECT_EQ(platf::rkmpp::validate_encoder_config(config), platf::rkmpp::encoder_config_status_e::invalid_coded_size);
+    }
+
+    config = {platf::rkmpp::codec_e::h264, input, 1920, 1080};
+    config.fps_num = 0;
+    EXPECT_EQ(platf::rkmpp::validate_encoder_config(config), platf::rkmpp::encoder_config_status_e::invalid_rate_control);
+    config.fps_num = 60;
+    config.fps_den = 0;
+    EXPECT_EQ(platf::rkmpp::validate_encoder_config(config), platf::rkmpp::encoder_config_status_e::invalid_rate_control);
+    config.fps_den = 1;
+    config.gop = 0;
+    EXPECT_EQ(platf::rkmpp::validate_encoder_config(config), platf::rkmpp::encoder_config_status_e::invalid_rate_control);
+    config.gop = 60;
+    config.bitrate = 0;
+    EXPECT_EQ(platf::rkmpp::validate_encoder_config(config), platf::rkmpp::encoder_config_status_e::invalid_rate_control);
+    config.bitrate = std::numeric_limits<std::uint32_t>::max();
+    EXPECT_EQ(platf::rkmpp::validate_encoder_config(config), platf::rkmpp::encoder_config_status_e::invalid_rate_control);
+  }
+
+  TEST(RkmppInputFrame, HolderKeepsProducerAliveUntilSynchronousConsumerDropsItsCopy) {
+    bool destroyed = false;
+    auto holder = platf::rkmpp::input_holder_t(new int(1), [&destroyed](void *value) {
+      delete static_cast<int *>(value);
+      destroyed = true;
+    });
+    const auto layout = nv12_layout();
+    auto frame = input_frame(layout, holder);
+    auto synchronous_consumer = frame.holder;
+    frame.holder.reset();
+    holder.reset();
+    EXPECT_FALSE(destroyed);
+    synchronous_consumer.reset();
+    EXPECT_TRUE(destroyed);
+  }
+}  // namespace
+
+#endif

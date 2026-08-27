@@ -647,7 +647,16 @@ namespace platf {
    * @brief Enumerates supported capture options.
    */
   struct rkmpp_encode_device_t: encode_device_t {
-    virtual const void *input_format() const = 0;
+    /**
+     * @brief Return the backend-owned RKMPP generic input-layout descriptor.
+     *
+     * The returned object remains valid for the encode-device lifetime.  It is
+     * type-erased here to keep common platform interfaces independent of MPP.
+     * RKMPP callers cast it to `rkmpp::input_layout_t`.
+     *
+     * @return Borrowed pointer to the generic RKMPP input-layout descriptor.
+     */
+    virtual const void *input_layout() const = 0;
   };
 
   enum class capture_e : int {

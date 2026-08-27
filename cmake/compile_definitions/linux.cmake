@@ -86,19 +86,29 @@ endif()
 set(_RKMPP_PLATFORM_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/hdmirx.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/hdmirx.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/edid.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/edid.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/input_state_machine.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/input_state_machine.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/rkmpp.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/rkmpp.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/rkmpp_annexb.cpp")
+set(_RGA_PLATFORM_FILES
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/rga.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/rga.cpp")
 
 # CMake can retain target link properties between reconfiguration runs, while
 # the current platform lists are rebuilt. Remove this feature's prior target
 # edge before appending the result of the current detection.
 list(REMOVE_ITEM PLATFORM_LIBRARIES RockchipMPP::rockchip_mpp)
+list(REMOVE_ITEM PLATFORM_LIBRARIES LibRGA::librga)
 list(REMOVE_ITEM PLATFORM_TARGET_FILES ${_RKMPP_PLATFORM_FILES})
+list(REMOVE_ITEM PLATFORM_TARGET_FILES ${_RGA_PLATFORM_FILES})
 foreach(_RKMPP_TARGET sunshine test_sunshine)
     if(TARGET ${_RKMPP_TARGET})
         get_property(_RKMPP_TARGET_LINK_LIBRARIES TARGET ${_RKMPP_TARGET} PROPERTY LINK_LIBRARIES)
         list(REMOVE_ITEM _RKMPP_TARGET_LINK_LIBRARIES RockchipMPP::rockchip_mpp)
+        list(REMOVE_ITEM _RKMPP_TARGET_LINK_LIBRARIES LibRGA::librga)
         set_property(TARGET ${_RKMPP_TARGET} PROPERTY LINK_LIBRARIES "${_RKMPP_TARGET_LINK_LIBRARIES}")
     endif()
 endforeach()
@@ -119,7 +129,28 @@ if(RKMPP_FOUND)
     list(APPEND PLATFORM_LIBRARIES RockchipMPP::rockchip_mpp)
     list(APPEND PLATFORM_TARGET_FILES ${_RKMPP_PLATFORM_FILES})
 endif()
+
+# librga is optional even when RKMPP is available.  The wrapper source remains
+# available on Linux for its disabled-path tests, while this macro and link
+# edge appear only after headers, library, and the exact im2d calls compile.
+set(RGA_FOUND OFF)
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _SUNSHINE_SYSTEM_PROCESSOR)
+if(SUNSHINE_ENABLE_RGA AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND _SUNSHINE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+    find_package(LibRGA QUIET)
+    if(LibRGA_FOUND)
+        set(RGA_FOUND ON)
+    else()
+        message(STATUS "librga is disabled: headers, library, or required im2d API (DMA-BUF import, imcheck, fill, resize, color conversion) were not found")
+    endif()
+endif()
+unset(_SUNSHINE_SYSTEM_PROCESSOR)
+list(APPEND PLATFORM_TARGET_FILES ${_RGA_PLATFORM_FILES})
+if(RGA_FOUND)
+    add_compile_definitions(SUNSHINE_BUILD_RGA)
+    list(APPEND PLATFORM_LIBRARIES LibRGA::librga)
+endif()
 unset(_RKMPP_PLATFORM_FILES)
+unset(_RGA_PLATFORM_FILES)
 unset(_RKMPP_TARGET)
 unset(_RKMPP_TARGET_LINK_LIBRARIES)
 

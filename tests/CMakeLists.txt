@@ -30,8 +30,8 @@ if(SUNSHINE_LLVM_COVERAGE)
     add_compile_options(-fprofile-instr-generate -fcoverage-mapping -ggdb -O0)
     add_link_options(-fprofile-instr-generate)
 else()
-    set(CMAKE_CXX_FLAGS "-fprofile-arcs -ftest-coverage -ggdb -O0")
-    set(CMAKE_C_FLAGS "-fprofile-arcs -ftest-coverage -ggdb -O0")
+    string(APPEND CMAKE_CXX_FLAGS " -fprofile-arcs -ftest-coverage -ggdb -O0")
+    string(APPEND CMAKE_C_FLAGS " -fprofile-arcs -ftest-coverage -ggdb -O0")
 endif()
 
 # Find the correct libgcov library path matching the gcc compiler version
@@ -178,11 +178,23 @@ list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/rkmpp_rkmpp_layout_test.
 # generic test target by the recursive source glob. Its dedicated executable
 # is created only when the current configure pass enabled RKMPP below.
 list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/rkmpp_rkmpp_annexb_test.cpp)
+# The RGA hardware smoke has its own main() and is built only after CMake has
+# compiled the required im2d API probe.
+list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/rkmpp_rga_smoke.cpp)
 # These sources depend on RKMPP headers and are excluded entirely when support
 # is disabled; the ON build supplies them through the platform source list and
 # the dedicated layout target below.
 if(NOT RKMPP_FOUND)
     list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_hdmirx.cpp)
+    list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_edid.cpp)
+    list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_edid_negotiator.cpp)
+    list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_rkmpp_input.cpp)
+    list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_input_state_machine.cpp)
+    list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_rkmpp_stress.cpp)
+endif()
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_rga.cpp)
+    list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_edid.cpp)
 endif()
 # Add macOS-specific test files only when building tests for macOS
 if (APPLE)
@@ -271,7 +283,8 @@ if(RKMPP_FOUND)
     add_executable(rkmpp_rkmpp_layout_test
         ${CMAKE_SOURCE_DIR}/tests/rkmpp_rkmpp_layout_test.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/rkmpp.cpp
-        ${CMAKE_SOURCE_DIR}/src/platform/linux/rkmpp_annexb.cpp)
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/rkmpp_annexb.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/hdmirx_policy.cpp)
     target_link_libraries(rkmpp_rkmpp_layout_test PRIVATE RockchipMPP::rockchip_mpp Boost::asio Boost::format Boost::log Boost::process)
     target_compile_definitions(rkmpp_rkmpp_layout_test PRIVATE SUNSHINE_BUILD_RKMPP)
     target_compile_options(rkmpp_rkmpp_layout_test PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
@@ -279,10 +292,22 @@ if(RKMPP_FOUND)
     add_executable(rkmpp_rkmpp_smoke
         ${CMAKE_SOURCE_DIR}/tests/rkmpp_rkmpp_smoke.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/hdmirx.cpp
-        ${CMAKE_SOURCE_DIR}/src/platform/linux/rkmpp.cpp)
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/rkmpp.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/edid.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/input_state_machine.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/hdmirx_policy.cpp)
     target_link_libraries(rkmpp_rkmpp_smoke PRIVATE RockchipMPP::rockchip_mpp Boost::asio Boost::format Boost::log Boost::process)
     target_compile_definitions(rkmpp_rkmpp_smoke PRIVATE SUNSHINE_BUILD_RKMPP)
     target_compile_options(rkmpp_rkmpp_smoke PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
+endif()
+
+if(RGA_FOUND)
+    add_executable(rkmpp_rga_smoke
+        ${CMAKE_SOURCE_DIR}/tests/rkmpp_rga_smoke.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/rga.cpp)
+    target_link_libraries(rkmpp_rga_smoke PRIVATE LibRGA::librga)
+    target_compile_definitions(rkmpp_rga_smoke PRIVATE SUNSHINE_BUILD_RGA)
+    target_compile_options(rkmpp_rga_smoke PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
 endif()
 
 target_link_libraries(${PROJECT_NAME} ${TEST_LINK_LIBRARIES})
@@ -295,8 +320,12 @@ target_link_options(${PROJECT_NAME} PRIVATE ${SUNSHINE_LINK_OPTIONS})
 if(RKMPP_FOUND)
     add_executable(rkmpp_hdmirx_smoke
         ${CMAKE_SOURCE_DIR}/tests/rkmpp_hdmirx_smoke.cpp
-        ${CMAKE_SOURCE_DIR}/src/platform/linux/hdmirx.cpp)
-    target_link_libraries(rkmpp_hdmirx_smoke PRIVATE RockchipMPP::rockchip_mpp)
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/hdmirx.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/edid.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/input_state_machine.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/rkmpp.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/hdmirx_policy.cpp)
+    target_link_libraries(rkmpp_hdmirx_smoke PRIVATE RockchipMPP::rockchip_mpp Boost::asio Boost::format Boost::log Boost::process)
     target_compile_definitions(rkmpp_hdmirx_smoke PRIVATE SUNSHINE_BUILD_RKMPP)
     target_compile_options(rkmpp_hdmirx_smoke PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
 endif()

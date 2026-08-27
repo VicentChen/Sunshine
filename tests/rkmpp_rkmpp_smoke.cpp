@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits.h>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <unistd.h>
@@ -204,13 +205,10 @@ std::size_t run_session(const options_t &options, std::uint32_t session, std::st
     auto capture = platf::hdmirx::hdmirx_capture_t::open();
     const auto &format = capture.format();
     std::cout << "session=" << session << " input=" << format.width << 'x' << format.height << " fourcc=" << format.fourcc << " planes=" << format.planes.size() << " bpl=" << format.planes.front().bytesperline << " sizeimage=" << format.planes.front().sizeimage << '\n';
+    const auto input_layout = platf::rkmpp::make_input_layout_from_plane(format.width, format.height, format.mpp_format, format.planes.front().bytesperline, format.planes.front().sizeimage);
+    if (!input_layout.has_value()) throw std::runtime_error("HDMI RX format has no valid RKMPP direct layout");
     const platf::rkmpp::encoder_config_t config {
-      options.codec,
-      &format,
-      60,
-      1,
-      12'000'000,
-      60,
+      options.codec, *input_layout, format.width, format.height, 60, 1, 12'000'000, 60,
     };
     if (config.fps_num != 60 || config.fps_den != 1 || config.bitrate != 12'000'000 || config.gop != 60) {
       throw std::runtime_error("RKMPP smoke encoder configuration is not 60/1 fps, 12 Mbps, GOP 60");
@@ -220,9 +218,18 @@ std::size_t run_session(const options_t &options, std::uint32_t session, std::st
     auto encoder = platf::rkmpp::encoder_t::create(config);
     const auto live_baseline = fd_count();
     for (std::uint32_t frame_index = 0; frame_index < options.frames; ++frame_index) {
-      auto frame = capture.dequeue(std::chrono::seconds(2));
-      encoder.encode(frame, output);
-      if (!frame.released()) throw std::runtime_error("MPP returned without releasing V4L2 frame");
+      auto holder = std::make_shared<platf::hdmirx::captured_frame_t>(capture.dequeue(std::chrono::seconds(2)));
+      const auto &plane = holder->planes().front();
+      platf::rkmpp::input_frame_t input {
+        *input_layout,
+        plane.dma_buf_fd,
+        plane.allocation_size,
+        holder->timestamp().time_since_epoch().count(),
+        holder,
+      };
+      encoder.encode(input, output);
+      input.holder.reset();
+      holder.reset();
     }
     if (fd_count() != live_baseline) throw std::runtime_error("fd count changed while encoding");
     output.close();

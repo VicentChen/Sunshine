@@ -17,6 +17,12 @@ if pgrep -u "$(id -u)" -x sunshine >/dev/null; then
   exit 0
 fi
 
+# 检查是否缺少必要的 nice 和 admin 权限，如果缺少则提示输入密码并赋予权限
+if ! /sbin/getcap "$binary" 2>/dev/null | grep -q "cap_sys_nice"; then
+  printf "检测到 Sunshine 缺少提升线程优先级的权限，正在申请 sudo 权限进行修复...\n"
+  sudo /sbin/setcap cap_sys_admin,cap_sys_nice+p "$binary" || printf "权限赋予失败，Sunshine 可能仍会出现卡顿。\n" >&2
+fi
+
 mkdir -p "$config_dir"
 touch "$config_file"
 

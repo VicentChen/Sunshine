@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -63,6 +64,18 @@ namespace platf::hdmirx {
   /** Validate the format metadata returned by VIDIOC_G_FMT. */
   bool capture_format_is_valid(const capture_format_t &format) noexcept;
 
+  /**
+   * @brief A recoverable V4L2 source-change notification.
+   *
+   * This is deliberately distinct from malformed buffer metadata and device
+   * I/O failures. Callers must enter their placeholder/recovery policy rather
+   * than ending the Sunshine session.
+   */
+  class source_change_error_t final : public std::runtime_error {
+  public:
+    using std::runtime_error::runtime_error;
+  };
+
   namespace detail {
     struct capture_state_t;
   }
@@ -106,9 +119,24 @@ namespace platf::hdmirx {
     bool released_ {true};
   };
 
-  // A captured frame is held here until synchronous RKMPP encoding returns.
+  /**
+   * @brief HDMI RX image whose shared frame lease pins a dequeued DMA-BUF.
+   *
+   * RKMPP receives the same shared lease as its generic input-frame holder.
+   * The buffer is therefore requeued only after synchronous encode consumption.
+   */
   struct hdmirx_img_t final: img_t {
-    std::optional<captured_frame_t> frame;
+    std::shared_ptr<captured_frame_t> frame;
+    // Snapshot of the V4L2 layout that produced frame. A source-change
+    // recovery can reopen the receiver with a new width, stride or format;
+    // consumers must never infer those properties from the encoder setup.
+    std::optional<capture_format_t> capture_format;
+    // A state-machine placeholder. It deliberately carries no HDMI RX lease:
+    // the encoder must fill its own target-sized DMA-BUF through RGA.
+    bool placeholder {};
+    // Consumed by the RKMPP encode session to request an IDR for the first
+    // placeholder and the first recovered real frame.
+    bool request_idr {};
   };
 
   /**
@@ -130,8 +158,21 @@ namespace platf::hdmirx {
     ~hdmirx_capture_t();
 
     captured_frame_t dequeue(std::chrono::milliseconds timeout);
+
+    /**
+     * @brief Reopen the receiver after a source change once all leases return.
+     *
+     * The replacement performs fresh QUERY_DV_TIMINGS, G_FMT, MMAP queue and
+     * DMA-BUF export setup. Returns false while an old frame is still leased;
+     * callers should keep their placeholder policy active and retry later.
+     */
+    bool recover_after_source_change();
+
+    /** Re-query the receiver's actual DV timings without changing its queue. */
+    std::optional<v4l2_dv_timings> refresh_timings();
     /** Stop the stream; outstanding frames remain valid but will not QBUF. */
     void shutdown() noexcept;
+    int fd() const;
     const capture_format_t &format() const;
     const std::optional<v4l2_dv_timings> &timings() const;
     const device_info_t &device_info() const;

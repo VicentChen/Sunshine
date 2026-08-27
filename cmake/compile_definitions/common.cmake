@@ -63,6 +63,8 @@ endif()
 add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/libvirtualhid")
 list(APPEND SUNSHINE_EXTERNAL_LIBRARIES libvirtualhid::libvirtualhid)
 list(APPEND PLATFORM_TARGET_FILES
+        "${CMAKE_SOURCE_DIR}/src/platform/hdmirx_policy.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/hdmirx_policy.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/virtualhid_input.h"
         "${CMAKE_SOURCE_DIR}/src/platform/virtualhid_input.cpp")
 

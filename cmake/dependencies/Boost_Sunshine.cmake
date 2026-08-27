@@ -104,3 +104,13 @@ endif()
 
 message(STATUS "Boost include dirs: ${Boost_INCLUDE_DIRS}")
 message(STATUS "Boost libraries: ${Boost_LIBRARIES}")
+
+if(NOT TARGET Boost::boost)
+    if(TARGET Boost::headers)
+        add_library(Boost::boost INTERFACE IMPORTED)
+        target_link_libraries(Boost::boost INTERFACE Boost::headers)
+    else()
+        add_library(Boost::boost INTERFACE IMPORTED)
+        set_target_properties(Boost::boost PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${Boost_INCLUDE_DIRS}")
+    endif()
+endif()
