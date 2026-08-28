@@ -8,6 +8,10 @@
 // standard imports
 #include <filesystem>
 #include <fstream>
+#include <string_view>
+
+// lib imports
+#include <nlohmann/json.hpp>
 
 // local imports
 #include <src/process.h>
@@ -271,4 +275,52 @@ TEST_F(ProcessPNGTest, ValidateAppImagePath_OldSteamDefault) {
   // Test the special case for old steam image path
   const std::string result = proc::validate_app_image_path("./assets/steam.png");
   EXPECT_EQ(result, SUNSHINE_ASSETS_DIR "/steam.png");
+}
+
+TEST_F(ProcessPNGTest, LinuxDefaultAppsProvideConsoleAndDesktopModes) {
+  /**
+   * @brief Verify that the Linux default application list provides the console
+   *        and desktop streaming modes with valid cover art.
+   */
+  const fs::path apps_path = fs::path(SUNSHINE_SOURCE_DIR) / "src_assets/linux/assets/apps.json";
+  std::ifstream apps_file(apps_path);
+  ASSERT_TRUE(apps_file.is_open()) << apps_path;
+
+  const nlohmann::json apps_json = nlohmann::json::parse(apps_file);
+  ASSERT_TRUE(apps_json.contains("apps"));
+  ASSERT_TRUE(apps_json.at("apps").is_array());
+
+  const auto find_app = [&apps_json](const std::string_view name) -> const nlohmann::json * {
+    for (const auto &app : apps_json.at("apps")) {
+      if (app.value("name", "") == name) {
+        return &app;
+      }
+    }
+
+    return nullptr;
+  };
+
+  for (const std::string_view name : {"Nintendo Switch", "Xbox", "HDMI Input", "Desktop"}) {
+    const auto *app = find_app(name);
+    ASSERT_NE(app, nullptr) << name;
+    ASSERT_TRUE(app->contains("image-path"));
+
+    const fs::path cover_path = fs::path(SUNSHINE_SOURCE_DIR) / "src_assets/common/assets" / app->at("image-path").get<std::string>();
+    EXPECT_TRUE(proc::check_valid_png(cover_path)) << cover_path;
+    EXPECT_FALSE(app->contains("cmd")) << name;
+  }
+
+  for (const std::string_view name : {"Nintendo Switch", "Xbox"}) {
+    const auto *app = find_app(name);
+    ASSERT_NE(app, nullptr) << name;
+    ASSERT_TRUE(app->contains("prep-cmd"));
+    ASSERT_TRUE(app->at("prep-cmd").is_array());
+    ASSERT_EQ(app->at("prep-cmd").size(), 1U);
+    EXPECT_EQ(app->at("prep-cmd").at(0).value("do", "not-empty"), "");
+    EXPECT_EQ(app->at("prep-cmd").at(0).value("undo", "not-empty"), "");
+  }
+
+  const auto *desktop = find_app("Desktop");
+  ASSERT_NE(desktop, nullptr);
+  EXPECT_FALSE(desktop->contains("prep-cmd"));
 }

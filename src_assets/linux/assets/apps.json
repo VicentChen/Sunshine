@@ -4,31 +4,32 @@
   },
   "apps": [
     {
-      "name": "Desktop",
-      "image-path": "desktop.png"
-    },
-    {
-      "name": "Low Res Desktop",
-      "image-path": "desktop.png",
+      "name": "Nintendo Switch",
+      "image-path": "nintendo-switch.png",
       "prep-cmd": [
         {
-          "do": "xrandr --output HDMI-1 --mode 1920x1080",
-          "undo": "xrandr --output HDMI-1 --mode 1920x1200"
+          "do": "",
+          "undo": ""
         }
       ]
     },
     {
-      "name": "Steam Big Picture",
-      "detached": [
-        "setsid steam steam://open/bigpicture"
-      ],
+      "name": "Xbox",
+      "image-path": "xbox.png",
       "prep-cmd": [
         {
           "do": "",
-          "undo": "setsid steam steam://close/bigpicture"
+          "undo": ""
         }
-      ],
-      "image-path": "steam.png"
+      ]
+    },
+    {
+      "name": "HDMI Input",
+      "image-path": "hdmi-input.png"
+    },
+    {
+      "name": "Desktop",
+      "image-path": "desktop.png"
     }
   ]
 }
