@@ -165,6 +165,34 @@ namespace platf::edid {
       std::uint32_t start_block,
       std::uint32_t block_count,
       std::span<const std::uint8_t> data) = 0;
+
+    /**
+     * @brief Enable or disable an optional HDMI RX audio domain.
+     *
+     * Rockchip HDMI RX devices require this operation after their HDMI link
+     * has been configured.  Other V4L2 devices do not implement it and can
+     * safely report not_supported.
+     *
+     * @param enabled true to start HDMI audio detection and output.
+     * @return Success, or not_supported when the device has no audio control.
+     */
+    virtual edid_result_t<void> set_audio_enabled(bool enabled) {
+      (void) enabled;
+      return std::unexpected(edid_error_t{error_category_e::not_supported, ENOTTY, "HDMI audio control is not supported"});
+    }
+
+    /**
+     * @brief Request an optional HDMI RX link reset after an EDID update.
+     *
+     * Some HDMI RX drivers must reconfigure their link state after EDID data
+     * changes.  Devices without such a control can safely report
+     * not_supported.
+     *
+     * @return Success, or not_supported when the device has no reset control.
+     */
+    virtual edid_result_t<void> reset_hdmi_link() {
+      return std::unexpected(edid_error_t{error_category_e::not_supported, ENOTTY, "HDMI link reset is not supported"});
+    }
   };
 
   // -------------------------------------------------------------------------
@@ -279,6 +307,23 @@ namespace platf::edid {
     std::uint16_t h_blanking,
     std::uint16_t v_blanking,
     std::uint16_t pixel_clock_10khz) noexcept;
+
+  /**
+   * @brief Add a CTA-861 extension advertising HDMI stereo LPCM audio.
+   *
+   * The generated extension advertises a native CTA video mode, basic audio,
+   * two-channel LPCM, and HDMI vendor data. This lets HDMI sources such as
+   * Nintendo Switch identify the virtual receiver as HDMI and audio capable.
+   *
+   * @param base_edid A single valid 128-byte EDID base block.
+   * @param native_cta_vic CTA video identification code for the native mode,
+   * or zero to omit the CTA video data block.
+   * @return A two-block EDID, or an empty vector when the input is not a
+   * single valid base block.
+   */
+  std::vector<std::uint8_t> with_cta_lpcm_audio_extension(
+    std::span<const std::uint8_t> base_edid,
+    std::uint8_t native_cta_vic);
 
   /**
    * @brief Generate an EDID fixture for 720p (1280x720@60Hz).

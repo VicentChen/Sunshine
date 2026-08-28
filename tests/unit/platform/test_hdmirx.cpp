@@ -35,6 +35,32 @@ TEST(HdmirxMppFormat, ValidatesCompleteCaptureMetadata) {
   format.fourcc = v4l2_fourcc('T', 'E', 'S', 'T');
   EXPECT_FALSE(platf::hdmirx::capture_format_is_valid(format));
 }
+
+TEST(HdmirxTimestamp, DecodesClockType) {
+  EXPECT_TRUE(platf::hdmirx::timestamp_is_monotonic(V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC));
+  EXPECT_TRUE(platf::hdmirx::timestamp_is_monotonic(V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC | V4L2_BUF_FLAG_TSTAMP_SRC_SOE));
+  EXPECT_FALSE(platf::hdmirx::timestamp_is_monotonic(V4L2_BUF_FLAG_TIMESTAMP_UNKNOWN));
+  EXPECT_FALSE(platf::hdmirx::timestamp_is_monotonic(V4L2_BUF_FLAG_TIMESTAMP_COPY));
+}
+
+TEST(HdmirxTimestamp, DecodesTimestampSource) {
+  EXPECT_EQ(platf::hdmirx::timestamp_source(V4L2_BUF_FLAG_TSTAMP_SRC_EOF), platf::hdmirx::timestamp_source_e::end_of_frame);
+  EXPECT_EQ(platf::hdmirx::timestamp_source(V4L2_BUF_FLAG_TSTAMP_SRC_SOE), platf::hdmirx::timestamp_source_e::start_of_exposure);
+  EXPECT_EQ(platf::hdmirx::timestamp_source(V4L2_BUF_FLAG_TSTAMP_SRC_MASK), platf::hdmirx::timestamp_source_e::unknown);
+  EXPECT_EQ(platf::hdmirx::timestamp_source_name(platf::hdmirx::timestamp_source_e::end_of_frame), "EOF");
+  EXPECT_EQ(platf::hdmirx::timestamp_source_name(platf::hdmirx::timestamp_source_e::start_of_exposure), "SOE");
+  EXPECT_EQ(platf::hdmirx::timestamp_source_name(platf::hdmirx::timestamp_source_e::unknown), "unknown");
+}
+
+TEST(HdmirxTimestamp, ConvertsMonotonicTimeval) {
+  const timeval timestamp {.tv_sec = 123, .tv_usec = 456789};
+  const auto converted = platf::hdmirx::v4l2_monotonic_timestamp(timestamp);
+  EXPECT_EQ(converted.time_since_epoch(), std::chrono::seconds(123) + std::chrono::microseconds(456789));
+}
+
+TEST(HdmirxTimestamp, SteadyClockMatchesLinuxMonotonicClock) {
+  EXPECT_TRUE(platf::hdmirx::steady_clock_matches_monotonic());
+}
 #else
 TEST(HdmirxMppFormat, IsNotBuiltWhenRkmppIsDisabled) {
   GTEST_SKIP() << "RKMPP support is disabled for this build";

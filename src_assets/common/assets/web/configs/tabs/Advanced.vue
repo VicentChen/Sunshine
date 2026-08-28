@@ -1,6 +1,7 @@
 <script setup>
 import { ref } from 'vue'
 import PlatformLayout from '../../PlatformLayout.vue'
+import Checkbox from '../../Checkbox.vue'
 
 const props = defineProps([
   'platform',
@@ -114,6 +115,26 @@ const config = ref(props.config)
       </select>
       <div class="form-text">{{ $t('config.encoder_desc') }}</div>
     </div>
+
+    <PlatformLayout :platform="platform">
+      <template #linux>
+        <!-- RKMPP profiling -->
+        <Checkbox class="mb-3"
+                  id="rkmpp_profile"
+                  locale-prefix="config"
+                  v-model="config.rkmpp_profile"
+                  default="false"
+        ></Checkbox>
+
+        <!-- RKMPP profiling overlay -->
+        <Checkbox class="mb-3"
+                  id="rkmpp_profile_overlay"
+                  locale-prefix="config"
+                  v-model="config.rkmpp_profile_overlay"
+                  default="false"
+        ></Checkbox>
+      </template>
+    </PlatformLayout>
 
   </div>
 </template>

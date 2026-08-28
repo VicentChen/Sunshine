@@ -18,8 +18,10 @@
 // configuration and its unrelated runtime dependencies.
 boost::log::sources::severity_logger<int> debug(1);
 boost::log::sources::severity_logger<int> error(1);
+boost::log::sources::severity_logger<int> info(1);
 namespace config {
   sunshine_t sunshine {};
+  video_t video {};
 }
 
 namespace {
@@ -28,6 +30,7 @@ struct options_t {
   std::uint32_t frames {120};
   std::uint32_t sessions {2};
   std::string output;
+  bool osd {};
 };
 
 std::size_t fd_count() {
@@ -79,8 +82,10 @@ options_t parse(int argc, char **argv) {
       else options.sessions = static_cast<std::uint32_t>(value);
     } else if (argument == "--output" && index + 1 < argc) {
       options.output = argv[++index];
+    } else if (argument == "--osd") {
+      options.osd = true;
     } else {
-      throw std::invalid_argument("usage: rkmpp_rkmpp_smoke --codec h264|h265 [--frames 120] [--sessions 2] [--output /tmp/out.h264]");
+      throw std::invalid_argument("usage: rkmpp_rkmpp_smoke --codec h264|h265 [--frames 120] [--sessions 2] [--output /tmp/out.h264] [--osd]");
     }
   }
   if (!codec_set) throw std::invalid_argument("--codec is required");
@@ -216,6 +221,23 @@ std::size_t run_session(const options_t &options, std::uint32_t session, std::st
     std::cout << "session=" << session << " encoder_fps=" << config.fps_num << '/' << config.fps_den
               << " encoder_bitrate=" << config.bitrate << " encoder_gop=" << config.gop << '\n';
     auto encoder = platf::rkmpp::encoder_t::create(config);
+    platf::rkmpp::frame_profile_overlay_bitmap_t osd_bitmap;
+    if (options.osd) {
+      video::frame_profile_snapshot_t snapshot;
+      snapshot.captured_frames = options.frames;
+      snapshot.rga_bypass_frames = options.frames;
+      for (std::size_t index = 0; index < snapshot.metrics.size(); ++index) {
+        auto &metric = snapshot.metrics[index];
+        metric.count = options.frames;
+        metric.p50_us = 500 + static_cast<std::int64_t>(index) * 100;
+        metric.p95_us = 900 + static_cast<std::int64_t>(index) * 200;
+        metric.p99_us = 1200 + static_cast<std::int64_t>(index) * 300;
+      }
+      osd_bitmap.render(snapshot);
+      encoder.set_osd_region({16, 16, platf::rkmpp::frame_profile_overlay_bitmap_t::width,
+                              platf::rkmpp::frame_profile_overlay_bitmap_t::height, osd_bitmap.pixels()});
+      std::cout << "session=" << session << " osd=enabled region=16,16,640,160 content=profile-text\n";
+    }
     const auto live_baseline = fd_count();
     for (std::uint32_t frame_index = 0; frame_index < options.frames; ++frame_index) {
       auto holder = std::make_shared<platf::hdmirx::captured_frame_t>(capture.dequeue(std::chrono::seconds(2)));

@@ -21,6 +21,7 @@
 
 // local includes
 #include "src/config.h"
+#include "src/frame_profile.h"
 #include "src/logging.h"
 #include "src/thread_safe.h"
 #include "src/utility.h"
@@ -517,6 +518,7 @@ namespace platf {
     std::int32_t row_pitch {};  ///< Bytes between consecutive image rows.
 
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;  ///< Capture timestamp associated with the frame.
+    std::optional<video::frame_profile_t> frame_profile;  ///< Optional fixed-size performance timestamps for this frame.
 
     /**
      * @brief Destroy the image.

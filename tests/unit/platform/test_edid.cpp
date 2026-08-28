@@ -219,6 +219,35 @@ namespace {
     EXPECT_FALSE(validate_edid_checksums(edid));
   }
 
+  TEST(EdidAudioExtension, AddsStereoLpcmCtaExtension) {
+    const auto edid = with_cta_lpcm_audio_extension(make_1080p_edid(), 16);
+
+    ASSERT_EQ(edid.size(), k_edid_block_size * 2U);
+    EXPECT_TRUE(validate_edid_checksums(edid));
+    EXPECT_EQ(edid[126], 1U);
+    EXPECT_EQ(edid[k_edid_block_size], 0x02U);
+    EXPECT_EQ(edid[k_edid_block_size + 1U], 0x03U);
+    EXPECT_EQ(edid[k_edid_block_size + 3U], 0x40U);
+    EXPECT_EQ(edid[k_edid_block_size + 2U], 20U);
+    EXPECT_EQ(edid[k_edid_block_size + 4U], 0x41U);
+    EXPECT_EQ(edid[k_edid_block_size + 5U], 0x90U);
+    EXPECT_EQ(edid[k_edid_block_size + 6U], 0x23U);
+    EXPECT_EQ(edid[k_edid_block_size + 7U], 0x09U);
+    EXPECT_EQ(edid[k_edid_block_size + 8U], 0x07U);
+    EXPECT_EQ(edid[k_edid_block_size + 9U], 0x07U);
+    EXPECT_EQ(edid[k_edid_block_size + 10U], 0x83U);
+    EXPECT_EQ(edid[k_edid_block_size + 11U], 0x01U);
+    EXPECT_EQ(edid[k_edid_block_size + 14U], 0x65U);
+    EXPECT_EQ(edid[k_edid_block_size + 15U], 0x03U);
+    EXPECT_EQ(edid[k_edid_block_size + 16U], 0x0cU);
+    EXPECT_EQ(edid[k_edid_block_size + 17U], 0x00U);
+  }
+
+  TEST(EdidAudioExtension, RejectsInvalidBaseBlock) {
+    EXPECT_TRUE(with_cta_lpcm_audio_extension(std::span<const std::uint8_t>{}, 16).empty());
+    EXPECT_TRUE(with_cta_lpcm_audio_extension(make_bad_checksum_edid(), 16).empty());
+  }
+
   // =========================================================================
   // Timing descriptor parsing tests
   // =========================================================================

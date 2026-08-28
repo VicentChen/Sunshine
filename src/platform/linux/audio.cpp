@@ -17,10 +17,17 @@
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/platform/linux/audio.h"
 #include "src/thread_safe.h"
 
 namespace platf {
   using namespace std::literals;
+
+  namespace pa {
+    std::string resolve_capture_source_name(std::string_view configured_source, std::string_view monitor_source) {
+      return std::string {configured_source.empty() ? monitor_source : configured_source};
+    }
+  }  // namespace pa
 
   /**
    * @brief Position mapping.
@@ -609,7 +616,20 @@ namespace platf {
           sink_name = get_default_sink_name();
         }
 
-        return ::platf::microphone(mapping, channels, sample_rate, frame_size, get_monitor_name(sink_name));
+        std::string monitor_source;
+        if (config::audio.source.empty()) {
+          monitor_source = get_monitor_name(sink_name);
+        } else {
+          BOOST_LOG(info) << "Using configured audio source: ["sv << config::audio.source << ']';
+        }
+
+        return ::platf::microphone(
+          mapping,
+          channels,
+          sample_rate,
+          frame_size,
+          resolve_capture_source_name(config::audio.source, monitor_source)
+        );
       }
 
       bool is_sink_available(const std::string &sink) override {

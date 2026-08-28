@@ -252,7 +252,7 @@ namespace platf::edid {
    *
    * Sets byte 127 so that the sum of all 128 bytes is 0 mod 256.
    */
-  static void fix_checksum(std::vector<std::uint8_t> &block) {
+  static void fix_checksum(std::span<std::uint8_t, k_edid_block_size> block) {
     std::uint8_t sum = 0;
     for (std::size_t i = 0; i < 127; ++i) {
       sum += block[i];
@@ -311,9 +311,58 @@ namespace platf::edid {
     block[126] = 0;
 
     // Fix checksum at byte 127
-    fix_checksum(block);
+    fix_checksum(std::span<std::uint8_t, k_edid_block_size>{block.data(), k_edid_block_size});
 
     return block;
+  }
+
+  std::vector<std::uint8_t> with_cta_lpcm_audio_extension(
+    std::span<const std::uint8_t> base_edid,
+    std::uint8_t native_cta_vic) {
+    if (base_edid.size() != k_edid_block_size) {
+      return {};
+    }
+
+    std::span<const std::uint8_t, k_edid_block_size> base{base_edid.data(), k_edid_block_size};
+    if (!validate_block_checksum(base)) {
+      return {};
+    }
+
+    std::vector<std::uint8_t> edid;
+    edid.reserve(k_edid_block_size * 2U);
+    edid.insert(edid.end(), base_edid.begin(), base_edid.end());
+    edid.resize(k_edid_block_size * 2U, 0);
+
+    auto base_block = std::span<std::uint8_t, k_edid_block_size>{edid.data(), k_edid_block_size};
+    base_block[126] = 1;  // One CTA-861 extension follows the base block.
+    fix_checksum(base_block);
+
+    auto extension = std::span<std::uint8_t, k_edid_block_size>{edid.data() + k_edid_block_size, k_edid_block_size};
+    extension[0] = 0x02;  // CTA-861 extension tag.
+    extension[1] = 0x03;  // CTA-861 revision 3.
+    extension[2] = native_cta_vic == 0 ? 18 : 20;  // Data-block collection end.
+    extension[3] = 0x40;  // Basic audio is supported.
+    auto offset = std::size_t{4};
+    if (native_cta_vic != 0) {
+      extension[offset++] = 0x41;  // Video data block with one descriptor.
+      extension[offset++] = native_cta_vic | 0x80U;  // Mark the mode native.
+    }
+    extension[offset++] = 0x23;  // Audio data block with three payload bytes.
+    extension[offset++] = 0x09;  // LPCM, two channels.
+    extension[offset++] = 0x07;  // 32, 44.1, and 48 kHz.
+    extension[offset++] = 0x07;  // 16, 20, and 24-bit samples.
+    extension[offset++] = 0x83;  // Speaker allocation block with three payload bytes.
+    extension[offset++] = 0x01;  // Front left and front right speakers.
+    offset += 2;  // The remaining speaker-allocation payload bytes are zero.
+    extension[offset++] = 0x65;  // HDMI vendor-specific data block, five bytes.
+    extension[offset++] = 0x03;  // HDMI licensing OUI, least significant byte.
+    extension[offset++] = 0x0c;
+    extension[offset++] = 0x00;
+    extension[offset++] = 0x10;  // Physical address 1.0.0.0.
+    extension[offset++] = 0x00;
+
+    fix_checksum(extension);
+    return edid;
   }
 
   std::vector<std::uint8_t> make_720p_edid() noexcept {

@@ -198,6 +198,12 @@ void session_negotiator_t::start_negotiation(const resolution_t &target, const s
   else if (selected->resolution.width == 3840) new_edid = edid::make_2160p_edid();
   else new_edid = edid::make_1080p_edid(); // fallback
 
+  std::uint8_t native_cta_vic = 0;
+  if (selected->resolution.width == 1280 && selected->resolution.height == 720) native_cta_vic = 4;
+  else if (selected->resolution.width == 1920 && selected->resolution.height == 1080) native_cta_vic = 16;
+  else if (selected->resolution.width == 3840 && selected->resolution.height == 2160) native_cta_vic = 97;
+  new_edid = edid::with_cta_lpcm_audio_extension(new_edid, native_cta_vic);
+
   auto res = edid::write_edid(backend_, pad_, new_edid);
   if (!res.has_value()) {
       // A failed write can be partial.  Restore immediately while the guard
@@ -209,6 +215,10 @@ void session_negotiator_t::start_negotiation(const resolution_t &target, const s
         : "EDID write failed; original restore pending");
       return;
   }
+
+  // Rockchip HDMI RX requires a link reset to apply a changed EDID.  Its
+  // internal delayed reset sequence restores a valid upstream video lock.
+  (void) backend_.reset_hdmi_link();
   sm_.enter_negotiating("EDID written with restore guard armed");
 }
 
@@ -234,6 +244,9 @@ bool session_negotiator_t::check_lock(const std::optional<resolution_t>& actual_
 
   sm_.record_stable_timing();
   if (sm_.timing_is_stable()) {
+      // Rockchip HDMI RX disables its audio domain during link setup.  Start
+      // its optional audio state machine after input timing has stabilized.
+      (void) backend_.set_audio_enabled(true);
       if (target_ && actual_input->width == target_->width && actual_input->height == target_->height) {
           sm_.enter_streaming_direct("timing matches");
       } else {

@@ -544,6 +544,7 @@ namespace video {
     void *channel_data = nullptr;  ///< Platform or protocol state carried with this packet.
     bool after_ref_frame_invalidation = false;  ///< Whether the frame follows reference-frame invalidation.
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;  ///< Capture timestamp associated with the frame.
+    std::optional<frame_profile_t> frame_profile;  ///< Optional HDMI RX/RKMPP performance timestamps for this packet.
   };
 
   /**

@@ -17,6 +17,14 @@
 
 #include <src/platform/linux/hdmirx.h>
 
+boost::log::sources::severity_logger<int> debug(1);
+boost::log::sources::severity_logger<int> error(1);
+boost::log::sources::severity_logger<int> info(1);
+namespace config {
+  sunshine_t sunshine {};
+  video_t video {};
+}
+
 namespace {
   struct options_t {
     std::string device {"/dev/video0"};
@@ -115,7 +123,9 @@ namespace {
 
   void log_frame(const platf::hdmirx::captured_frame_t &frame, std::uint32_t round, std::uint32_t number) {
     std::cout << "round=" << round << " frame=" << number << " sequence=" << frame.sequence()
-              << " timestamp_ns=" << frame.timestamp().time_since_epoch().count() << " flags=" << frame.timestamp_flags() << '\n';
+              << " timestamp_ns=" << frame.timestamp().time_since_epoch().count() << " flags=" << frame.timestamp_flags()
+              << " clock=" << (platf::hdmirx::timestamp_is_monotonic(frame.timestamp_flags()) ? "monotonic" : "unsupported")
+              << " source=" << platf::hdmirx::timestamp_source_name(platf::hdmirx::timestamp_source(frame.timestamp_flags())) << '\n';
     for (std::size_t plane = 0; plane < frame.planes().size(); ++plane) {
       const auto &metadata = frame.planes()[plane];
       std::cout << "  plane=" << plane << " dma_buf_fd=" << metadata.dma_buf_fd

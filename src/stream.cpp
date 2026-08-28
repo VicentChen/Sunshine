@@ -1476,6 +1476,8 @@ namespace stream {
     platf::adjust_thread_priority(platf::thread_priority_e::high);
 
     logging::min_max_avg_periodic_logger<double> frame_processing_latency_logger(debug, "Frame processing latency", "ms");
+    video::frame_profile_window_t rkmpp_profile_window;
+    auto rkmpp_profile_window_start = std::chrono::steady_clock::now();
 
     logging::time_delta_periodic_logger frame_send_batch_latency_logger(debug, "Network: each send_batch() latency");
     logging::time_delta_periodic_logger frame_fec_latency_logger(debug, "Network: each FEC block latency");
@@ -1496,6 +1498,8 @@ namespace stream {
         break;
       }
 
+      const auto packetize_begin = std::chrono::steady_clock::now();
+      if (packet->frame_profile) packet->frame_profile->packetize_begin = packetize_begin;
       frame_network_latency_logger.first_point_now();
 
       auto session = (session_t *) packet->channel_data;
@@ -1529,12 +1533,7 @@ namespace stream {
       }
 
       if (packet->frame_timestamp) {
-        auto duration_to_latency = [](const std::chrono::steady_clock::duration &duration) {
-          const auto duration_us = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
-          return (uint16_t) std::clamp<decltype(duration_us)>((duration_us + 50) / 100, 0, std::numeric_limits<uint16_t>::max());
-        };
-
-        uint16_t latency = duration_to_latency(std::chrono::steady_clock::now() - *packet->frame_timestamp);
+        uint16_t latency = video::duration_to_protocol_latency(packetize_begin - *packet->frame_timestamp);
         frame_header.frame_processing_latency = latency;
         frame_processing_latency_logger.collect_and_log(latency / 10.);
       } else {
@@ -1779,6 +1778,31 @@ namespace stream {
         });
 
         session->video.lowseq = lowseq;
+        if (packet->frame_profile) packet->frame_profile->send_end = std::chrono::steady_clock::now();
+        if (packet->frame_profile && config::video.rkmpp_profile) {
+          rkmpp_profile_window.collect(*packet->frame_profile);
+          const auto now = std::chrono::steady_clock::now();
+          if (now - rkmpp_profile_window_start >= 5s) {
+            const auto snapshot = rkmpp_profile_window.snapshot_and_reset();
+            video::frame_profile_snapshot_store().publish(snapshot);
+            BOOST_LOG(info) << "RKMPP profile window: captured=" << snapshot.captured_frames
+                            << " placeholder=" << snapshot.placeholder_frames
+                            << " repeated=" << snapshot.repeated_frames
+                            << " rga_bypass=" << snapshot.rga_bypass_frames
+                            << " dropped_samples=" << snapshot.dropped_samples;
+            for (std::size_t index = 0; index < snapshot.metrics.size(); ++index) {
+              const auto &metric = snapshot.metrics[index];
+              if (metric.count == 0 && metric.missing == 0 && metric.invalid == 0) continue;
+              BOOST_LOG(info) << "RKMPP profile " << video::frame_profile_metric_name(static_cast<video::frame_profile_metric_e>(index))
+                              << " (count/missing/invalid min/p50/p95/p99/max): "
+                              << metric.count << '/' << metric.missing << '/' << metric.invalid << ' '
+                              << metric.minimum_us / 1000.0 << '/' << metric.p50_us / 1000.0 << '/'
+                              << metric.p95_us / 1000.0 << '/' << metric.p99_us / 1000.0 << '/'
+                              << metric.maximum_us / 1000.0 << " ms";
+            }
+            rkmpp_profile_window_start = now;
+          }
+        }
       } catch (const std::exception &e) {
         BOOST_LOG(error) << "Broadcast video failed "sv << e.what();
         std::this_thread::sleep_for(100ms);

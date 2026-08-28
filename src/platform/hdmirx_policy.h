@@ -115,6 +115,15 @@ namespace platf::hdmirx {
   std::optional<viewport_t> make_viewport(const resolution_t &input, const resolution_t &target, pixel_format_e format = pixel_format_e::generic) noexcept;
 
   /**
+   * @brief Determine whether a viewport overwrites the complete output canvas.
+   *
+   * @param viewport Source and destination rectangles selected for conversion.
+   * @param target Output canvas dimensions.
+   * @return true when the destination rectangle is exactly the output canvas.
+   */
+  bool viewport_covers_target(const viewport_t &viewport, const resolution_t &target) noexcept;
+
+  /**
    * @brief Validate or derive an NV12 stride and allocation layout.
    *
    * NV12 visible width and height must be even.  A zero stride requests the

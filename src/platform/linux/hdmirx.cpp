@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -46,11 +47,6 @@ namespace platf::hdmirx {
 
     std::string c_string(const __u8 *value) {
       return reinterpret_cast<const char *>(value);
-    }
-
-    std::chrono::steady_clock::time_point v4l2_monotonic_timestamp(const timeval &timestamp) noexcept {
-      const auto duration = std::chrono::seconds(timestamp.tv_sec) + std::chrono::microseconds(timestamp.tv_usec);
-      return std::chrono::steady_clock::time_point(std::chrono::duration_cast<std::chrono::steady_clock::duration>(duration));
     }
 
     int remaining_poll_timeout(std::chrono::steady_clock::time_point deadline) noexcept {
@@ -95,6 +91,52 @@ namespace platf::hdmirx {
     });
   }
 
+  bool timestamp_is_monotonic(std::uint32_t flags) noexcept {
+    return (flags & V4L2_BUF_FLAG_TIMESTAMP_MASK) == V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
+  }
+
+  timestamp_source_e timestamp_source(std::uint32_t flags) noexcept {
+    switch (flags & V4L2_BUF_FLAG_TSTAMP_SRC_MASK) {
+      case V4L2_BUF_FLAG_TSTAMP_SRC_EOF:
+        return timestamp_source_e::end_of_frame;
+      case V4L2_BUF_FLAG_TSTAMP_SRC_SOE:
+        return timestamp_source_e::start_of_exposure;
+      default:
+        return timestamp_source_e::unknown;
+    }
+  }
+
+  std::string_view timestamp_source_name(timestamp_source_e source) noexcept {
+    switch (source) {
+      case timestamp_source_e::end_of_frame:
+        return "EOF";
+      case timestamp_source_e::start_of_exposure:
+        return "SOE";
+      default:
+        return "unknown";
+    }
+  }
+
+  std::chrono::steady_clock::time_point v4l2_monotonic_timestamp(const timeval &timestamp) noexcept {
+    const auto duration = std::chrono::seconds(timestamp.tv_sec) + std::chrono::microseconds(timestamp.tv_usec);
+    return std::chrono::steady_clock::time_point(std::chrono::duration_cast<std::chrono::steady_clock::duration>(duration));
+  }
+
+  bool steady_clock_matches_monotonic() noexcept {
+    timespec monotonic {};
+    const auto steady_before = std::chrono::steady_clock::now();
+    if (::clock_gettime(CLOCK_MONOTONIC, &monotonic) != 0) {
+      return false;
+    }
+    const auto steady_after = std::chrono::steady_clock::now();
+    const auto monotonic_time = std::chrono::steady_clock::time_point(
+      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::seconds(monotonic.tv_sec) + std::chrono::nanoseconds(monotonic.tv_nsec)
+      )
+    );
+    return monotonic_time >= steady_before && monotonic_time <= steady_after;
+  }
+
   namespace detail {
     struct buffer_t {
       std::vector<std::uint32_t> lengths;
@@ -113,6 +155,7 @@ namespace platf::hdmirx {
       capture_format_t format;
       std::optional<v4l2_dv_timings> timings;
       device_info_t device_info;
+      std::optional<std::uint32_t> timestamp_metadata;
       std::vector<buffer_t> buffers;
       std::mutex mutex;
 
@@ -206,8 +249,8 @@ namespace platf::hdmirx {
     };
   }  // namespace detail
 
-  captured_frame_t::captured_frame_t(std::shared_ptr<detail::capture_state_t> state, std::uint32_t index, std::uint32_t sequence, std::chrono::steady_clock::time_point timestamp, std::uint32_t timestamp_flags, std::vector<frame_plane_t> planes) noexcept :
-      state_(std::move(state)), index_(index), sequence_(sequence), timestamp_(timestamp), timestamp_flags_(timestamp_flags), planes_(std::move(planes)), released_(false) {}
+  captured_frame_t::captured_frame_t(std::shared_ptr<detail::capture_state_t> state, std::uint32_t index, std::uint32_t sequence, std::chrono::steady_clock::time_point timestamp, std::chrono::steady_clock::time_point dequeue_timestamp, std::uint32_t timestamp_flags, std::vector<frame_plane_t> planes) noexcept :
+      state_(std::move(state)), index_(index), sequence_(sequence), timestamp_(timestamp), dequeue_timestamp_(dequeue_timestamp), timestamp_flags_(timestamp_flags), planes_(std::move(planes)), released_(false) {}
 
   captured_frame_t::captured_frame_t(captured_frame_t &&other) noexcept = default;
 
@@ -218,6 +261,7 @@ namespace platf::hdmirx {
       index_ = other.index_;
       sequence_ = other.sequence_;
       timestamp_ = other.timestamp_;
+      dequeue_timestamp_ = other.dequeue_timestamp_;
       timestamp_flags_ = other.timestamp_flags_;
       planes_ = std::move(other.planes_);
       released_ = other.released_;
@@ -247,6 +291,10 @@ namespace platf::hdmirx {
 
   std::chrono::steady_clock::time_point captured_frame_t::timestamp() const noexcept {
     return timestamp_;
+  }
+
+  std::chrono::steady_clock::time_point captured_frame_t::dequeue_timestamp() const noexcept {
+    return dequeue_timestamp_;
   }
 
   std::uint32_t captured_frame_t::timestamp_flags() const noexcept {
@@ -284,6 +332,9 @@ namespace platf::hdmirx {
   hdmirx_capture_t hdmirx_capture_t::open(const std::string &device, std::uint32_t requested_buffers) {
     if (requested_buffers == 0) {
       throw std::invalid_argument("HDMI RX requires at least one capture buffer");
+    }
+    if (!steady_clock_matches_monotonic()) {
+      throw std::runtime_error("Linux steady_clock is not aligned with CLOCK_MONOTONIC");
     }
 
     auto state = std::make_shared<detail::capture_state_t>();
@@ -471,6 +522,7 @@ namespace platf::hdmirx {
         }
         throw std::system_error(errno, std::generic_category(), "VIDIOC_DQBUF failed");
       }
+      const auto dequeue_timestamp = std::chrono::steady_clock::now();
       if (dequeue_buffer.index >= state->buffers.size() || dequeue_buffer.length != state->format.planes.size()) {
         state->mark_broken_locked();
         throw std::runtime_error("rk_hdmirx returned invalid dequeued buffer metadata");
@@ -484,7 +536,7 @@ namespace platf::hdmirx {
 
       std::vector<frame_plane_t> planes;
       planes.reserve(dequeue_buffer.length);
-      bool valid = (dequeue_buffer.flags & V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC) != 0;
+      bool valid = timestamp_is_monotonic(dequeue_buffer.flags);
       for (std::uint32_t plane = 0; plane < dequeue_buffer.length; ++plane) {
         const auto &v4l2_plane = dequeue_planes[plane];
         const auto &layout = state->format.planes[plane];
@@ -501,12 +553,26 @@ namespace platf::hdmirx {
         }
         throw std::runtime_error("rk_hdmirx returned invalid plane metadata or a non-monotonic timestamp");
       }
+      const auto timestamp_metadata = dequeue_buffer.flags & (V4L2_BUF_FLAG_TIMESTAMP_MASK | V4L2_BUF_FLAG_TSTAMP_SRC_MASK);
+      if (!state->timestamp_metadata) {
+        state->timestamp_metadata = timestamp_metadata;
+      } else if (*state->timestamp_metadata != timestamp_metadata) {
+        try {
+          (void) state->queue_buffer_locked(dequeue_buffer.index);
+        } catch (...) {
+          // queue_buffer_locked already marks the state broken and stops it.
+        }
+        if (!stored.queued) {
+          state->mark_broken_locked();
+        }
+        throw std::runtime_error("rk_hdmirx changed timestamp type or source during capture");
+      }
       for (std::uint32_t plane = 0; plane < dequeue_buffer.length; ++plane) {
         const auto &v4l2_plane = dequeue_planes[plane];
         const auto &layout = state->format.planes[plane];
         planes.push_back({v4l2_plane.bytesused, v4l2_plane.data_offset, v4l2_plane.bytesused - v4l2_plane.data_offset, layout.bytesperline, layout.sizeimage, stored.lengths[plane], stored.dma_buf_fds[plane]});
       }
-      return captured_frame_t(state, dequeue_buffer.index, dequeue_buffer.sequence, v4l2_monotonic_timestamp(dequeue_buffer.timestamp), dequeue_buffer.flags, std::move(planes));
+      return captured_frame_t(state, dequeue_buffer.index, dequeue_buffer.sequence, v4l2_monotonic_timestamp(dequeue_buffer.timestamp), dequeue_timestamp, dequeue_buffer.flags, std::move(planes));
     }
   }
 
@@ -621,6 +687,18 @@ public:
         if (ioctl(fd_, VIDIOC_S_EDID, &edid) < 0) return std::unexpected(platf::edid::edid_error_t{platf::edid::classify_errno(errno), errno, "VIDIOC_S_EDID failed"});
         return edid.blocks;
     }
+    platf::edid::edid_result_t<void> set_audio_enabled(bool enabled) override {
+        int state = enabled ? 1 : 0;
+        constexpr auto k_set_audio_state = _IOW('V', BASE_VIDIOC_PRIVATE + 5, int);
+        if (ioctl(fd_, k_set_audio_state, &state) < 0) return std::unexpected(platf::edid::edid_error_t{platf::edid::classify_errno(errno), errno, "RK_HDMIRX_CMD_SET_AUDIO_STATE failed"});
+        return {};
+    }
+    platf::edid::edid_result_t<void> reset_hdmi_link() override {
+        int unused = 0;
+        constexpr auto k_soft_reset = _IO('V', BASE_VIDIOC_PRIVATE + 6);
+        if (ioctl(fd_, k_soft_reset, &unused) < 0) return std::unexpected(platf::edid::edid_error_t{platf::edid::classify_errno(errno), errno, "RK_HDMIRX_CMD_SOFT_RESET failed"});
+        return {};
+    }
 };
 
 /**
@@ -653,20 +731,22 @@ private:
 
 class hdmirx_display_t final: public display_t {
 public:
-  explicit hdmirx_display_t(const video::config_t &config): capture_(hdmirx::hdmirx_capture_t::open()), backend_(capture_.fd()), negotiator_(backend_, sm_, 0) {
-    (void) config;
+  explicit hdmirx_display_t(const video::config_t &config):
+      capture_(hdmirx::hdmirx_capture_t::open()),
+      backend_(capture_.fd()),
+      negotiator_(backend_, sm_, 0),
+      moonlight_resolution_ {static_cast<uint32_t>(config.width), static_cast<uint32_t>(config.height)} {
     const auto &format = capture_.format();
     width = logical_width = env_width = env_logical_width = static_cast<int>(format.width);
     height = logical_height = env_height = env_logical_height = static_cast<int>(format.height);
 
-    platf::hdmirx::resolution_t target{static_cast<uint32_t>(config.width), static_cast<uint32_t>(config.height)};
     // read modes from EDID
     std::vector<platf::hdmirx::hdmi_mode_t> modes;
     auto orig_edid = platf::edid::read_edid(backend_, 0);
     if (orig_edid) {
         modes = platf::edid::parse_edid_modes(*orig_edid);
     }
-    negotiator_.start_negotiation(target, modes);
+    negotiator_.start_negotiation(moonlight_resolution_, modes);
   }
 
   ~hdmirx_display_t() {
@@ -689,6 +769,12 @@ public:
           rx_image->placeholder = true;
           rx_image->request_idr = sm_.consume_idr_request();
           rx_image->frame_timestamp = std::chrono::steady_clock::now();
+          if (config::video.rkmpp_profile) {
+            rx_image->frame_profile.emplace();
+            rx_image->frame_profile->kind = video::frame_profile_kind_e::placeholder;
+          } else {
+            rx_image->frame_profile.reset();
+          }
           if (!push(std::move(image), true)) return capture_e::ok;
           if (!sm_.wait_for_interval()) return capture_e::interrupted;
           continue;
@@ -721,6 +807,20 @@ public:
         rx_image->placeholder = false;
         rx_image->request_idr = sm_.consume_idr_request();
         rx_image->frame_timestamp = rx_image->frame->timestamp();
+        if (config::video.rkmpp_profile) {
+          rx_image->frame_profile.emplace();
+          rx_image->frame_profile->kind = video::frame_profile_kind_e::captured;
+          rx_image->frame_profile->capture_sequence = rx_image->frame->sequence();
+          rx_image->frame_profile->capture_timestamp_flags = rx_image->frame->timestamp_flags();
+          rx_image->frame_profile->hdmirx_width = rx_image->capture_format->width;
+          rx_image->frame_profile->hdmirx_height = rx_image->capture_format->height;
+          rx_image->frame_profile->moonlight_width = moonlight_resolution_.width;
+          rx_image->frame_profile->moonlight_height = moonlight_resolution_.height;
+          rx_image->frame_profile->capture = rx_image->frame->timestamp();
+          rx_image->frame_profile->dequeued = rx_image->frame->dequeue_timestamp();
+        } else {
+          rx_image->frame_profile.reset();
+        }
         if (!push(std::move(image), true)) return capture_e::ok;
       }
     } catch (const std::exception &e) {
@@ -739,6 +839,12 @@ public:
         rx_image->placeholder = true;
         rx_image->request_idr = sm_.consume_idr_request();
         rx_image->frame_timestamp = std::chrono::steady_clock::now();
+        if (config::video.rkmpp_profile) {
+          rx_image->frame_profile.emplace();
+          rx_image->frame_profile->kind = video::frame_profile_kind_e::placeholder;
+        } else {
+          rx_image->frame_profile.reset();
+        }
         return 0;
       }
       // Probe with a real RX frame; this path never calls VIDIOC_S_FMT.
@@ -747,6 +853,20 @@ public:
       rx_image->placeholder = false;
       rx_image->request_idr = sm_.consume_idr_request();
       rx_image->frame_timestamp = rx_image->frame->timestamp();
+      if (config::video.rkmpp_profile) {
+        rx_image->frame_profile.emplace();
+        rx_image->frame_profile->kind = video::frame_profile_kind_e::captured;
+        rx_image->frame_profile->capture_sequence = rx_image->frame->sequence();
+        rx_image->frame_profile->capture_timestamp_flags = rx_image->frame->timestamp_flags();
+        rx_image->frame_profile->hdmirx_width = rx_image->capture_format->width;
+        rx_image->frame_profile->hdmirx_height = rx_image->capture_format->height;
+        rx_image->frame_profile->moonlight_width = moonlight_resolution_.width;
+        rx_image->frame_profile->moonlight_height = moonlight_resolution_.height;
+        rx_image->frame_profile->capture = rx_image->frame->timestamp();
+        rx_image->frame_profile->dequeued = rx_image->frame->dequeue_timestamp();
+      } else {
+        rx_image->frame_profile.reset();
+      }
       return 0;
     } catch (const std::exception &e) {
       BOOST_LOG(error) << "HDMI RX probe frame failed: " << e.what();
@@ -808,6 +928,7 @@ private:
   real_ioctl_backend_t backend_;
   platf::input_sm::state_machine_t sm_;
   platf::hdmirx::session_negotiator_t negotiator_;
+  hdmirx::resolution_t moonlight_resolution_;  ///< Moonlight-requested coded resolution for the active session.
   bool recovery_pending_ {};
 };
 

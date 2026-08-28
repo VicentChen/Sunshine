@@ -1,9 +1,11 @@
 #include <gtest/gtest.h>
-#include "src/platform/linux/input_state_machine.h"
-#include "src/platform/linux/edid.h"
-#include "src/platform/linux/input_state_machine.h"
+#include <cstdint>
 #include <cstring>
 #include <optional>
+#include <vector>
+
+#include "src/platform/linux/edid.h"
+#include "src/platform/linux/input_state_machine.h"
 
 using namespace platf::hdmirx;
 using namespace platf::edid;
@@ -15,9 +17,13 @@ public:
     std::uint32_t, std::uint32_t, std::uint32_t, std::span<std::uint8_t>)>;
   using set_edid_fn = std::function<edid_result_t<std::uint32_t>(
     std::uint32_t, std::uint32_t, std::uint32_t, std::span<const std::uint8_t>)>;
+  using set_audio_enabled_fn = std::function<edid_result_t<void>(bool)>;
+  using reset_hdmi_link_fn = std::function<edid_result_t<void>()>;
 
   get_edid_fn on_get_edid;
   set_edid_fn on_set_edid;
+  set_audio_enabled_fn on_set_audio_enabled;
+  reset_hdmi_link_fn on_reset_hdmi_link;
 
   edid_result_t<std::uint32_t> get_edid(
     std::uint32_t pad, std::uint32_t start, std::uint32_t blocks, std::span<std::uint8_t> buffer) override {
@@ -28,6 +34,14 @@ public:
     std::uint32_t pad, std::uint32_t start, std::uint32_t blocks, std::span<const std::uint8_t> data) override {
     if (on_set_edid) return on_set_edid(pad, start, blocks, data);
     return std::unexpected(edid_error_t{error_category_e::not_supported, ENOTTY, ""});
+  }
+  edid_result_t<void> set_audio_enabled(bool enabled) override {
+    if (on_set_audio_enabled) return on_set_audio_enabled(enabled);
+    return ioctl_backend_t::set_audio_enabled(enabled);
+  }
+  edid_result_t<void> reset_hdmi_link() override {
+    if (on_reset_hdmi_link) return on_reset_hdmi_link();
+    return ioctl_backend_t::reset_hdmi_link();
   }
 };
 
@@ -51,13 +65,29 @@ TEST(EdidNegotiatorTest, HardwareWithoutEdidSupport) {
 
 TEST(EdidNegotiatorTest, UpstreamObeysDirectPath) {
   mock_ioctl_backend_t backend;
+  std::vector<std::uint32_t> write_block_counts;
+  std::vector<std::uint8_t> negotiated_edid;
+  std::vector<bool> audio_states;
+  std::uint32_t link_resets = 0;
 
   backend.on_get_edid = [](auto, auto, auto blocks, auto buf) -> edid_result_t<std::uint32_t> {
       std::memset(buf.data(), 0, blocks * 128);
       return blocks;
   };
-  backend.on_set_edid = [](auto, auto, auto blocks, auto) -> edid_result_t<std::uint32_t> {
+  backend.on_set_edid = [&write_block_counts, &negotiated_edid](auto, auto, auto blocks, auto data) -> edid_result_t<std::uint32_t> {
+      write_block_counts.push_back(blocks);
+      if (blocks == 2U) {
+        negotiated_edid.assign(data.begin(), data.end());
+      }
       return blocks;
+  };
+  backend.on_set_audio_enabled = [&audio_states](bool enabled) -> edid_result_t<void> {
+      audio_states.push_back(enabled);
+      return {};
+  };
+  backend.on_reset_hdmi_link = [&link_resets]() -> edid_result_t<void> {
+      ++link_resets;
+      return {};
   };
 
   state_machine_t sm;
@@ -73,6 +103,16 @@ TEST(EdidNegotiatorTest, UpstreamObeysDirectPath) {
       if (negotiator.check_lock(target)) break;
   }
   EXPECT_EQ(sm.state(), state_e::streaming_direct);
+  ASSERT_FALSE(write_block_counts.empty());
+  EXPECT_EQ(write_block_counts.front(), 2U);
+  ASSERT_EQ(negotiated_edid.size(), k_edid_block_size * 2U);
+  EXPECT_EQ(negotiated_edid[126], 1U);
+  EXPECT_EQ(negotiated_edid[k_edid_block_size], 0x02U);
+  EXPECT_EQ(negotiated_edid[k_edid_block_size + 3U], 0x40U);
+  EXPECT_EQ(negotiated_edid[k_edid_block_size + 5U], 0x90U);
+  EXPECT_EQ(negotiated_edid[k_edid_block_size + 7U], 0x09U);
+  EXPECT_EQ(link_resets, 1U);
+  EXPECT_EQ(audio_states, (std::vector<bool>{true}));
 }
 
 TEST(EdidNegotiatorTest, WriteFailureRestoresSavedOriginal) {

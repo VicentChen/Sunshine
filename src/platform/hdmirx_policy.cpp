@@ -185,6 +185,10 @@ namespace platf::hdmirx {
     };
   }
 
+  bool viewport_covers_target(const viewport_t &viewport, const resolution_t &target) noexcept {
+    return viewport.destination == rectangle_t {0, 0, target.width, target.height};
+  }
+
   std::optional<nv12_layout_t> make_nv12_layout(const resolution_t &resolution, std::uint32_t stride, std::uint32_t stride_alignment) noexcept {
     if (!is_valid_resolution(resolution) || !is_even(resolution.width) || !is_even(resolution.height)) {
       return std::nullopt;

@@ -1,14 +1,18 @@
 /** @file src/platform/linux/rkmpp.h */
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <ostream>
+#include <span>
 #include <vector>
 
 #include <mpp_frame.h>
+
+#include "src/frame_profile.h"
 
 namespace platf::rkmpp {
   /** @brief Video codec emitted by the RKMPP encoder. */
@@ -56,6 +60,7 @@ namespace platf::rkmpp {
     std::uint64_t allocation_size {};  ///< Complete DMA-BUF allocation in bytes.
     std::int64_t pts {};  ///< Producer presentation timestamp passed to MPP unchanged.
     input_holder_t holder;  ///< Lifetime pin for the borrowed DMA-BUF.
+    video::frame_profile_t *profile {};  ///< Borrowed profile record updated during synchronous encoding.
   };
 
   /** @brief Result of validating a generic RKMPP input layout or frame. */
@@ -146,6 +151,52 @@ namespace platf::rkmpp {
     std::uint32_t min_packet_bytes {};  ///< Smallest complete coded packet, or zero before output.
     std::uint32_t max_packet_bytes {};  ///< Largest complete coded packet, or zero before output.
   };
+  /** @brief One 8-bit palette-index OSD region consumed by RKMPP. */
+  struct osd_region_t {
+    std::uint32_t x {};  ///< Left edge in coded pixels; must be 16-pixel aligned.
+    std::uint32_t y {};  ///< Top edge in coded pixels; must be 16-pixel aligned.
+    std::uint32_t width {};  ///< Region width in pixels; must be a non-zero multiple of 16.
+    std::uint32_t height {};  ///< Region height in pixels; must be a non-zero multiple of 16.
+    std::span<const std::uint8_t> pixels;  ///< Row-major palette indices, exactly width times height bytes.
+  };
+  /** @brief Result of validating an RKMPP OSD region. */
+  enum class osd_region_status_e {
+    ok,  ///< The region is representable by the RKMPP OSD ABI.
+    empty,  ///< Width, height, or pixel storage is empty.
+    unaligned,  ///< Position or dimensions are not aligned to a 16-pixel macroblock.
+    outside_frame,  ///< The region extends beyond the coded frame.
+    size_mismatch,  ///< Pixel storage does not contain exactly one byte per pixel.
+  };
+  /**
+   * @brief Validate one OSD region against a coded frame.
+   *
+   * @param region Region metadata and palette-index pixels.
+   * @param coded_width Coded frame width in pixels.
+   * @param coded_height Coded frame height in pixels.
+   * @return Status explaining whether the region can be attached to MPP.
+   */
+  osd_region_status_e validate_osd_region(const osd_region_t &region, std::uint32_t coded_width, std::uint32_t coded_height) noexcept;
+  /** @brief Fixed palette-index bitmap used for the white-background in-stream RKMPP latency HUD. */
+  class frame_profile_overlay_bitmap_t {
+  public:
+    static constexpr std::uint32_t width = 640;  ///< OSD width, aligned to 16 pixels.
+    static constexpr std::uint32_t height = 176;  ///< OSD height, aligned to 16 pixels.
+
+    frame_profile_overlay_bitmap_t() noexcept;
+    /** @brief Render a waiting message before the first five-second snapshot exists. */
+    void render_waiting() noexcept;
+    /**
+     * @brief Render source/output resolution and p50/p95/p99 latency metrics into the fixed bitmap.
+     *
+     * @param snapshot Completed bounded statistics window.
+     */
+    void render(const video::frame_profile_snapshot_t &snapshot) noexcept;
+    /** @brief Return the complete row-major palette-index bitmap. */
+    std::span<const std::uint8_t> pixels() const noexcept;
+
+  private:
+    std::array<std::uint8_t, width * height> pixels_ {};  ///< Persistent OSD indices copied into MPP only on updates.
+  };
   /**
    * @brief Immutable RKMPP encoder setup for one stream.
    *
@@ -214,6 +265,19 @@ namespace platf::rkmpp {
      */
     std::vector<std::uint8_t> encode_to_vector(const input_frame_t &frame);
     void request_idr();
+    /**
+     * @brief Copy one palette-index region into persistent MPP OSD storage.
+     *
+     * The configured region is attached to every subsequently submitted frame
+     * until replaced or cleared. The fixed hardware palette is used.
+     *
+     * @param region Aligned OSD region whose bytes are copied before return.
+     * @throws std::invalid_argument When the region is not representable.
+     * @throws std::runtime_error When MPP cannot allocate or update OSD storage.
+     */
+    void set_osd_region(const osd_region_t &region);
+    /** @brief Stop attaching OSD metadata to subsequently submitted frames. */
+    void clear_osd() noexcept;
     std::uint64_t encoded_frames() const noexcept;
     encoder_stats_t stats() const noexcept;
     /**

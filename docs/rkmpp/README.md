@@ -118,7 +118,7 @@ DISPLAY=:99 ./start-sunshine.sh     # 捕获 Xvfb :99 虚拟桌面
 Web UI 默认监听 https://<Rock-IP-or-hostname>:47990。脚本不会启动 Xvfb 或 HDMI 预览；这两者需按 RKMPP 运行场景单独启动。
 
 ## RGA 视频缩放与格式转换
-目前已接入 Rockchip 2D 图形加速器 (RGA) 支持。当 Moonlight 请求的分辨率与 HDMI RX 实际接收的分辨率不一致时，Sunshine 会自动使用 RGA 对图像进行缩放与裁剪 (信箱模式或居中裁剪)，并在发送给 MPP 编码器前完成 NV12 格式转换。对于相同尺寸的请求，系统依然使用零拷贝直通路径以保证最低延迟。在等待 EDID 协商或短暂无信号期间，屏幕将显示一个绿色的占位帧以防串流断开。
+目前已接入 Rockchip 2D 图形加速器 (RGA) 支持。仅当 Moonlight 请求的分辨率与 HDMI RX 实际接收的可见分辨率不一致时，Sunshine 才会使用 RGA 对图像进行缩放与裁剪 (信箱模式或居中裁剪)，并生成 NV12 目标缓冲。对于相同尺寸的请求，HDMI RX 的原始 DMA-BUF（包括像素格式和 stride）会直接交给 RKMPP；格式或 stride 在恢复后变化时会重建直通编码器，不会回退到 RGA。在等待 EDID 协商或短暂无信号期间，屏幕将显示一个绿色的占位帧以防串流断开。
 
 ## EDID 协商 (可选支持)
 若 HDMI 输入设备支持自动解析，系统能够在新的 Moonlight 客户端连接时，修改系统的 EDID 倾向以请求符合所需分辨率及帧率。
@@ -139,7 +139,7 @@ Web UI 默认监听 https://<Rock-IP-or-hostname>:47990。脚本不会启动 Xvf
 
 
 ## RGA 视频缩放与格式转换
-目前已接入 Rockchip 2D 图形加速器 (RGA) 支持。当 Moonlight 请求的分辨率与 HDMI RX 实际接收的分辨率不一致时，Sunshine 会自动使用 RGA 对图像进行缩放与裁剪 (信箱模式或居中裁剪)，并在发送给 MPP 编码器前完成 NV12 格式转换。对于相同尺寸的请求，系统依然使用零拷贝直通路径以保证最低延迟。在等待 EDID 协商或短暂无信号期间，屏幕将显示一个绿色的占位帧以防串流断开。
+目前已接入 Rockchip 2D 图形加速器 (RGA) 支持。仅当 Moonlight 请求的分辨率与 HDMI RX 实际接收的可见分辨率不一致时，Sunshine 才会使用 RGA 对图像进行缩放与裁剪 (信箱模式或居中裁剪)，并生成 NV12 目标缓冲。对于相同尺寸的请求，HDMI RX 的原始 DMA-BUF（包括像素格式和 stride）会直接交给 RKMPP；格式或 stride 在恢复后变化时会重建直通编码器，不会回退到 RGA。在等待 EDID 协商或短暂无信号期间，屏幕将显示一个绿色的占位帧以防串流断开。
 
 ## EDID 协商 (可选支持)
 若 HDMI 输入设备支持自动解析，系统能够在新的 Moonlight 客户端连接时，修改系统的 EDID 倾向以请求符合所需分辨率及帧率。

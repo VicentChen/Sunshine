@@ -749,9 +749,8 @@ editing the `conf` file in a text editor. Use the examples as reference.
             **FreeBSD/Linux + pipewire:**
             <br>
             @code{}
-            pactl info | grep Source
-            # in some causes you'd need to use the `Sink` device, if `Source` doesn't work, so try:
-            pactl info | grep Sink
+            wpctl status
+            pactl list short sinks
             @endcode
             <br>
             <br>
@@ -795,6 +794,31 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td>Example (Windows)</td>
         <td colspan="2">@code{}
             audio_sink = Speakers (High Definition Audio Device)
+            @endcode</td>
+    </tr>
+</table>
+
+### audio_source
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Linux only: the PulseAudio or PipeWire source to capture directly. When set, this source takes
+            precedence over the monitor source associated with [audio_sink](#audio_sink). The audio sink still
+            controls Sunshine's output-routing behavior; this option only selects the capture input.
+            @tip{Use `wpctl status` to list PipeWire sources, then `wpctl inspect ID` to obtain the stable
+            `node.name`. With PulseAudio tools installed, `pactl list short sources` provides the same source name.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">Sunshine captures the monitor source associated with the selected audio sink.</td>
+    </tr>
+    <tr>
+        <td>Example (Linux + PipeWire)</td>
+        <td colspan="2">@code{}
+            audio_source = alsa_input.platform-hdmiin-sound.HDMI__hw_rockchiphdmiin__source.8
             @endcode</td>
     </tr>
 </table>
@@ -2234,6 +2258,59 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>software</td>
         <td>Encoding occurs on the CPU</td>
+    </tr>
+</table>
+
+### rkmpp_profile
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Collect bounded per-frame host latency statistics for HDMI RX capture, optional RGA conversion,
+            RKMPP encoding, packetization, and network submission. Statistics are periodically written to the
+            Sunshine log. The HDMI RX driver currently reports monotonic end-of-frame timestamps, so the first
+            metric is RX EOF to dequeue and does not include the time from the first HDMI signal pixel to EOF.
+            @note{This option only applies to the HDMI RX capture and RKMPP encoder path on Linux.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            rkmpp_profile = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+### rkmpp_profile_overlay
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Burn the latest host latency profile into the encoded video so it is visible in Moonlight. The HUD uses
+            a white background and includes the Moonlight-requested encoded resolution and the HDMI RX frame
+            resolution from the sampled window. Enabling this option also enables [rkmpp_profile](#rkmpp_profile).
+            @note{This option only applies to the HDMI RX capture and RKMPP encoder path on Linux.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            rkmpp_profile_overlay = enabled
+            @endcode</td>
     </tr>
 </table>
 

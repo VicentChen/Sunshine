@@ -46,6 +46,23 @@ const config = ref(props.config)
       </div>
     </div>
 
+    <PlatformLayout :platform="platform">
+      <template #linux>
+        <!-- Audio Source -->
+        <div class="mb-3">
+          <label for="audio_source" class="form-label">{{ $t('config.audio_source') }}</label>
+          <input type="text" class="form-control" id="audio_source"
+                 placeholder="alsa_input.platform-hdmiin-sound.HDMI__hw_rockchiphdmiin__source.8"
+                 v-model="config.audio_source" />
+          <div class="form-text">
+            {{ $t('config.audio_source_desc') }}<br>
+            <pre>wpctl status</pre>
+            <pre>pactl list short sources</pre>
+          </div>
+        </div>
+      </template>
+    </PlatformLayout>
+
 
     <PlatformLayout :platform="platform">
       <template #windows>

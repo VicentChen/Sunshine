@@ -791,7 +791,9 @@ namespace config {
     },  // display_device
 
     0,  // max_bitrate
-    0  // minimum_fps_target (0 = framerate)
+    0,  // minimum_fps_target (0 = framerate)
+    false,  // rkmpp_profile
+    false  // rkmpp_profile_overlay
   };
 
   /**
@@ -799,6 +801,7 @@ namespace config {
    */
   audio_t audio {
     {},  // audio_sink
+    {},  // audio_source
     {},  // virtual_sink
     true,  // stream audio
     true,  // install_steam_drivers
@@ -1687,6 +1690,9 @@ namespace config {
 
     int_f(vars, "max_bitrate", video.max_bitrate);
     double_between_f(vars, "minimum_fps_target", video.minimum_fps_target, {0.0, 1000.0});
+    bool_f(vars, "rkmpp_profile", video.rkmpp_profile);
+    bool_f(vars, "rkmpp_profile_overlay", video.rkmpp_profile_overlay);
+    if (video.rkmpp_profile_overlay) video.rkmpp_profile = true;
 
     path_f(vars, "pkey", nvhttp.pkey);
     path_f(vars, "cert", nvhttp.cert);
@@ -1702,6 +1708,7 @@ namespace config {
     list_prep_cmd_f(vars, "global_prep_cmd", config::sunshine.prep_cmds);
 
     string_f(vars, "audio_sink", audio.sink);
+    string_f(vars, "audio_source", audio.source);
     string_f(vars, "virtual_sink", audio.virtual_sink);
     bool_f(vars, "stream_audio", audio.stream);
     bool_f(vars, "install_steam_audio_drivers", audio.install_steam_drivers);

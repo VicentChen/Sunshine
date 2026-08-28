@@ -204,6 +204,8 @@ namespace config {
 
     int max_bitrate;  ///< Maximum bitrate ceiling in kbps for bitrate requested from the client.
     double minimum_fps_target;  ///< Lowest framerate that will be used when streaming. Range 0-1000, 0 = half of client's requested framerate.
+    bool rkmpp_profile;  ///< Collect HDMI RX and RKMPP per-frame performance timestamps.
+    bool rkmpp_profile_overlay;  ///< Burn the latest RKMPP profile snapshot into encoded video.
   };
 
   /**
@@ -211,6 +213,7 @@ namespace config {
    */
   struct audio_t {
     std::string sink;  ///< Audio output device/sink to use for audio capture
+    std::string source;  ///< Linux PulseAudio/PipeWire source to capture directly
     std::string virtual_sink;  ///< Virtual audio sink for audio routing
     bool stream;  ///< Enable audio streaming to clients
     bool install_steam_drivers;  ///< Install Steam audio drivers for enhanced compatibility

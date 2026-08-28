@@ -14,6 +14,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <linux/videodev2.h>
@@ -22,6 +23,13 @@
 #include "src/platform/common.h"
 
 namespace platf::hdmirx {
+  /** @brief Point in a captured frame at which the V4L2 timestamp was taken. */
+  enum class timestamp_source_e {
+    end_of_frame,  ///< The timestamp represents the end of frame reception.
+    start_of_exposure,  ///< The timestamp represents the start of exposure/frame reception.
+    unknown,  ///< The driver returned an unrecognized timestamp-source value.
+  };
+
   struct plane_layout_t {
     std::uint32_t bytesperline {};
     std::uint32_t sizeimage {};
@@ -65,6 +73,46 @@ namespace platf::hdmirx {
   bool capture_format_is_valid(const capture_format_t &format) noexcept;
 
   /**
+   * @brief Test whether V4L2 marked a buffer timestamp as CLOCK_MONOTONIC.
+   *
+   * @param flags Flags returned in `v4l2_buffer::flags`.
+   * @return True only for `V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC`.
+   */
+  bool timestamp_is_monotonic(std::uint32_t flags) noexcept;
+
+  /**
+   * @brief Decode the V4L2 timestamp source carried by a captured buffer.
+   *
+   * @param flags Flags returned in `v4l2_buffer::flags`.
+   * @return Decoded source relative to the captured frame.
+   */
+  timestamp_source_e timestamp_source(std::uint32_t flags) noexcept;
+
+  /**
+   * @brief Return a stable diagnostic name for a timestamp source.
+   *
+   * @param source Source to describe.
+   * @return Static diagnostic name.
+   */
+  std::string_view timestamp_source_name(timestamp_source_e source) noexcept;
+
+  /**
+   * @brief Convert a V4L2 CLOCK_MONOTONIC timeval to the application timeline.
+   *
+   * @param timestamp V4L2 timestamp to convert.
+   * @return Timestamp on Linux's `std::chrono::steady_clock` timeline.
+   */
+  std::chrono::steady_clock::time_point v4l2_monotonic_timestamp(const timeval &timestamp) noexcept;
+
+  /**
+   * @brief Verify that steady_clock and CLOCK_MONOTONIC use compatible epochs.
+   *
+   * @return True when the two clocks differ by no more than the scheduling
+   * delay required to sample them.
+   */
+  bool steady_clock_matches_monotonic() noexcept;
+
+  /**
    * @brief A recoverable V4L2 source-change notification.
    *
    * This is deliberately distinct from malformed buffer metadata and device
@@ -101,12 +149,14 @@ namespace platf::hdmirx {
      * steady_clock timeline.  Frames lacking TIMESTAMP_MONOTONIC are rejected.
      */
     std::chrono::steady_clock::time_point timestamp() const noexcept;
+    /** @brief Return the time immediately after VIDIOC_DQBUF succeeded. */
+    std::chrono::steady_clock::time_point dequeue_timestamp() const noexcept;
     std::uint32_t timestamp_flags() const noexcept;
     const std::vector<frame_plane_t> &planes() const noexcept;
 
   private:
     friend class hdmirx_capture_t;
-    captured_frame_t(std::shared_ptr<detail::capture_state_t> state, std::uint32_t index, std::uint32_t sequence, std::chrono::steady_clock::time_point timestamp, std::uint32_t timestamp_flags, std::vector<frame_plane_t> planes) noexcept;
+    captured_frame_t(std::shared_ptr<detail::capture_state_t> state, std::uint32_t index, std::uint32_t sequence, std::chrono::steady_clock::time_point timestamp, std::chrono::steady_clock::time_point dequeue_timestamp, std::uint32_t timestamp_flags, std::vector<frame_plane_t> planes) noexcept;
 
     void release_noexcept() noexcept;
 
@@ -114,6 +164,7 @@ namespace platf::hdmirx {
     std::uint32_t index_ {};
     std::uint32_t sequence_ {};
     std::chrono::steady_clock::time_point timestamp_ {};
+    std::chrono::steady_clock::time_point dequeue_timestamp_ {};
     std::uint32_t timestamp_flags_ {};
     std::vector<frame_plane_t> planes_;
     bool released_ {true};

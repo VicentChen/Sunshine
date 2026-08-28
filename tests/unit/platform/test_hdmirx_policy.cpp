@@ -20,6 +20,7 @@ namespace {
     EXPECT_FALSE(platf::hdmirx::needs_conversion({1920, 1080}, {1920, 1080}));
     EXPECT_EQ(viewport->source, (platf::hdmirx::rectangle_t {0, 0, 1920, 1080}));
     EXPECT_EQ(viewport->destination, (platf::hdmirx::rectangle_t {0, 0, 1920, 1080}));
+    EXPECT_TRUE(platf::hdmirx::viewport_covers_target(*viewport, {1920, 1080}));
   }
 
   TEST(HdmirxPolicyViewport, DownsamplesWithAspectPreservation) {
@@ -45,6 +46,8 @@ namespace {
     ASSERT_TRUE(letterbox.has_value());
     EXPECT_EQ(pillarbox->destination, (platf::hdmirx::rectangle_t {240, 0, 1440, 1080}));
     EXPECT_EQ(letterbox->destination, (platf::hdmirx::rectangle_t {0, 135, 1920, 810}));
+    EXPECT_FALSE(platf::hdmirx::viewport_covers_target(*pillarbox, {1920, 1080}));
+    EXPECT_FALSE(platf::hdmirx::viewport_covers_target(*letterbox, {1920, 1080}));
   }
 
   TEST(HdmirxPolicyViewport, RejectsInvalidAndOversizedDimensions) {
