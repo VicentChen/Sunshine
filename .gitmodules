@@ -65,3 +65,6 @@
 	path = third-party/librga
 	url = https://github.com/airockchip/librga.git
 	branch = main
+[submodule "third-party/nxbt"]
+	path = third-party/nxbt
+	url = https://github.com/VicentChen/nxbt.git
