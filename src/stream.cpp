@@ -1499,7 +1499,9 @@ namespace stream {
       }
 
       const auto packetize_begin = std::chrono::steady_clock::now();
-      if (packet->frame_profile) packet->frame_profile->packetize_begin = packetize_begin;
+      if (packet->frame_profile) {
+        packet->frame_profile->packetize_begin = packetize_begin;
+      }
       frame_network_latency_logger.first_point_now();
 
       auto session = (session_t *) packet->channel_data;
@@ -1778,7 +1780,9 @@ namespace stream {
         });
 
         session->video.lowseq = lowseq;
-        if (packet->frame_profile) packet->frame_profile->send_end = std::chrono::steady_clock::now();
+        if (packet->frame_profile) {
+          packet->frame_profile->send_end = std::chrono::steady_clock::now();
+        }
         if (packet->frame_profile && config::video.rkmpp_profile) {
           rkmpp_profile_window.collect(*packet->frame_profile);
           const auto now = std::chrono::steady_clock::now();
@@ -1789,10 +1793,13 @@ namespace stream {
                             << " placeholder=" << snapshot.placeholder_frames
                             << " repeated=" << snapshot.repeated_frames
                             << " rga_bypass=" << snapshot.rga_bypass_frames
+                            << " freshness_drops=" << snapshot.freshness_drops
                             << " dropped_samples=" << snapshot.dropped_samples;
             for (std::size_t index = 0; index < snapshot.metrics.size(); ++index) {
               const auto &metric = snapshot.metrics[index];
-              if (metric.count == 0 && metric.missing == 0 && metric.invalid == 0) continue;
+              if (metric.count == 0 && metric.missing == 0 && metric.invalid == 0) {
+                continue;
+              }
               BOOST_LOG(info) << "RKMPP profile " << video::frame_profile_metric_name(static_cast<video::frame_profile_metric_e>(index))
                               << " (count/missing/invalid min/p50/p95/p99/max): "
                               << metric.count << '/' << metric.missing << '/' << metric.invalid << ' '

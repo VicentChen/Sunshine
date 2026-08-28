@@ -133,6 +133,22 @@ const config = ref(props.config)
                   v-model="config.rkmpp_profile_overlay"
                   default="false"
         ></Checkbox>
+
+        <!-- RKMPP low-delay experiment -->
+        <Checkbox class="mb-3"
+                  id="rkmpp_low_delay"
+                  locale-prefix="config"
+                  v-model="config.rkmpp_low_delay"
+                  default="false"
+        ></Checkbox>
+
+        <!-- RKMPP re-encode experiment -->
+        <Checkbox class="mb-3"
+                  id="rkmpp_disable_reencode"
+                  locale-prefix="config"
+                  v-model="config.rkmpp_disable_reencode"
+                  default="false"
+        ></Checkbox>
       </template>
     </PlatformLayout>
 

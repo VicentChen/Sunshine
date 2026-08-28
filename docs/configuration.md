@@ -2314,6 +2314,56 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### rkmpp_low_delay
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Enable RKMPP's base low-delay setting for a controlled latency comparison.
+            This experimental setting is disabled by default and applies only to the HDMI RX capture and RKMPP
+            encoder path on Linux.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            rkmpp_low_delay = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+### rkmpp_disable_reencode
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Set RKMPP rate control to zero re-encode attempts for a controlled latency comparison.
+            This experimental setting is disabled by default and applies only to the HDMI RX capture and RKMPP
+            encoder path on Linux.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            rkmpp_disable_reencode = enabled
+            @endcode</td>
+    </tr>
+</table>
+
 ## NVIDIA NVENC Encoder
 
 ### nvenc_preset

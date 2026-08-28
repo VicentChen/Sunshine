@@ -8,19 +8,18 @@
  */
 #pragma once
 
+#include "src/platform/common.h"
+
 #include <chrono>
 #include <cstdint>
+#include <linux/videodev2.h>
 #include <memory>
+#include <mpp_frame.h>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
-
-#include <linux/videodev2.h>
-#include <mpp_frame.h>
-
-#include "src/platform/common.h"
 
 namespace platf::hdmirx {
   /** @brief Point in a captured frame at which the V4L2 timestamp was taken. */
@@ -119,7 +118,7 @@ namespace platf::hdmirx {
    * I/O failures. Callers must enter their placeholder/recovery policy rather
    * than ending the Sunshine session.
    */
-  class source_change_error_t final : public std::runtime_error {
+  class source_change_error_t final: public std::runtime_error {
   public:
     using std::runtime_error::runtime_error;
   };
@@ -144,6 +143,10 @@ namespace platf::hdmirx {
     void release();
     bool released() const noexcept;
     std::uint32_t sequence() const noexcept;
+    /** @brief Return the capture allocation generation that owns this buffer. */
+    std::uint64_t generation() const noexcept;
+    /** @brief Return this buffer's stable index inside its allocation generation. */
+    std::uint32_t buffer_index() const noexcept;
     /**
      * V4L2's CLOCK_MONOTONIC timestamp, represented on Linux's
      * steady_clock timeline.  Frames lacking TIMESTAMP_MONOTONIC are rejected.
@@ -152,20 +155,31 @@ namespace platf::hdmirx {
     /** @brief Return the time immediately after VIDIOC_DQBUF succeeded. */
     std::chrono::steady_clock::time_point dequeue_timestamp() const noexcept;
     std::uint32_t timestamp_flags() const noexcept;
+    /**
+     * @brief Return the number of older frames dropped before this frame was selected.
+     *
+     * The count is local to one `dequeue()` call and represents frames
+     * immediately requeued while draining an already-backlogged V4L2 queue.
+     *
+     * @return Older complete frames proactively returned to the driver.
+     */
+    std::uint32_t freshness_drops() const noexcept;
     const std::vector<frame_plane_t> &planes() const noexcept;
 
   private:
     friend class hdmirx_capture_t;
-    captured_frame_t(std::shared_ptr<detail::capture_state_t> state, std::uint32_t index, std::uint32_t sequence, std::chrono::steady_clock::time_point timestamp, std::chrono::steady_clock::time_point dequeue_timestamp, std::uint32_t timestamp_flags, std::vector<frame_plane_t> planes) noexcept;
+    captured_frame_t(std::shared_ptr<detail::capture_state_t> state, std::uint64_t generation, std::uint32_t index, std::uint32_t sequence, std::chrono::steady_clock::time_point timestamp, std::chrono::steady_clock::time_point dequeue_timestamp, std::uint32_t timestamp_flags, std::uint32_t freshness_drops, std::vector<frame_plane_t> planes) noexcept;
 
     void release_noexcept() noexcept;
 
     std::shared_ptr<detail::capture_state_t> state_;
+    std::uint64_t generation_ {};
     std::uint32_t index_ {};
     std::uint32_t sequence_ {};
     std::chrono::steady_clock::time_point timestamp_ {};
     std::chrono::steady_clock::time_point dequeue_timestamp_ {};
     std::uint32_t timestamp_flags_ {};
+    std::uint32_t freshness_drops_ {};
     std::vector<frame_plane_t> planes_;
     bool released_ {true};
   };
@@ -208,6 +222,17 @@ namespace platf::hdmirx {
     hdmirx_capture_t &operator=(hdmirx_capture_t &&other) noexcept;
     ~hdmirx_capture_t();
 
+    /**
+     * @brief Return the newest complete V4L2 frame available before the deadline.
+     *
+     * The call blocks until one frame is ready, then drains already-ready
+     * frames without blocking. Every older drained frame is immediately
+     * requeued before the newest frame is returned.
+     *
+     * @param timeout Maximum time to wait for the first frame.
+     * @return Newest complete frame and its local freshness-drop count.
+     * @throws std::runtime_error When the stream stops, times out, or returns invalid metadata.
+     */
     captured_frame_t dequeue(std::chrono::milliseconds timeout);
 
     /**
@@ -235,4 +260,6 @@ namespace platf::hdmirx {
   };
 }  // namespace platf::hdmirx
 
-namespace platf { std::shared_ptr<display_t> hdmirx_display(const video::config_t &config); }
+namespace platf {
+  std::shared_ptr<display_t> hdmirx_display(const video::config_t &config);
+}

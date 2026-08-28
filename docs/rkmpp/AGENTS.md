@@ -1,0 +1,1 @@
+- Use `scripts/build-rkmpp.sh` to build this project.

@@ -1,22 +1,24 @@
 /** @file src/platform/linux/rkmpp.h */
 #pragma once
 
+#include "src/frame_profile.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mpp_frame.h>
 #include <optional>
 #include <ostream>
 #include <span>
 #include <vector>
 
-#include <mpp_frame.h>
-
-#include "src/frame_profile.h"
-
 namespace platf::rkmpp {
   /** @brief Video codec emitted by the RKMPP encoder. */
-  enum class codec_e { h264, h265 };
+  enum class codec_e {
+    h264,
+    h265
+  };
 
   /**
    * @brief Describes the pixels MPP receives through one DMA-BUF.
@@ -47,6 +49,21 @@ namespace platf::rkmpp {
   using input_holder_t = std::shared_ptr<void>;
 
   /**
+   * @brief Stable identity for a reusable producer DMA-BUF import.
+   *
+   * A generation changes whenever the producer's allocation set is rebuilt;
+   * the index identifies one allocation only within that generation. File
+   * descriptor values are deliberately excluded because the kernel may reuse
+   * them after a source recovery.
+   */
+  struct input_buffer_key_t {
+    std::uint64_t generation {};  ///< Producer allocation generation.
+    std::uint32_t index {};  ///< Buffer index within the allocation generation.
+
+    friend constexpr bool operator==(const input_buffer_key_t &, const input_buffer_key_t &) = default;
+  };
+
+  /**
    * @brief A single DMA-BUF input frame submitted to RKMPP.
    *
    * `dma_buf_fd` is borrowed and is never closed by RKMPP.  `allocation_size`
@@ -61,6 +78,7 @@ namespace platf::rkmpp {
     std::int64_t pts {};  ///< Producer presentation timestamp passed to MPP unchanged.
     input_holder_t holder;  ///< Lifetime pin for the borrowed DMA-BUF.
     video::frame_profile_t *profile {};  ///< Borrowed profile record updated during synchronous encoding.
+    std::optional<input_buffer_key_t> cache_key;  ///< Stable import-cache key, or empty to import only for this frame.
   };
 
   /** @brief Result of validating a generic RKMPP input layout or frame. */
@@ -102,7 +120,21 @@ namespace platf::rkmpp {
      */
     bool annexb_first_vcl_is_idr(const std::vector<std::uint8_t> &bytes, codec_e codec, bool require_parameter_sets) noexcept;
     bool annexb_first_vcl_is_idr(const std::uint8_t *bytes, std::size_t size, codec_e codec, bool require_parameter_sets) noexcept;
+    /**
+     * @brief Confirm an MPP intra-packet indication with its Annex-B payload.
+     *
+     * Non-intra packets return false without scanning their bitstream. An
+     * intra indication is still verified so malformed metadata cannot mark a
+     * non-IDR packet as an IDR frame.
+     *
+     * @param output_intra MPP's `KEY_OUTPUT_INTRA` value for the packet.
+     * @param bytes Complete Annex-B access unit.
+     * @param codec Codec used to parse the access unit.
+     * @return True only when MPP marked the packet intra and the first VCL NAL is an IDR.
+     */
+    bool output_is_idr(bool output_intra, const std::uint8_t *bytes, std::size_t size, codec_e codec) noexcept;
   }  // namespace detail
+
   /**
    * @brief Derive a generic layout from one producer's single-plane extent.
    *
@@ -141,6 +173,7 @@ namespace platf::rkmpp {
    * @return `converter_required` when input I and coded T differ.
    */
   encoder_config_status_e validate_encoder_config(const struct encoder_config_t &config) noexcept;
+
   /**
    * @brief Cumulative statistics for one RKMPP encoder instance.
    */
@@ -151,6 +184,7 @@ namespace platf::rkmpp {
     std::uint32_t min_packet_bytes {};  ///< Smallest complete coded packet, or zero before output.
     std::uint32_t max_packet_bytes {};  ///< Largest complete coded packet, or zero before output.
   };
+
   /** @brief One 8-bit palette-index OSD region consumed by RKMPP. */
   struct osd_region_t {
     std::uint32_t x {};  ///< Left edge in coded pixels; must be 16-pixel aligned.
@@ -176,6 +210,7 @@ namespace platf::rkmpp {
    * @return Status explaining whether the region can be attached to MPP.
    */
   osd_region_status_e validate_osd_region(const osd_region_t &region, std::uint32_t coded_width, std::uint32_t coded_height) noexcept;
+
   /** @brief Fixed palette-index bitmap used for the white-background in-stream RKMPP latency HUD. */
   class frame_profile_overlay_bitmap_t {
   public:
@@ -197,6 +232,7 @@ namespace platf::rkmpp {
   private:
     std::array<std::uint8_t, width * height> pixels_ {};  ///< Persistent OSD indices copied into MPP only on updates.
   };
+
   /**
    * @brief Immutable RKMPP encoder setup for one stream.
    *
@@ -212,7 +248,10 @@ namespace platf::rkmpp {
     std::uint32_t fps_den {1};  ///< Input and output frame-rate denominator.
     std::uint32_t bitrate {12'000'000};  ///< Target CBR bitrate in bits per second.
     std::uint32_t gop {60};  ///< GOP length in frames.
+    bool low_delay {false};  ///< Request MPP low-delay mode; disabled by the baseline configuration.
+    bool disable_reencode {false};  ///< Limit MPP rate control to zero re-encode attempts; disabled by the baseline configuration.
   };
+
   /**
    * Owns the MPP output allocation until Sunshine's network consumer drops the
    * corresponding video packet. It is deliberately move-only: MppPacket and
@@ -238,6 +277,7 @@ namespace platf::rkmpp {
     std::unique_ptr<state_t> state_;
     friend class encoder_t;
   };
+
   class encoder_t {
   public:
     /**
@@ -248,8 +288,12 @@ namespace platf::rkmpp {
      * @throws std::runtime_error When a converter is required in this stage.
      */
     static encoder_t create(const encoder_config_t &config);
-    encoder_t(); encoder_t(const encoder_t &) = delete; encoder_t &operator=(const encoder_t &) = delete;
-    encoder_t(encoder_t &&) noexcept; encoder_t &operator=(encoder_t &&) noexcept; ~encoder_t();
+    encoder_t();
+    encoder_t(const encoder_t &) = delete;
+    encoder_t &operator=(const encoder_t &) = delete;
+    encoder_t(encoder_t &&) noexcept;
+    encoder_t &operator=(encoder_t &&) noexcept;
+    ~encoder_t();
     /**
      * @brief Synchronously encode one pinned DMA-BUF frame into a stream.
      *
@@ -278,6 +322,13 @@ namespace platf::rkmpp {
     void set_osd_region(const osd_region_t &region);
     /** @brief Stop attaching OSD metadata to subsequently submitted frames. */
     void clear_osd() noexcept;
+    /**
+     * @brief Release every cached producer DMA-BUF import.
+     *
+     * Call before a producer allocation generation is retired. In-flight work
+     * is not supported because this encoder uses the synchronous MPP API.
+     */
+    void clear_input_cache() noexcept;
     std::uint64_t encoded_frames() const noexcept;
     encoder_stats_t stats() const noexcept;
     /**
@@ -287,8 +338,12 @@ namespace platf::rkmpp {
      * @return Move-only packet that keeps MPP-owned coded bytes alive for networking.
      */
     encoded_packet_t encode_packet(const input_frame_t &frame);
+
   private:
-    struct state_t; explicit encoder_t(std::unique_ptr<state_t> state) noexcept; std::unique_ptr<state_t> state_;
+    struct state_t;
+    explicit encoder_t(std::unique_ptr<state_t> state) noexcept;
+    std::unique_ptr<state_t> state_;
   };
+
   bool is_compiled() noexcept;
 }  // namespace platf::rkmpp

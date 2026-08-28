@@ -793,7 +793,9 @@ namespace config {
     0,  // max_bitrate
     0,  // minimum_fps_target (0 = framerate)
     false,  // rkmpp_profile
-    false  // rkmpp_profile_overlay
+    false,  // rkmpp_profile_overlay
+    false,  // rkmpp_low_delay
+    false  // rkmpp_disable_reencode
   };
 
   /**
@@ -1692,7 +1694,11 @@ namespace config {
     double_between_f(vars, "minimum_fps_target", video.minimum_fps_target, {0.0, 1000.0});
     bool_f(vars, "rkmpp_profile", video.rkmpp_profile);
     bool_f(vars, "rkmpp_profile_overlay", video.rkmpp_profile_overlay);
-    if (video.rkmpp_profile_overlay) video.rkmpp_profile = true;
+    bool_f(vars, "rkmpp_low_delay", video.rkmpp_low_delay);
+    bool_f(vars, "rkmpp_disable_reencode", video.rkmpp_disable_reencode);
+    if (video.rkmpp_profile_overlay) {
+      video.rkmpp_profile = true;
+    }
 
     path_f(vars, "pkey", nvhttp.pkey);
     path_f(vars, "cert", nvhttp.cert);

@@ -4,6 +4,10 @@
  */
 #pragma once
 
+#ifdef SUNSHINE_BUILD_RKMPP
+  #include "platform/linux/rkmpp.h"
+#endif
+
 // standard includes
 #include <chrono>
 #include <string_view>
@@ -40,6 +44,22 @@ namespace video {
     int chromaSamplingType;  ///< Chroma sampling type: 0 = 4:2:0, 1 = 4:4:4.
     int enableIntraRefresh;  ///< Intra refresh setting: 0 = disabled, 1 = enabled.
   };
+
+#ifdef SUNSHINE_BUILD_RKMPP
+  /**
+   * @brief Create the common RKMPP configuration for direct and RGA paths.
+   *
+   * The GOP is one rounded frame-rate second and remains non-zero. Low-delay
+   * rate-control experiments must opt in through the returned configuration;
+   * the production baseline keeps both experimental controls disabled.
+   *
+   * @param config Encoding request supplied by the Moonlight session.
+   * @param input_layout Direct HDMI RX or RGA target layout accepted by MPP.
+   * @return Validated RKMPP encoder configuration using the session's rate and bitrate.
+   * @throws std::invalid_argument When the session request cannot be represented by RKMPP.
+   */
+  platf::rkmpp::encoder_config_t make_rkmpp_encoder_config(const config_t &config, const platf::rkmpp::input_layout_t &input_layout);
+#endif
 
   namespace amf {
 
@@ -476,9 +496,9 @@ namespace video {
 
 #if defined(__linux__) || defined(linux) || defined(__linux) || defined(__FreeBSD__)
   extern encoder_t vaapi;
-#ifdef SUNSHINE_BUILD_RKMPP
+  #ifdef SUNSHINE_BUILD_RKMPP
   extern encoder_t rkmpp;
-#endif
+  #endif
 #endif
 
 #ifdef __APPLE__

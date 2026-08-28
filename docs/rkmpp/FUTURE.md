@@ -46,3 +46,37 @@
     *   **原理**：如果在 RK3588 平台上运行完整的音频服务开销过大或者引入了不可接受的延迟，可以考虑绕过它们。
     *   **实现思路**：在 Sunshine (或当前插件中) 扩展音频捕获逻辑，直接打开 HDMI RX 对应的 ALSA PCM 设备（`snd_pcm_open` 等接口），循环读取音频数据。
     *   **难点**：如果源头（连接到 HDMI RX 的设备，如游戏主机）输出的是 44.1kHz 甚至多声道音频，而 Sunshine 协议强制需要 48kHz 立体声，则需要在我们的代码中自行引入 `libswresample` 等库进行软件重采样，增加了代码复杂度。
+
+## 4. RKMPP 编码器 Web UI 集成
+
+**需求背景**：
+将特定于 Rockchip MPP (RKMPP) 的配置通过专门的编码器选项卡暴露给 Web UI，方便用户可视化操作。
+
+**探索与实现方案**：
+*   **前端**：创建一个新的 Vue 组件 `src_assets/common/assets/web/configs/tabs/encoders/RkmppEncoder.vue`。在 `ContainerEncoders.vue` 中注册该新选项卡，使其与 NVENC、VAAPI 等并列显示。
+*   **后端**：确保任何新的 RKMPP 特定变量（例如速率控制模式、QP 限制、预设 profile）都能在 `src/config.cpp` 中被正确解析并暴露给 REST API，以此来取代或增强目前在 Advanced 选项卡中的开关（如 `rkmpp_profile`）。
+
+## 5. 音频设备下拉菜单 UI
+
+**需求背景**：
+改善选择音频接收器 (sink) 和源 (source) 的用户体验，用交互式的下拉列表代替当前的自由文本输入框。
+
+**探索与实现方案**：
+*   **后端**：在 `src/confighttp.cpp` 中创建一个新的 API 端点（例如 `/api/audio-devices`），该端点能够查询系统音频服务器（PulseAudio, PipeWire, 或 ALSA）并返回可用设备名称和描述的 JSON 列表。
+*   **前端**：修改 `src_assets/common/assets/web/configs/tabs/AudioVideo.vue`。将其中的 `audio_sink` 和 `audio_source` 的 `<input type="text">` 替换为 `<select>` 下拉框（或自动补全组合框），该下拉框会从新的 API 端点异步填充数据。这样用户就无需手动运行 `pactl list short sources` 这样的命令并复制粘贴设备字符串了。
+
+## 6. RKMPP 输出 buffer 有界池（原性能优化阶段 4）
+
+**已测量依据**：1080p60 直通 DMA-BUF 的 12 个连续 5 秒稳定窗口中，`MPP output buffer acquire` 的 P50/P95 约为 0.63/1.11 ms，`MPP output packet init` 的 P50/P95 约为 0.46/0.71 ms；input import cache 已稳定命中。因此输出 buffer acquire 是可量化的候选成本，但尚未证明它会改善端到端尾延迟。
+
+**后续实现方案**：
+
+*   仅在重新排期后实现固定容量的 output buffer pool；slot 由 `encoded_packet_t` 持有，直到网络消费者完成该帧才归还。
+*   pool 满时采用显式、有界的 backpressure 或丢帧策略，禁止按帧动态扩容。
+*   初版保持已验证的 8 MiB 单 slot 容量，并在高码率、高分辨率和 IDR 场景下确认不存在截断。
+
+**快速验收条件**：
+
+*   先记录 `mpp_buffer_get()`、`mpp_packet_init_with_buffer()`、释放路径和同时在途 packet 数。
+*   仅运行一次短窗口 A/B；只有 `Host to send` P95 或 P99 有明确改善且无码流、内存或网络回退时才保留。
+*   若实施，60 秒内 MPP 输出分配次数必须固定且不随帧数增长；关闭、重连和网络消费者暂停时不得死锁、泄漏或复用仍在发送的 slot。

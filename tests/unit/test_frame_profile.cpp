@@ -17,6 +17,12 @@ namespace {
     profile.rga_used = true;
     profile.rga_begin = base + microseconds(150);
     profile.rga_end = base + microseconds(250);
+    profile.mpp_import_begin = base + microseconds(251);
+    profile.mpp_import_end = base + microseconds(255);
+    profile.mpp_output_buffer_begin = base + microseconds(256);
+    profile.mpp_output_buffer_end = base + microseconds(257);
+    profile.mpp_output_packet_begin = base + microseconds(258);
+    profile.mpp_output_packet_end = base + microseconds(259);
     profile.mpp_submit_begin = base + microseconds(260);
     profile.mpp_submit_end = base + microseconds(280);
     profile.mpp_output = base + microseconds(500);
@@ -43,12 +49,16 @@ TEST(FrameProfileWindow, CalculatesEveryStage) {
   EXPECT_EQ(snapshot.moonlight_height, 1080U);
   EXPECT_EQ(snapshot.placeholder_frames, 0);
   EXPECT_EQ(snapshot.rga_bypass_frames, 0);
+  EXPECT_EQ(snapshot.freshness_drops, 0U);
   const auto metric = [&](video::frame_profile_metric_e value) -> const auto & {
     return snapshot.metrics[static_cast<std::size_t>(value)];
   };
   EXPECT_EQ(metric(video::frame_profile_metric_e::rx_driver_age).p50_us, 100);
   EXPECT_EQ(metric(video::frame_profile_metric_e::capture_queue).p50_us, 50);
   EXPECT_EQ(metric(video::frame_profile_metric_e::rga).p50_us, 100);
+  EXPECT_EQ(metric(video::frame_profile_metric_e::mpp_import).p50_us, 4);
+  EXPECT_EQ(metric(video::frame_profile_metric_e::mpp_output_buffer_acquire).p50_us, 1);
+  EXPECT_EQ(metric(video::frame_profile_metric_e::mpp_output_packet_init).p50_us, 1);
   EXPECT_EQ(metric(video::frame_profile_metric_e::mpp_submit).p50_us, 20);
   EXPECT_EQ(metric(video::frame_profile_metric_e::mpp_output_wait).p50_us, 220);
   EXPECT_EQ(metric(video::frame_profile_metric_e::mpp_encode).p50_us, 240);
@@ -81,6 +91,24 @@ TEST(FrameProfileWindow, SeparatesBypassPlaceholderAndInvalidSamples) {
   EXPECT_EQ(rga.count, 1);
   EXPECT_EQ(encode.count, 1);
   EXPECT_EQ(encode.invalid, 1);
+}
+
+TEST(FrameProfileWindow, AggregatesFreshnessDropsOnlyForCapturedFrames) {
+  video::frame_profile_window_t window;
+  auto first = complete_profile();
+  first.freshness_drops = 2;
+  window.collect(first);
+
+  auto second = complete_profile();
+  second.freshness_drops = 3;
+  window.collect(second);
+
+  video::frame_profile_t placeholder;
+  placeholder.kind = video::frame_profile_kind_e::placeholder;
+  placeholder.freshness_drops = 99;
+  window.collect(placeholder);
+
+  EXPECT_EQ(window.snapshot_and_reset().freshness_drops, 5U);
 }
 
 TEST(FrameProfileWindow, CalculatesNearestRankPercentiles) {

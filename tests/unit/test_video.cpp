@@ -227,6 +227,97 @@ TEST_P(FramerateToRationalTest, Run) {
                                         << res.num << "/" << res.den;
 }
 
+#ifdef SUNSHINE_BUILD_RKMPP
+TEST(RkmppEncoderConfigFactory, UsesOneSessionRateAndBitratePolicyForDirectAndRgaInputs) {
+  const platf::rkmpp::input_layout_t input {1920, 1080, 1920, 1080, MPP_FMT_YUV420SP};
+  video::config_t config {};
+  config.width = 1920;
+  config.height = 1080;
+  config.framerate = 60;
+  config.framerateX100 = 5994;
+  config.bitrate = 15'000;
+  config.videoFormat = 1;
+
+  const auto direct = video::make_rkmpp_encoder_config(config, input);
+  const auto rga = video::make_rkmpp_encoder_config(config, input);
+
+  EXPECT_EQ(direct.codec, rga.codec);
+  EXPECT_EQ(direct.input_layout, rga.input_layout);
+  EXPECT_EQ(direct.coded_width, rga.coded_width);
+  EXPECT_EQ(direct.coded_height, rga.coded_height);
+  EXPECT_EQ(direct.fps_num, rga.fps_num);
+  EXPECT_EQ(direct.fps_den, rga.fps_den);
+  EXPECT_EQ(direct.bitrate, rga.bitrate);
+  EXPECT_EQ(direct.gop, rga.gop);
+  EXPECT_EQ(direct.low_delay, rga.low_delay);
+  EXPECT_EQ(direct.disable_reencode, rga.disable_reencode);
+  EXPECT_EQ(direct.codec, platf::rkmpp::codec_e::h265);
+  EXPECT_EQ(direct.fps_num, 60'000U);
+  EXPECT_EQ(direct.fps_den, 1'001U);
+  EXPECT_EQ(direct.bitrate, 15'000'000U);
+  EXPECT_EQ(direct.gop, 60U);
+  EXPECT_FALSE(direct.low_delay);
+  EXPECT_FALSE(direct.disable_reencode);
+}
+
+TEST(RkmppEncoderConfigFactory, DerivesOneSecondGopForIntegerAndFractionalRates) {
+  const platf::rkmpp::input_layout_t input {1920, 1080, 1920, 1080, MPP_FMT_YUV420SP};
+  for (const auto &[framerate, framerate_x100, expected_num, expected_den, expected_gop, bitrate] : {
+         std::tuple {30, 0, 30U, 1U, 30U, 8'000},
+         std::tuple {60, 0, 60U, 1U, 60U, 12'000},
+         std::tuple {60, 5994, 60'000U, 1'001U, 60U, 20'000},
+       }) {
+    video::config_t config {};
+    config.width = 1920;
+    config.height = 1080;
+    config.framerate = framerate;
+    config.framerateX100 = framerate_x100;
+    config.bitrate = bitrate;
+    const auto settings = video::make_rkmpp_encoder_config(config, input);
+    EXPECT_EQ(settings.fps_num, expected_num);
+    EXPECT_EQ(settings.fps_den, expected_den);
+    EXPECT_EQ(settings.gop, expected_gop);
+    EXPECT_EQ(settings.bitrate, static_cast<std::uint32_t>(bitrate) * 1'000U);
+    EXPECT_EQ(platf::rkmpp::validate_encoder_config(settings), platf::rkmpp::encoder_config_status_e::ok);
+  }
+}
+
+TEST(RkmppEncoderConfigFactory, AppliesConfiguredLowLatencyExperimentFlags) {
+  const platf::rkmpp::input_layout_t input {1920, 1080, 1920, 1080, MPP_FMT_YUV420SP};
+  video::config_t config {};
+  config.width = 1920;
+  config.height = 1080;
+  config.framerate = 60;
+  config.bitrate = 12'000;
+
+  const auto saved_low_delay = ::config::video.rkmpp_low_delay;
+  const auto saved_disable_reencode = ::config::video.rkmpp_disable_reencode;
+  ::config::video.rkmpp_low_delay = true;
+  ::config::video.rkmpp_disable_reencode = true;
+  const auto settings = video::make_rkmpp_encoder_config(config, input);
+  ::config::video.rkmpp_low_delay = saved_low_delay;
+  ::config::video.rkmpp_disable_reencode = saved_disable_reencode;
+
+  EXPECT_TRUE(settings.low_delay);
+  EXPECT_TRUE(settings.disable_reencode);
+}
+
+TEST(RkmppEncoderConfigFactory, RejectsUnsupportedCodecAndInvalidCodedDimensions) {
+  const platf::rkmpp::input_layout_t input {1920, 1080, 1920, 1080, MPP_FMT_YUV420SP};
+  video::config_t config {};
+  config.width = 1920;
+  config.height = 1080;
+  config.framerate = 60;
+  config.bitrate = 12'000;
+
+  config.videoFormat = 2;
+  EXPECT_THROW(video::make_rkmpp_encoder_config(config, input), std::invalid_argument);
+  config.videoFormat = 0;
+  config.width = 0;
+  EXPECT_THROW(video::make_rkmpp_encoder_config(config, input), std::invalid_argument);
+}
+#endif
+
 INSTANTIATE_TEST_SUITE_P(
   FramerateToRationalTests,
   FramerateToRationalTest,

@@ -6,12 +6,11 @@
 
   #include <algorithm>
   #include <array>
-  #include <limits>
-  #include <utility>
-
   #include <gtest/gtest.h>
-
+  #include <limits>
   #include <src/platform/linux/rkmpp.h>
+  #include <utility>
+  #include <vector>
 
 namespace {
   /**
@@ -143,6 +142,17 @@ namespace {
     }
   }
 
+  TEST(RkmppInputCacheKey, DistinguishesReusedFileDescriptorsAcrossCaptureGenerations) {
+    const platf::rkmpp::input_buffer_key_t first_generation {7, 2};
+    const platf::rkmpp::input_buffer_key_t same_slot {7, 2};
+    const platf::rkmpp::input_buffer_key_t recovered_generation {8, 2};
+    const platf::rkmpp::input_buffer_key_t another_slot {7, 3};
+
+    EXPECT_EQ(first_generation, same_slot);
+    EXPECT_NE(first_generation, recovered_generation);
+    EXPECT_NE(first_generation, another_slot);
+  }
+
   TEST(RkmppInputLayout, ReportsConverterRequiredWithoutCreatingWrongEncoderConfiguration) {
     const auto input = nv12_layout();
     const platf::rkmpp::encoder_config_t mismatch {platf::rkmpp::codec_e::h264, input, 1280, 720};
@@ -179,6 +189,17 @@ namespace {
     EXPECT_EQ(platf::rkmpp::validate_encoder_config(config), platf::rkmpp::encoder_config_status_e::invalid_rate_control);
     config.bitrate = std::numeric_limits<std::uint32_t>::max();
     EXPECT_EQ(platf::rkmpp::validate_encoder_config(config), platf::rkmpp::encoder_config_status_e::invalid_rate_control);
+  }
+
+  TEST(RkmppOutputIdr, SkipsNonIntraPacketsAndVerifiesIntraPackets) {
+    const std::vector<std::uint8_t> h264_idr {0, 0, 1, 7, 0, 0, 1, 8, 0, 0, 1, 5};
+    const std::vector<std::uint8_t> h265_idr {0, 0, 1, 64, 0, 0, 1, 66, 0, 0, 1, 68, 0, 0, 1, 38};
+    const std::vector<std::uint8_t> non_idr {0, 0, 1, 1};
+
+    EXPECT_FALSE(platf::rkmpp::detail::output_is_idr(false, h264_idr.data(), h264_idr.size(), platf::rkmpp::codec_e::h264));
+    EXPECT_TRUE(platf::rkmpp::detail::output_is_idr(true, h264_idr.data(), h264_idr.size(), platf::rkmpp::codec_e::h264));
+    EXPECT_TRUE(platf::rkmpp::detail::output_is_idr(true, h265_idr.data(), h265_idr.size(), platf::rkmpp::codec_e::h265));
+    EXPECT_FALSE(platf::rkmpp::detail::output_is_idr(true, non_idr.data(), non_idr.size(), platf::rkmpp::codec_e::h264));
   }
 
   TEST(RkmppOsdRegion, ValidatesMacroblockAlignmentBoundsAndStorage) {

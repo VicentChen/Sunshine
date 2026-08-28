@@ -38,6 +38,7 @@ namespace video {
     std::uint32_t hdmirx_height {};  ///< Visible HDMI RX frame height in pixels.
     std::uint32_t moonlight_width {};  ///< Moonlight-requested encoded frame width in pixels.
     std::uint32_t moonlight_height {};  ///< Moonlight-requested encoded frame height in pixels.
+    std::uint32_t freshness_drops {};  ///< Older complete V4L2 frames returned to the driver before this frame was selected.
     std::int64_t frame_index {-1};  ///< Sunshine frame index assigned before packetization.
     bool rga_used {};  ///< Whether the frame passed through RGA conversion or fill.
 
@@ -46,6 +47,12 @@ namespace video {
     std::optional<time_point> capture_queue_exit;  ///< Time the encoder thread began processing the captured image.
     std::optional<time_point> rga_begin;  ///< Time immediately before RGA work began.
     std::optional<time_point> rga_end;  ///< Time immediately after RGA work completed.
+    std::optional<time_point> mpp_import_begin;  ///< Time immediately before a non-cached MPP DMA-BUF import.
+    std::optional<time_point> mpp_import_end;  ///< Time immediately after a non-cached MPP DMA-BUF import.
+    std::optional<time_point> mpp_output_buffer_begin;  ///< Time immediately before MPP allocates an output buffer.
+    std::optional<time_point> mpp_output_buffer_end;  ///< Time immediately after MPP allocates an output buffer.
+    std::optional<time_point> mpp_output_packet_begin;  ///< Time immediately before MPP initializes the output packet wrapper.
+    std::optional<time_point> mpp_output_packet_end;  ///< Time immediately after MPP initializes the output packet wrapper.
     std::optional<time_point> mpp_submit_begin;  ///< Time immediately before encode_put_frame.
     std::optional<time_point> mpp_submit_end;  ///< Time immediately after encode_put_frame returned.
     std::optional<time_point> mpp_output;  ///< Time a complete non-empty MppPacket became available.
@@ -58,6 +65,9 @@ namespace video {
     rx_driver_age,  ///< V4L2 timestamp to successful dequeue.
     capture_queue,  ///< Successful dequeue to encoder-thread processing.
     rga,  ///< RGA conversion or placeholder fill.
+    mpp_import,  ///< Non-cached MPP DMA-BUF import.
+    mpp_output_buffer_acquire,  ///< MPP output-buffer allocation.
+    mpp_output_packet_init,  ///< MPP output-packet wrapper initialization.
     mpp_submit,  ///< Time spent in encode_put_frame.
     mpp_output_wait,  ///< encode_put_frame return to complete MppPacket.
     mpp_encode,  ///< encode_put_frame entry to complete MppPacket.
@@ -92,6 +102,7 @@ namespace video {
     std::uint32_t placeholder_frames {};  ///< Synthetic placeholder frames observed.
     std::uint32_t repeated_frames {};  ///< Repeated frames observed.
     std::uint32_t rga_bypass_frames {};  ///< Real frames that bypassed RGA.
+    std::uint64_t freshness_drops {};  ///< Total older V4L2 frames proactively discarded to keep the newest frame.
     std::uint32_t dropped_samples {};  ///< Samples discarded after the bounded buffer filled.
   };
 
@@ -109,6 +120,12 @@ namespace video {
         return "Capture queue";
       case frame_profile_metric_e::rga:
         return "RGA";
+      case frame_profile_metric_e::mpp_import:
+        return "MPP input import";
+      case frame_profile_metric_e::mpp_output_buffer_acquire:
+        return "MPP output buffer acquire";
+      case frame_profile_metric_e::mpp_output_packet_init:
+        return "MPP output packet init";
       case frame_profile_metric_e::mpp_submit:
         return "MPP submit";
       case frame_profile_metric_e::mpp_output_wait:
@@ -169,6 +186,7 @@ namespace video {
       }
 
       ++captured_frames_;
+      freshness_drops_ += profile.freshness_drops;
       if (profile.hdmirx_width != 0 && profile.hdmirx_height != 0) {
         hdmirx_width_ = profile.hdmirx_width;
         hdmirx_height_ = profile.hdmirx_height;
@@ -184,6 +202,9 @@ namespace video {
       } else {
         ++rga_bypass_frames_;
       }
+      collect_metric(frame_profile_metric_e::mpp_import, profile.mpp_import_begin, profile.mpp_import_end);
+      collect_metric(frame_profile_metric_e::mpp_output_buffer_acquire, profile.mpp_output_buffer_begin, profile.mpp_output_buffer_end);
+      collect_metric(frame_profile_metric_e::mpp_output_packet_init, profile.mpp_output_packet_begin, profile.mpp_output_packet_end);
       collect_metric(frame_profile_metric_e::mpp_submit, profile.mpp_submit_begin, profile.mpp_submit_end);
       collect_metric(frame_profile_metric_e::mpp_output_wait, profile.mpp_submit_end, profile.mpp_output);
       collect_metric(frame_profile_metric_e::mpp_encode, profile.mpp_submit_begin, profile.mpp_output);
@@ -208,6 +229,7 @@ namespace video {
       snapshot.placeholder_frames = placeholder_frames_;
       snapshot.repeated_frames = repeated_frames_;
       snapshot.rga_bypass_frames = rga_bypass_frames_;
+      snapshot.freshness_drops = freshness_drops_;
       snapshot.dropped_samples = dropped_samples_;
 
       for (std::size_t index = 0; index < metric_count; ++index) {
@@ -288,6 +310,7 @@ namespace video {
       placeholder_frames_ = 0;
       repeated_frames_ = 0;
       rga_bypass_frames_ = 0;
+      freshness_drops_ = 0;
       dropped_samples_ = 0;
     }
 
@@ -300,6 +323,7 @@ namespace video {
     std::uint32_t placeholder_frames_ {};  ///< Placeholder frames collected in this window.
     std::uint32_t repeated_frames_ {};  ///< Repeated frames collected in this window.
     std::uint32_t rga_bypass_frames_ {};  ///< Real frames that skipped RGA.
+    std::uint64_t freshness_drops_ {};  ///< Older V4L2 frames proactively discarded in this window.
     std::uint32_t dropped_samples_ {};  ///< Samples discarded due to capacity.
   };
 

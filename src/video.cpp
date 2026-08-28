@@ -7,8 +7,8 @@
 #include <array>
 #include <atomic>
 #include <bitset>
-#include <list>
 #include <limits>
+#include <list>
 #include <thread>
 #include <utility>
 
@@ -37,8 +37,8 @@ extern "C" {
 #include "sync.h"
 #include "video.h"
 #ifdef SUNSHINE_BUILD_RKMPP
-  #include "platform/linux/hdmirx.h"
   #include "platform/hdmirx_policy.h"
+  #include "platform/linux/hdmirx.h"
   #include "platform/linux/rga.h"
   #include "platform/linux/rkmpp.h"
 #endif
@@ -91,11 +91,26 @@ namespace video {
   class packet_raw_rkmpp final: public packet_raw_t {
   public:
     packet_raw_rkmpp(platf::rkmpp::encoded_packet_t &&packet, int64_t frame_index, bool idr):
-        packet_ {std::move(packet)}, frame_index_ {frame_index}, idr_ {idr} {}
-    bool is_idr() override { return idr_; }
-    int64_t frame_index() override { return frame_index_; }
-    uint8_t *data() override { return packet_.data(); }
-    size_t data_size() override { return packet_.size(); }
+        packet_ {std::move(packet)},
+        frame_index_ {frame_index},
+        idr_ {idr} {}
+
+    bool is_idr() override {
+      return idr_;
+    }
+
+    int64_t frame_index() override {
+      return frame_index_;
+    }
+
+    uint8_t *data() override {
+      return packet_.data();
+    }
+
+    size_t data_size() override {
+      return packet_.size();
+    }
+
   private:
     // Destroyed by the network consumer thread after RTP/FEC payload creation.
     platf::rkmpp::encoded_packet_t packet_;
@@ -1214,7 +1229,7 @@ namespace video {
   /**
    * @brief VA-API.
    */
-#ifdef SUNSHINE_BUILD_RKMPP
+  #ifdef SUNSHINE_BUILD_RKMPP
   encoder_t rkmpp {
     "rkmpp"sv,
     std::make_unique<encoder_platform_formats_rkmpp>(),
@@ -1223,7 +1238,7 @@ namespace video {
     {{}, {}, {}, {}, {}, {}, "h264_rkmpp"s},
     0
   };
-#endif
+  #endif
 
   encoder_t vaapi {
     "vaapi"sv,
@@ -1816,15 +1831,22 @@ namespace video {
 #ifdef SUNSHINE_BUILD_RKMPP
 
   static std::optional<platf::rga::pixel_format_e> rga_format_from_mpp(std::uint32_t mpp_fmt) {
-    if (mpp_fmt == MPP_FMT_YUV420SP) return platf::rga::pixel_format_e::nv12;
-    if (mpp_fmt == MPP_FMT_BGR888) return platf::rga::pixel_format_e::bgr888;
+    if (mpp_fmt == MPP_FMT_YUV420SP) {
+      return platf::rga::pixel_format_e::nv12;
+    }
+    if (mpp_fmt == MPP_FMT_BGR888) {
+      return platf::rga::pixel_format_e::bgr888;
+    }
     return std::nullopt;
   }
+
   class rkmpp_profile_overlay_t {
   public:
     /** @brief Attach the waiting HUD or a newly published profile snapshot. */
     void refresh(platf::rkmpp::encoder_t &encoder) {
-      if (!config::video.rkmpp_profile_overlay) return;
+      if (!config::video.rkmpp_profile_overlay) {
+        return;
+      }
       if (!configured_) {
         attach(encoder);
         configured_ = true;
@@ -1839,8 +1861,7 @@ namespace video {
   private:
     /** @brief Copy the fixed bitmap into the encoder's persistent MPP OSD buffer. */
     void attach(platf::rkmpp::encoder_t &encoder) {
-      encoder.set_osd_region({16, 16, platf::rkmpp::frame_profile_overlay_bitmap_t::width,
-                              platf::rkmpp::frame_profile_overlay_bitmap_t::height, bitmap_.pixels()});
+      encoder.set_osd_region({16, 16, platf::rkmpp::frame_profile_overlay_bitmap_t::width, platf::rkmpp::frame_profile_overlay_bitmap_t::height, bitmap_.pixels()});
     }
 
     platf::rkmpp::frame_profile_overlay_bitmap_t bitmap_;  ///< Fixed palette-index text bitmap.
@@ -1848,16 +1869,42 @@ namespace video {
     bool configured_ {};  ///< Whether the initial waiting HUD was attached.
   };
 
-  class rkmpp_rga_encode_session_t final: public encode_session_t {
+  platf::rkmpp::encoder_config_t make_rkmpp_encoder_config(const config_t &config, const platf::rkmpp::input_layout_t &input_layout) {
+    if (config.numRefFrames != 0) {
+      throw std::invalid_argument("RKMPP does not support a requested reference-frame count");
+    }
+    if (config.slicesPerFrame > 1) {
+      throw std::invalid_argument("RKMPP does not support more than one slice per frame");
+    }
+    if (config.videoFormat != 0 && config.videoFormat != 1) {
+      throw std::invalid_argument("RKMPP supports only H.264 and HEVC");
+    }
+    if (config.width <= 0 || config.height <= 0) {
+      throw std::invalid_argument("RKMPP coded dimensions are invalid");
+    }
+    if (config.bitrate <= 0 || static_cast<std::uint64_t>(config.bitrate) > std::numeric_limits<std::uint32_t>::max() / 1000U) {
+      throw std::invalid_argument("RKMPP bitrate in kbit/s is out of range");
+    }
+    const auto fps = framerate_to_rational(config);
+    if (fps.num <= 0 || fps.den <= 0) {
+      throw std::invalid_argument("RKMPP frame rate is invalid");
+    }
+    const auto gop = (static_cast<std::uint64_t>(fps.num) + static_cast<std::uint64_t>(fps.den) / 2U) / static_cast<std::uint64_t>(fps.den);
+    if (gop == 0 || gop > std::numeric_limits<std::uint32_t>::max()) {
+      throw std::invalid_argument("RKMPP GOP is out of range");
+    }
+    return {config.videoFormat == 0 ? platf::rkmpp::codec_e::h264 : platf::rkmpp::codec_e::h265, input_layout, static_cast<std::uint32_t>(config.width), static_cast<std::uint32_t>(config.height), static_cast<std::uint32_t>(fps.num), static_cast<std::uint32_t>(fps.den), static_cast<std::uint32_t>(config.bitrate) * 1000U, static_cast<std::uint32_t>(gop), ::config::video.rkmpp_low_delay, ::config::video.rkmpp_disable_reencode};
+  }
 
+  class rkmpp_rga_encode_session_t final: public encode_session_t {
   public:
     platf::rkmpp::input_layout_t source_input_layout_;
-    rkmpp_rga_encode_session_t(const config_t &config, const platf::rkmpp::input_layout_t &input_layout, std::uint32_t coded_width, std::uint32_t coded_height) :
+
+    rkmpp_rga_encode_session_t(const config_t &config, const platf::rkmpp::input_layout_t &input_layout, std::uint32_t coded_width, std::uint32_t coded_height):
         source_input_layout_(input_layout),
         rga_backend_(platf::rga::make_backend()),
         rga_allocator_(platf::rga::make_cma_dma_allocator()),
         video_format_(config.videoFormat) {
-
       if (!rga_backend_ || !rga_allocator_) {
         throw std::runtime_error("Failed to initialize RGA backend or allocator");
       }
@@ -1877,9 +1924,9 @@ namespace video {
         .format = platf::rga::pixel_format_e::nv12
       };
 
-      for (int i = 0; i < 4; ++i) {
+      for (std::uint32_t i = 0; i < 4; ++i) {
         auto buf = std::make_shared<platf::rga::target_buffer_t>(platf::rga::target_buffer_t::allocate_nv12(*rga_backend_, *rga_allocator_, target_resolution_.width, target_resolution_.height, target_layout_.stride));
-        free_buffers_.push(std::move(buf));
+        free_buffers_.push({std::move(buf), i});
       }
 
       auto encoder_input_layout = platf::rkmpp::make_input_layout_from_plane(target_resolution_.width, target_resolution_.height, MPP_FMT_YUV420SP, target_layout_.stride, target_layout_.allocation_size);
@@ -1887,20 +1934,32 @@ namespace video {
         throw std::runtime_error("Failed to create encoder input layout");
       }
       encoder_input_layout_ = *encoder_input_layout;
-      encoder_ = platf::rkmpp::encoder_t::create(make_encoder_config(config, encoder_input_layout_));
+      encoder_ = platf::rkmpp::encoder_t::create(make_rkmpp_encoder_config(config, encoder_input_layout_));
     }
 
     int convert(platf::img_t &img) override {
       auto *image = dynamic_cast<platf::hdmirx::hdmirx_img_t *>(&img);
-      if (!image) return -1;
-      if (image->request_idr) request_idr_frame();
-      if (image->placeholder) return convert_placeholder(*image);
-      if (!image->frame || !image->capture_format || image->frame->planes().empty()) return -1;
+      if (!image) {
+        return -1;
+      }
+      if (image->request_idr) {
+        request_idr_frame();
+      }
+      if (image->placeholder) {
+        return convert_placeholder(*image);
+      }
+      if (!image->frame || !image->capture_format || image->frame->planes().empty()) {
+        return -1;
+      }
 
       const auto &plane = image->frame->planes().front();
       const auto &capture_format = *image->capture_format;
       const auto source_input_layout = platf::rkmpp::make_input_layout_from_plane(
-        capture_format.width, capture_format.height, capture_format.mpp_format, plane.bytesperline, plane.sizeimage
+        capture_format.width,
+        capture_format.height,
+        capture_format.mpp_format,
+        plane.bytesperline,
+        plane.sizeimage
       );
       if (!source_input_layout) {
         BOOST_LOG(error) << "RKMPP RGA source frame has an invalid post-recovery layout";
@@ -1921,8 +1980,10 @@ namespace video {
         .format = *src_format
       };
 
-      auto target_buf = take_target_buffer();
-      auto holder = retain_target_buffer(target_buf);
+      auto target = take_target_buffer();
+      auto target_buf = target.buffer;
+      const auto cache_key = platf::rkmpp::input_buffer_key_t {rga_input_generation_, target.index};
+      auto holder = retain_target_buffer(std::move(target));
 
       try {
         if (image->frame_profile) {
@@ -1932,7 +1993,7 @@ namespace video {
         auto src_rga = platf::rga::imported_buffer_t::import(*rga_backend_, src_layout);
         auto viewport = platf::hdmirx::make_viewport({src_layout.width, src_layout.height}, target_resolution_, platf::hdmirx::pixel_format_e::nv12);
         if (!viewport) {
-           throw std::runtime_error("Failed to calculate viewport");
+          throw std::runtime_error("Failed to calculate viewport");
         }
 
         // A full-frame conversion overwrites every target pixel, making the
@@ -1944,7 +2005,9 @@ namespace video {
         platf::rga::rectangle_t rga_src {viewport->source.left, viewport->source.top, viewport->source.width, viewport->source.height};
         platf::rga::rectangle_t rga_dst {viewport->destination.left, viewport->destination.top, viewport->destination.width, viewport->destination.height};
         platf::rga::process(src_rga, rga_src, target_buf->rga_buffer(), rga_dst);
-        if (image->frame_profile) image->frame_profile->rga_end = std::chrono::steady_clock::now();
+        if (image->frame_profile) {
+          image->frame_profile->rga_end = std::chrono::steady_clock::now();
+        }
       } catch (const std::exception &e) {
         BOOST_LOG(error) << "RGA conversion failed: " << e.what();
         return -1;
@@ -1955,7 +2018,8 @@ namespace video {
         .dma_buf_fd = target_buf->layout().dma_buf_fd,
         .allocation_size = target_buf->layout().allocation_size,
         .pts = image->frame->timestamp().time_since_epoch().count(),
-        .holder = holder
+        .holder = holder,
+        .cache_key = cache_key
       };
       current_profile_ = std::move(image->frame_profile);
       current_input_.profile = current_profile_ ? &*current_profile_ : nullptr;
@@ -1964,16 +2028,17 @@ namespace video {
       return 0;
     }
 
-
     int convert_placeholder(platf::hdmirx::hdmirx_img_t &image) {
-      std::shared_ptr<platf::rga::target_buffer_t> target_buf;
+      rga_target_slot_t target;
       try {
-        target_buf = take_target_buffer();
+        target = take_target_buffer();
       } catch (const std::exception &e) {
         BOOST_LOG(error) << "RKMPP RGA placeholder DMA-BUF pool is exhausted: " << e.what();
         return -1;
       }
-      auto holder = retain_target_buffer(target_buf);
+      auto target_buf = target.buffer;
+      const auto cache_key = platf::rkmpp::input_buffer_key_t {rga_input_generation_, target.index};
+      auto holder = retain_target_buffer(std::move(target));
 
       try {
         if (image.frame_profile) {
@@ -1982,13 +2047,16 @@ namespace video {
         }
         // Opaque ARGB green matches the official librga fill sample.
         platf::rga::fill(target_buf->rga_buffer(), {0, 0, target_resolution_.width, target_resolution_.height}, 0xff00ff00U);
-        if (image.frame_profile) image.frame_profile->rga_end = std::chrono::steady_clock::now();
+        if (image.frame_profile) {
+          image.frame_profile->rga_end = std::chrono::steady_clock::now();
+        }
         current_input_ = {
           .layout = encoder_input_layout_,
           .dma_buf_fd = target_buf->layout().dma_buf_fd,
           .allocation_size = target_buf->layout().allocation_size,
           .pts = image.frame ? image.frame->timestamp().time_since_epoch().count() : 0,
-          .holder = holder
+          .holder = holder,
+          .cache_key = cache_key
         };
         current_profile_ = std::move(image.frame_profile);
         current_input_.profile = current_profile_ ? &*current_profile_ : nullptr;
@@ -2001,12 +2069,20 @@ namespace video {
       }
     }
 
-    void request_idr_frame() override { force_idr_ = true; }
-    void request_normal_frame() override { force_idr_ = false; }
+    void request_idr_frame() override {
+      force_idr_ = true;
+    }
+
+    void request_normal_frame() override {
+      force_idr_ = false;
+    }
+
     void invalidate_ref_frames(int64_t, int64_t) override {}
 
     platf::rkmpp::encoded_packet_t encode() {
-      if (!ready_) throw std::runtime_error("RKMPP RGA encode called without a converted frame");
+      if (!ready_) {
+        throw std::runtime_error("RKMPP RGA encode called without a converted frame");
+      }
       profile_overlay_.refresh(encoder_);
       if (force_idr_) {
         encoder_.request_idr();
@@ -2019,12 +2095,25 @@ namespace video {
       current_input_.holder.reset();
       return packet;
     }
-    int video_format() const noexcept { return video_format_; }
+
+    int video_format() const noexcept {
+      return video_format_;
+    }
+
     /** @brief Move the profile completed by the most recent encode operation. */
-    std::optional<frame_profile_t> take_frame_profile() { return std::exchange(encoded_profile_, std::nullopt); }
+    std::optional<frame_profile_t> take_frame_profile() {
+      return std::exchange(encoded_profile_, std::nullopt);
+    }
 
   private:
-    std::shared_ptr<platf::rga::target_buffer_t> take_target_buffer() {
+    /** @brief One fixed RGA target and its stable cache index. */
+    struct rga_target_slot_t {
+      std::shared_ptr<platf::rga::target_buffer_t> buffer;
+      std::uint32_t index {};
+    };
+
+    /** @brief Lease one fixed target from the RGA conversion pool. */
+    rga_target_slot_t take_target_buffer() {
       std::lock_guard<std::mutex> lock(pool_mutex_);
       if (free_buffers_.empty()) {
         throw std::runtime_error("RKMPP RGA target DMA-BUF pool is exhausted");
@@ -2034,33 +2123,20 @@ namespace video {
       return target;
     }
 
-    platf::rkmpp::input_holder_t retain_target_buffer(std::shared_ptr<platf::rga::target_buffer_t> target) {
-      return {target.get(), [this, target = std::move(target)](void *) mutable {
-        std::lock_guard<std::mutex> lock(pool_mutex_);
-        free_buffers_.push(std::move(target));
-        pool_cv_.notify_one();
-      }};
-    }
-
-    static platf::rkmpp::encoder_config_t make_encoder_config(const config_t &config, const platf::rkmpp::input_layout_t &input_layout) {
-      if (config.numRefFrames != 0) throw std::invalid_argument("RKMPP does not support a requested reference-frame count");
-      if (config.slicesPerFrame > 1) throw std::invalid_argument("RKMPP does not support more than one slice per frame");
-      if (config.bitrate <= 0 || static_cast<std::uint64_t>(config.bitrate) > std::numeric_limits<std::uint32_t>::max() / 1000U) {
-        throw std::invalid_argument("RKMPP bitrate in kbit/s is out of range");
-      }
-      const auto fps = config.framerateX100 > 0 ? framerateX100_to_rational(config.framerateX100) : AVRational {config.framerate, 1};
-      if (fps.num <= 0 || fps.den <= 0) throw std::invalid_argument("RKMPP frame rate is invalid");
-      return {config.videoFormat == 0 ? platf::rkmpp::codec_e::h264 : platf::rkmpp::codec_e::h265,
-              input_layout, static_cast<std::uint32_t>(config.width), static_cast<std::uint32_t>(config.height),
-              static_cast<std::uint32_t>(fps.num), static_cast<std::uint32_t>(fps.den),
-              static_cast<std::uint32_t>(config.bitrate) * 1000U, static_cast<std::uint32_t>(config.framerate)};
+    /** @brief Return a target to the conversion pool when MPP releases its input holder. */
+    platf::rkmpp::input_holder_t retain_target_buffer(rga_target_slot_t target) {
+      return {target.buffer.get(), [this, target = std::move(target)](void *) mutable {
+                std::lock_guard<std::mutex> lock(pool_mutex_);
+                free_buffers_.push(std::move(target));
+                pool_cv_.notify_one();
+              }};
     }
 
     std::unique_ptr<platf::rga::backend_t> rga_backend_;
     std::unique_ptr<platf::rga::dma_allocator_t> rga_allocator_;
     std::mutex pool_mutex_;
     std::condition_variable pool_cv_;
-    std::queue<std::shared_ptr<platf::rga::target_buffer_t>> free_buffers_;
+    std::queue<rga_target_slot_t> free_buffers_;
 
     platf::rkmpp::encoder_t encoder_;
     platf::hdmirx::resolution_t target_resolution_;
@@ -2070,11 +2146,11 @@ namespace video {
     std::optional<frame_profile_t> current_profile_;
     std::optional<frame_profile_t> encoded_profile_;
     rkmpp_profile_overlay_t profile_overlay_;
+    std::uint64_t rga_input_generation_ {1};  ///< Fixed pool generation; a session recreation destroys its cache.
     bool ready_ {false};
     bool force_idr_ {false};
     int video_format_;
   };
-
 
   class rkmpp_encode_session_t final: public encode_session_t {
   public:
@@ -2083,23 +2159,27 @@ namespace video {
     rkmpp_encode_session_t(const config_t &config, const platf::rkmpp::input_layout_t &input_layout):
         input_layout_(input_layout),
         config_(config),
-        encoder_(platf::rkmpp::encoder_t::create(platf::rkmpp::encoder_config_t{
-          config.videoFormat == 0 ? platf::rkmpp::codec_e::h264 : platf::rkmpp::codec_e::h265,
-          input_layout,
-          static_cast<std::uint32_t>(config.width),
-          static_cast<std::uint32_t>(config.height)
-        })),
+        encoder_(platf::rkmpp::encoder_t::create(make_rkmpp_encoder_config(config, input_layout))),
         video_format_(config.videoFormat) {}
 
     int convert(platf::img_t &img) override {
       image_ = dynamic_cast<platf::hdmirx::hdmirx_img_t *>(&img);
-      if (!image_) return -1;
-      if (image_->placeholder) return convert_with_rga(img);
-      if (!image_->frame || !image_->capture_format || image_->frame->planes().empty()) return -1;
+      if (!image_) {
+        return -1;
+      }
+      if (image_->placeholder) {
+        return convert_with_rga(img);
+      }
+      if (!image_->frame || !image_->capture_format || image_->frame->planes().empty()) {
+        return -1;
+      }
       const auto &plane = image_->frame->planes().front();
       const auto live_layout = platf::rkmpp::make_input_layout_from_plane(
-        image_->capture_format->width, image_->capture_format->height, image_->capture_format->mpp_format,
-        plane.bytesperline, plane.sizeimage
+        image_->capture_format->width,
+        image_->capture_format->height,
+        image_->capture_format->mpp_format,
+        plane.bytesperline,
+        plane.sizeimage
       );
       if (!live_layout) {
         BOOST_LOG(error) << "RKMPP direct frame has an invalid post-recovery layout";
@@ -2119,38 +2199,61 @@ namespace video {
         }
       }
       use_rga_ = false;
-      if (image_->frame_profile) image_->frame_profile->rga_used = false;
-      if (image_->request_idr) request_idr_frame();
+      if (image_->frame_profile) {
+        image_->frame_profile->rga_used = false;
+      }
+      if (image_->request_idr) {
+        request_idr_frame();
+      }
       return 0;
     }
 
     void request_idr_frame() override {
       force_idr_ = true;
-      if (use_rga_ && rga_fallback_) rga_fallback_->request_idr_frame();
+      if (use_rga_ && rga_fallback_) {
+        rga_fallback_->request_idr_frame();
+      }
     }
+
     void request_normal_frame() override {
       force_idr_ = false;
-      if (use_rga_ && rga_fallback_) rga_fallback_->request_normal_frame();
+      if (use_rga_ && rga_fallback_) {
+        rga_fallback_->request_normal_frame();
+      }
     }
+
     void invalidate_ref_frames(int64_t, int64_t) override {}
 
     platf::rkmpp::encoded_packet_t encode() {
       if (use_rga_) {
-        if (!rga_fallback_) throw std::runtime_error("RKMPP RGA fallback is not initialized");
+        if (!rga_fallback_) {
+          throw std::runtime_error("RKMPP RGA fallback is not initialized");
+        }
         return rga_fallback_->encode();
       }
-      if (!image_ || !image_->frame) throw std::runtime_error("RKMPP encode called without an HDMI RX frame");
+      if (!image_ || !image_->frame) {
+        throw std::runtime_error("RKMPP encode called without an HDMI RX frame");
+      }
       profile_overlay_.refresh(encoder_);
       if (force_idr_) {
         encoder_.request_idr();
         force_idr_ = false;
+      }
+      const auto input_generation = image_->frame->generation();
+      if (!input_cache_generation_ || *input_cache_generation_ != input_generation) {
+        // HDMI RX rebuilds its DMA-BUF set after source recovery. The kernel
+        // may recycle file descriptor numbers, so discard imports by
+        // generation before a new capture allocation is encoded.
+        encoder_.clear_input_cache();
+        input_cache_generation_ = input_generation;
       }
       platf::rkmpp::input_frame_t rkmpp_frame {
         .layout = input_layout_,
         .dma_buf_fd = image_->frame->planes()[0].dma_buf_fd,
         .allocation_size = image_->frame->planes()[0].allocation_size,
         .pts = static_cast<std::int64_t>(image_->frame->timestamp().time_since_epoch().count()),
-        .holder = image_->frame
+        .holder = image_->frame,
+        .cache_key = platf::rkmpp::input_buffer_key_t {input_generation, image_->frame->buffer_index()}
       };
       current_profile_ = std::move(image_->frame_profile);
       rkmpp_frame.profile = current_profile_ ? &*current_profile_ : nullptr;
@@ -2161,10 +2264,16 @@ namespace video {
       image_ = nullptr;
       return packet;
     }
-    int video_format() const noexcept { return video_format_; }
+
+    int video_format() const noexcept {
+      return video_format_;
+    }
+
     /** @brief Move the profile completed by the most recent direct or RGA encode. */
     std::optional<frame_profile_t> take_frame_profile() {
-      if (use_rga_) return rga_fallback_->take_frame_profile();
+      if (use_rga_) {
+        return rga_fallback_->take_frame_profile();
+      }
       return std::exchange(encoded_profile_, std::nullopt);
     }
 
@@ -2184,13 +2293,9 @@ namespace video {
                       << input_layout.visible_width << 'x' << input_layout.visible_height
                       << " format=" << input_layout.format
                       << " stride=" << input_layout.horizontal_stride << 'x' << input_layout.vertical_stride;
-      encoder_ = platf::rkmpp::encoder_t::create({
-        config_.videoFormat == 0 ? platf::rkmpp::codec_e::h264 : platf::rkmpp::codec_e::h265,
-        input_layout,
-        static_cast<std::uint32_t>(config_.width),
-        static_cast<std::uint32_t>(config_.height)
-      });
+      encoder_ = platf::rkmpp::encoder_t::create(make_rkmpp_encoder_config(config_, input_layout));
       input_layout_ = input_layout;
+      input_cache_generation_.reset();
       profile_overlay_ = {};
       force_idr_ = true;
     }
@@ -2205,7 +2310,10 @@ namespace video {
       try {
         if (!rga_fallback_) {
           rga_fallback_ = std::make_unique<rkmpp_rga_encode_session_t>(
-            config_, input_layout_, static_cast<std::uint32_t>(config_.width), static_cast<std::uint32_t>(config_.height)
+            config_,
+            input_layout_,
+            static_cast<std::uint32_t>(config_.width),
+            static_cast<std::uint32_t>(config_.height)
           );
         }
         if (force_idr_) {
@@ -2226,12 +2334,12 @@ namespace video {
     std::unique_ptr<rkmpp_rga_encode_session_t> rga_fallback_;
     std::optional<frame_profile_t> current_profile_;
     std::optional<frame_profile_t> encoded_profile_;
+    std::optional<std::uint64_t> input_cache_generation_;  ///< HDMI RX allocation generation currently imported by MPP.
     rkmpp_profile_overlay_t profile_overlay_;
     bool use_rga_ {};
     bool force_idr_ {};
     int video_format_ {};
   };
-
 
 #endif
 
@@ -2362,24 +2470,31 @@ namespace video {
         auto encoded = rkmpp_session ? rkmpp_session->encode() : rga_session->encode();
         auto t1 = std::chrono::steady_clock::now();
         if (frame_timestamp) {
-           BOOST_LOG(debug) << "RKMPP capture-to-encode-output latency: " << std::chrono::duration_cast<std::chrono::microseconds>(t1 - *frame_timestamp).count() << " us";
+          BOOST_LOG(debug) << "RKMPP capture-to-encode-output latency: " << std::chrono::duration_cast<std::chrono::microseconds>(t1 - *frame_timestamp).count() << " us";
         }
         BOOST_LOG(debug) << "MPP encode latency: " << std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() << " us";
-        if (!encoded) return -1;
-        const bool annexb_idr = platf::rkmpp::detail::annexb_first_vcl_is_idr(
-          encoded.data(), encoded.size(),
-          (rkmpp_session ? rkmpp_session->video_format() : rga_session->video_format()) == 0 ? platf::rkmpp::codec_e::h264 : platf::rkmpp::codec_e::h265, false
+        if (!encoded) {
+          return -1;
+        }
+        const bool idr = platf::rkmpp::detail::output_is_idr(
+          encoded.output_intra(),
+          encoded.data(),
+          encoded.size(),
+          (rkmpp_session ? rkmpp_session->video_format() : rga_session->video_format()) == 0 ? platf::rkmpp::codec_e::h264 : platf::rkmpp::codec_e::h265
         );
-        const bool idr = encoded.output_intra() && annexb_idr;
         auto packet = std::make_unique<packet_raw_rkmpp>(std::move(encoded), frame_nr, idr);
         packet->channel_data = channel_data;
         packet->frame_timestamp = frame_timestamp;
         packet->frame_profile = rkmpp_session ? rkmpp_session->take_frame_profile() : rga_session->take_frame_profile();
-        if (packet->frame_profile) packet->frame_profile->frame_index = frame_nr;
+        if (packet->frame_profile) {
+          packet->frame_profile->frame_index = frame_nr;
+        }
         packets->raise(std::move(packet));
         return 0;
+      } catch (const std::exception &e) {
+        BOOST_LOG(error) << "RKMPP encode failed: " << e.what();
+        return -1;
       }
-      catch (const std::exception &e) { BOOST_LOG(error) << "RKMPP encode failed: " << e.what(); return -1; }
 #endif
     }
 
@@ -2837,12 +2952,7 @@ namespace video {
         BOOST_LOG(error) << "RKMPP display did not provide an input layout";
         return nullptr;
       }
-      const platf::rkmpp::encoder_config_t layout_check {
-        config.videoFormat == 0 ? platf::rkmpp::codec_e::h264 : platf::rkmpp::codec_e::h265,
-        *input_layout,
-        static_cast<std::uint32_t>(config.width),
-        static_cast<std::uint32_t>(config.height),
-      };
+      const auto layout_check = make_rkmpp_encoder_config(config, *input_layout);
       if (platf::rkmpp::validate_encoder_config(layout_check) == platf::rkmpp::encoder_config_status_e::converter_required) {
         BOOST_LOG(info) << "RKMPP input conversion is required for HDMI RX " << input_layout->visible_width << "x" << input_layout->visible_height << " to requested coded size " << config.width << "x" << config.height << "; using RGA pipeline.";
         return std::make_unique<rkmpp_rga_encode_session_t>(config, *input_layout, config.width, config.height);
@@ -2942,7 +3052,9 @@ namespace video {
       if (!requested_idr_frame || images->peek()) {
         if (auto img = images->pop(max_frametime)) {
           frame_timestamp = img->frame_timestamp;
-          if (img->frame_profile) img->frame_profile->capture_queue_exit = std::chrono::steady_clock::now();
+          if (img->frame_profile) {
+            img->frame_profile->capture_queue_exit = std::chrono::steady_clock::now();
+          }
           if (session->convert(*img)) {
             BOOST_LOG(error) << "Could not convert image"sv;
             return;
@@ -3083,7 +3195,9 @@ namespace video {
       result = disp.make_nvenc_encode_device(pix_fmt);
 #ifdef SUNSHINE_BUILD_RKMPP
     } else if (dynamic_cast<const encoder_platform_formats_rkmpp *>(encoder.platform_formats.get())) {
-      if (config.videoFormat > 1 || config.dynamicRange || config.chromaSamplingType) return {};
+      if (config.videoFormat > 1 || config.dynamicRange || config.chromaSamplingType) {
+        return {};
+      }
       result = disp.make_rkmpp_encode_device();
 #endif
     }
@@ -3227,7 +3341,10 @@ namespace video {
           if (encoder.name == "rkmpp") {
             BOOST_LOG(error) << "RKMPP/HDMI RX currently supports one streaming session at a time";
             auto rejected = encode_session_ctx_queue.pop();
-            if (rejected) { rejected->shutdown_event->raise(true); rejected->join_event->raise(true); }
+            if (rejected) {
+              rejected->shutdown_event->raise(true);
+              rejected->join_event->raise(true);
+            }
             continue;
           }
 #endif
@@ -3270,7 +3387,8 @@ namespace video {
             ctx->idr_events->pop();
           }
 
-          if (frame_captured && img->frame_profile) img->frame_profile->capture_queue_exit = std::chrono::steady_clock::now();
+          if (frame_captured && img->frame_profile)
+            img->frame_profile->capture_queue_exit = std::chrono::steady_clock::now();
           if (frame_captured && pos->session->convert(*img)) {
             BOOST_LOG(error) << "Could not convert image"sv;
             ctx->shutdown_event->raise(true);
@@ -3476,7 +3594,11 @@ namespace video {
         return;
       }
     }
-    auto rkmpp_guard = util::fail_guard([&]() { if (rkmpp) rkmpp_session_active.store(false); });
+    auto rkmpp_guard = util::fail_guard([&]() {
+      if (rkmpp) {
+        rkmpp_session_active.store(false);
+      }
+    });
 #endif
     auto idr_events = mail->event<bool>(mail::idr);
 
@@ -3555,8 +3677,10 @@ namespace video {
 #ifdef SUNSHINE_BUILD_RKMPP
     if (encoder.name == "rkmpp") {
       if (!platf::rkmpp::detail::annexb_first_vcl_is_idr(
-            packet->data(), packet->data_size(),
-            config.videoFormat == 0 ? platf::rkmpp::codec_e::h264 : platf::rkmpp::codec_e::h265, true
+            packet->data(),
+            packet->data_size(),
+            config.videoFormat == 0 ? platf::rkmpp::codec_e::h264 : platf::rkmpp::codec_e::h265,
+            true
           )) {
         BOOST_LOG(error) << "RKMPP probe packet is missing required parameter sets or a real IDR NAL"sv;
         return -1;

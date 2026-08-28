@@ -40,7 +40,68 @@
 
 正式结论必须以第 4 节的受控基线重测为准。
 
-### 2.3 原建议逐项结论
+### 2.3 Phase 0 优化前基线（用户测试记录）
+
+下表是本轮对比的优化前基线。`RX driver age` 只在恢复期有意义，不能与正常串流窗口混合比较。
+
+| 指标 | 优化前基线（Phase 0） |
+| --- | ---: |
+| MPP encode P50 | 5.448 ms |
+| MPP encode P95 | 6.032 ms |
+| MPP submit P50 | 约 4.1–5.0 ms |
+| Host to send P50 | 7.806 ms |
+| Host to send P95 | 9.897 ms |
+| Host to send P99 | 约 12+ ms |
+| RX driver age P95（恢复期） | 约 848 ms |
+
+### 2.4 本轮连接快照（阶段 4 决策数据）
+
+2026-08-28 22:37:22–22:38:17 的 12 个连续 5 秒 profile window，路径为 1080p60 直通 DMA-BUF，`rkmpp_profile` 与 overlay 开启。下列值是各窗口统计值的中位数；这是一轮快速对比，不代替恢复期测试。
+
+| 指标 | 当前值 | 相对 Phase 0 |
+| --- | ---: | ---: |
+| MPP encode P50 | 约 5.01 ms | -0.44 ms |
+| MPP encode P95 | 约 5.84 ms | -0.20 ms |
+| Host to send P50 | 约 6.65 ms | -1.16 ms |
+| Host to send P95 | 约 8.37 ms | -1.53 ms |
+| Host to send P99 | 约 8.37 ms | 优于约 12+ ms |
+| RX driver age P95（正常串流） | 约 0.05 ms | 不与恢复期基线比较 |
+| MPP output buffer acquire P50 / P95 | 约 0.63 / 1.11 ms | 阶段 4：记录为 Future Work |
+| MPP output packet init P50 / P95 | 约 0.46 / 0.71 ms | 随 output pool 一并测量 |
+
+输入 import 在所有上述窗口均为 `0/约300`（实测/缺失），说明 input import cache 已命中；当前不应再把它作为主机侧热点。阶段 4 的 output buffer acquire P95 超过 1 ms，但按本轮范围要求转入 [FUTURE.md](FUTURE.md)，不实施 output pool。
+
+### 2.5 阶段 1 快速实验：low-delay + 禁止重编码（C）
+
+2026-08-28 22:47:45–22:48:40 的 12 个连续 5 秒稳定 profile window，路径同 2.4。已排除刚重连后的两个瞬态窗口（其中 Host to send 出现 839 ms 峰值）。实验配置为 `rkmpp_low_delay=enabled`、`rkmpp_disable_reencode=enabled`，启动日志确认 RKMPP 最终使用 `low_delay=true`、`max_reenc_times=0`。
+
+| 指标 | C：实验组合 | 相对 Phase 0 | 相对 2.4 默认快照 |
+| --- | ---: | ---: | ---: |
+| MPP encode P50 | 5.094 ms | -0.354 ms | +0.08 ms |
+| MPP encode P95 | 5.785 ms | -0.247 ms | -0.06 ms |
+| MPP encode P99 | 6.137 ms | — | — |
+| Host to send P50 | 6.889 ms | -0.917 ms | +0.24 ms |
+| Host to send P95 | 8.518 ms | -1.379 ms | +0.15 ms |
+| Host to send P99 | 13.447 ms | — | +5.08 ms |
+
+结论：C 相比 Phase 0 基线较好，但没有超过当前默认快照，且 Host to send P99 明显回退；不满足第 3 节的默认启用门槛。因此本轮不把 C 设为默认。B 的单独归因结果见下一节；全程没有进行长时间测试。阶段 4 的测量结论不受 C 的采纳与否影响。
+
+### 2.6 阶段 1 快速实验：仅禁止重编码（B）
+
+2026-08-28 22:54:08–22:55:04 的 12 个连续 5 秒稳定 profile window，路径同 2.4。已排除重连瞬态窗口。实验配置为 `rkmpp_low_delay=disabled`、`rkmpp_disable_reencode=enabled`，启动日志确认 RKMPP 最终使用 `low_delay=false`、`max_reenc_times=0`。
+
+| 指标 | B：仅禁止重编码 | 相对 Phase 0 | 相对 2.4 默认快照 |
+| --- | ---: | ---: | ---: |
+| MPP encode P50 | 5.038 ms | -0.410 ms | +0.03 ms |
+| MPP encode P95 | 5.891 ms | -0.141 ms | +0.05 ms |
+| MPP encode P99 | 6.114 ms | — | — |
+| Host to send P50 | 6.943 ms | -0.863 ms | +0.29 ms |
+| Host to send P95 | 8.847 ms | -1.050 ms | +0.48 ms |
+| Host to send P99 | 12.709 ms | — | +4.34 ms |
+
+结论：B 同样未超过默认快照，Host to send 的 P95/P99 均回退。阶段 1 的两个实验组合均不采纳，两个配置键保持默认关闭；无需再做 A/B 长时间复测。
+
+### 2.7 原建议逐项结论
 
 | 建议 | 复核结论 | 调整后的处理方式 |
 | --- | --- | --- |
@@ -60,14 +121,32 @@
 
 1. 基线和候选使用同一 HDMI 源、分辨率、帧率、codec、码率、FEC、网络路径、Moonlight 设备和客户端设置。
 2. 1080p60 HEVC 为主验收；H.264 必须做兼容性验收。直通和 RGA fallback 分开统计，不混合样本。
-3. 每个方案至少执行 3 次、每次 10 分钟；忽略连接后的前 10 秒 warm-up，比较三次运行各自统计值的中位数。
+3. 快速迭代时，每个方案运行 60 秒，忽略前 5 秒 warm-up；只比较该运行的 5 秒 profile window 中位数。仅当两个候选差异小于采纳阈值、或结果异常时，才追加一次 60 秒复测。
 4. 保存 Sunshine 的每个 5 秒 profile window、Moonlight 完整统计、MPP 版本、commit、实际 V4L2 fourcc/stride、协商码率和 GOP。
 5. 性能候选只有在 `HOST-PACKET` P95 降低至少 0.5 ms 或 10%（取较容易达到者），并且 P99、网络丢帧、jitter 丢帧和解码时间无显著回退时才默认启用。低于阈值的改动可保留为实验开关，也可删除，不以“理论上更快”作为合入理由。
 6. 所有码流都能由 `ffmpeg`/`ffprobe` 连续解析和解码；访问单元数、帧数、IDR 标记和参数集符合预期，Moonlight 无花屏、绿块、长期黑屏或 decoder reset。
 7. 改动方法必须有测试，目标覆盖 changed code 的 100%；新增/修改 C++ API、结构体和成员均按仓库要求补全 Doxygen，并通过 `.clang-format`。
-8. 30 分钟稳态串流期间 RSS、DMA-BUF/MPP buffer 数和 `/proc/<pid>/fd` 不单调增长；退出、重连和异常恢复不能死锁。
+8. 在 60 秒冒烟运行中，RSS、DMA-BUF/MPP buffer 数和 `/proc/<pid>/fd` 不应持续上升；退出、重连和异常恢复不能死锁。更长的 soak test 不属于快速迭代的合入门槛。
 
 ## 4. 分阶段实施
+
+### 当前代码实施状态（2026-08-28）
+
+下表的“已实现”只表示当前工作区已具备相应代码和单元测试；尚未在目标 RK3588/MPP 1.3.9 上完成构建、快速 A/B 或短时冒烟验收的项，不能据此视为性能结论或默认行为。
+
+| 阶段 | 状态 | 已完成范围 | 尚缺的验收/决策 |
+| --- | --- | --- | --- |
+| 0：配置与基线 | 代码完成，现场待测 | 共享 `make_rkmpp_encoder_config()` 已统一直通、RGA 创建和 reconfigure 的帧率、码率与 GOP；30/60/60000/1001 FPS 和多码率组合已有单元测试。 | 按第 3 节采集 H.264、HEVC、直通和 RGA 的受控基线。 |
+| 1：低延迟配置 A/B | B/C 已测，默认保持关闭 | B、C 均未超过默认快照，且 Host to send 尾延迟回退；生产默认不启用实验键。 | 阶段结束；不做长时间复测。 |
+| 2：freshness 与输入 lease | 代码完成，硬件待验 | 已实现“阻塞取首帧、非阻塞 drain 至最新帧”，并记录 `freshness_drops`。 | 注入编码 stall、重复拔插/重锁；单独验证可否在 `encode_put_frame()` 返回后提前释放 input holder。 |
+| 3：输入 import cache | 代码完成，硬件待验 | 直通路径按 capture generation + buffer index 缓存，RGA 路径按固定 target slot 缓存；fd 不作跨 generation 身份。 | 快速复测 source recovery/reconfigure，检查图像、FD、MPP handle 和 RSS 没有持续增长。 |
+| 4：输出 buffer | Future Work（已测量） | input import cache 已稳定命中；output buffer acquire 的 P50/P95 约为 0.63/1.11 ms，packet init 约为 0.46/0.71 ms。 | 不在本轮实施；后续设计与验收条件见 `docs/rkmpp/FUTURE.md`。 |
+| 5：GOP 与按需 IDR | Future work | `gop=0` 继续被拒绝，参考链语义未改变。 | 不在本轮执行；将来完成真实 IDR、丢包恢复和 packet/FEC A/B 后再定义。 |
+| 6：Annex-B 短路 | Future work（代码已完成） | 当前工作区已有短路实现和语义测试。 | 不在本轮继续验证或调整。 |
+| 7：slice low-delay | Future work | 保持完整访问单元输出。 | 将来仅以独立 smoke 验证 partition 提前量和 GameStream/FEC 元数据。 |
+| 8：MppTask pipeline | Future work | 保持 simple API 与有界单帧路径。 | 将来仅在仍有明确 MPP 尾延迟瓶颈时做 prototype。 |
+
+本轮只推进阶段 1；阶段 2、3 保持当前实现且跳过需要人工热插拔、断链或恢复操作的验收。阶段 4–8 是 Future Work，不进入本轮迭代。
 
 ### 阶段 0：冻结可比较基线并修正配置一致性（P0）
 
@@ -82,7 +161,7 @@
 
 - 30、60 和 60000/1001 FPS，以及至少两个非默认码率，在直通和 RGA 配置构造测试中得到完全相同的 MPP 配置语义。
 - 现场日志中的最终配置与 Moonlight 请求一致，不再静默落到 60 FPS/12 Mbps 默认值。
-- 每个 10 分钟运行的 `captured_frames` 与实际帧率一致，profile 无 missing/invalid/dropped sample。
+- 每个 60 秒运行的 `captured_frames` 与实际帧率一致，profile 无 missing/invalid/dropped sample。
 - 生成基线表，至少包含 MPP submit/output wait/encode、RX driver age、HOST-PACKET、HOST-SEND 的 P50/P95/P99/max。
 
 ### 阶段 1：低延迟配置 A/B（P1）
@@ -100,9 +179,9 @@
 验收标准：
 
 - 目标机 MPP 1.3.9 对 H.264、HEVC 的配置均明确成功；若某 codec/硬件不支持，应在创建阶段给出可读错误或回退，不能运行中静默改变语义。
-- 每组完成第 3 节的三轮测试和一轮 30 分钟稳定性测试。
-- 若 C 达到全局性能采纳阈值且画质、实际码率、最大帧大小无不可接受回退，则将 C 设为 RKMPP 默认；否则保留当前默认并记录结果。
-- `rc:max_reenc_times=0` 是否单独保留由 B 对 A 的结果决定，不把 C 的收益错误归因给单一配置键。
+- 每组完成一次 60 秒快速 A/B 和码流检查；候选默认值额外完成一次 60 秒冒烟。只有结果接近门槛或出现异常时才复测。B、C 均已完成快速测量且未通过。
+- 若 C 达到全局性能采纳阈值且画质、实际码率、最大帧大小无不可接受回退，则将 C 设为 RKMPP 默认；否则保留当前默认并记录结果。本轮 B、C 均未通过，默认保持关闭。
+- `rc:max_reenc_times=0` 是否单独保留由 B 对 A 的结果决定，不把 C 的收益错误归因给单一配置键。本轮 B 未通过，不单独保留。
 
 ### 阶段 2：帧 freshness 与输入 lease（P1）
 
@@ -116,9 +195,9 @@
 验收标准：
 
 - 稳态 1080p60 时主动 stale-drop 为 0，或只在已证明存在 backlog 时增加；输出 sequence 单调递增。
-- 注入 100 ms 和 500 ms 编码线程 stall 各 20 次后，恢复后的首个编码帧年龄不超过两个帧周期（60 FPS 时 33.4 ms），且不会继续逐帧追赶旧队列。
-- HDMI 拔插/重锁 20 次后，不再出现数百毫秒级 RX driver age；若驱动在恢复时只能提供旧时间戳，必须明确记录并触发丢弃，不能把它发送给客户端。
-- 提前释放 holder 的实验中，H.264/HEVC 各至少 10,000 帧无图像损坏、V4L2 QBUF 错误、MPP 错误或 FD 增长；若无法证明安装版本的输入消费边界，则保持当前保守生命周期。
+- 注入 100 ms 和 500 ms 编码线程 stall 各 3 次后，恢复后的首个编码帧年龄不超过两个帧周期（60 FPS 时 33.4 ms），且不会继续逐帧追赶旧队列。
+- HDMI 拔插/重锁 3 次后，不再出现数百毫秒级 RX driver age；若驱动在恢复时只能提供旧时间戳，必须明确记录并触发丢弃，不能把它发送给客户端。
+- 提前释放 holder 的实验中，H.264/HEVC 各连续编码 600 帧且无图像损坏、V4L2 QBUF 错误、MPP 错误或 FD 持续增长；若无法证明安装版本的输入消费边界，则保持当前保守生命周期。
 
 ### 阶段 3：消除重复的 input import（P2）
 
@@ -133,24 +212,10 @@
 
 - 稳态 `mpp_buffer_import()` 次数不超过当前 generation 的唯一 buffer 数；不再随编码帧数线性增长。
 - fd 数值在 source recovery 后被复用时不会命中旧 generation；单元测试覆盖 fd 相同但 generation 不同的场景。
-- 50 次 source change/reconfigure、H.264/HEVC 各 30 分钟后无 stale mapping、图像损坏、FD/handle 增长或 teardown use-after-free。
+- 5 次 source change/reconfigure，以及 H.264/HEVC 各一次 60 秒运行后无 stale mapping、图像损坏、FD/handle 持续增长或 teardown use-after-free。
 - 只有达到第 3 节性能采纳阈值，或能证明 CPU/内核调用与尾延迟显著下降时，才保留这项复杂度。
 
-### 阶段 4：输出 buffer acquire 成本与有界池（条件性 P2）
-
-要做什么：
-
-- 先单独测量 `mpp_buffer_get()`、`mpp_packet_init_with_buffer()` 和释放路径的 P50/P95/P99、调用次数及同时在途 packet 数。
-- 只有 acquire/release 对尾延迟有可测贡献时，才实现固定容量 output pool。
-- pool slot 由 `encoded_packet_t` 持有，必须等网络消费者完成该帧后归还；pool 满时采用明确的有界 backpressure/丢帧策略，不能动态无限扩容。
-- 第一版保持已验证的 8 MiB 容量，另行验证高码率/高分辨率 IDR 是否需要更大上限，不能因缩小 buffer 引入截断。
-
-验收标准：
-
-- 未实现池之前先提交测量报告；若 acquire P95 小于 0.1 ms 且与 HOST-PACKET/MPP encode 尾延迟无相关性，本阶段结束为“不实施”。
-- 若实施，预分配数量覆盖实测最大在途 packet 数并留一个 slot；30 分钟内运行时 MPP 输出分配次数固定，不随帧数增长。
-- 人工暂停网络消费者时内存保持上限、编码线程不会永久死锁，恢复或关闭能够释放所有 slot。
-- 最大 IDR、正常 P 帧、H.264/HEVC、FEC 开关组合均无截断或复用中的数据覆盖。
+## 5. Future work（不纳入本轮迭代）
 
 ### 阶段 5：GOP 与按需 IDR A/B（P2）
 
@@ -164,8 +229,8 @@
 验收标准：
 
 - 每种 GOP 下访问单元和预期 IDR 数相符；每个 IDR 前都有 H.264 SPS/PPS 或 HEVC VPS/SPS/PPS。
-- 20 次显式 IDR 请求全部在两帧内产生真实 IDR，Moonlight 20 次全部恢复且无长期黑屏。
-- 20 次受控丢包测试中客户端均能请求并恢复；记录请求到首个可显示恢复帧的 P50/P95/max。
+- 5 次显式 IDR 请求均在两帧内产生真实 IDR，Moonlight 均恢复且无长期黑屏。
+- 5 次受控丢包测试中客户端均能请求并恢复；记录请求到首个可显示恢复帧的 P50/P95/max。
 - 仅当较长/无限 GOP 显著降低周期性 IDR 引起的 PACKET-SEND 或网络尾延迟，且恢复可靠性不下降时才改变默认值。
 
 ### 阶段 6：Annex-B 扫描短路（P2，小改动）
@@ -192,7 +257,7 @@
 
 可行性验收标准：
 
-- H.264/HEVC 各至少 10,000 帧能按 SOI/EOI 重组为与整帧模式等价的 Annex-B 访问单元，并可完整解码。
+- H.264/HEVC 各连续 600 帧能按 SOI/EOI 重组为与整帧模式等价的 Annex-B 访问单元，并可完整解码。
 - 首 partition 相对 EOI 的提前量 P50 至少 1 ms，否则停止网络层改造。
 - 形成一份不破坏现有整帧发送器的协议设计；若无法在发送首包前正确确定短帧头和 FEC 元数据，本阶段结论应为“不产品化”。
 
@@ -216,35 +281,23 @@
 验收标准：
 
 - standalone prototype 达到 `HOST-PACKET` 潜在收益至少 1 ms，或显著降低 P99，才允许进入 Sunshine 主路径。
-- 10,000 帧压力测试中 frame index/PTS/profile 不错配，所有 input holder 和 output slot 恰好释放一次。
+- 600 帧快速压力测试中 frame index/PTS/profile 不错配，所有 input holder 和 output slot 恰好释放一次。
 - in-flight 满载、网络线程暂停、MPP timeout、source change 和 teardown 均不会死锁、重复 QBUF 或使用已释放 DMA-BUF。
 - 接入后通过第 3 节全部验收；未达阈值则保留 simple API。
 
-## 5. 推荐执行顺序与停止条件
+## 6. 本轮执行顺序与停止条件
 
 ```text
-阶段 0：配置一致性 + 正式基线
+阶段 0：记录基线与当前快照
   ↓
-阶段 1：low_delay / max_reenc 独立 A/B
+阶段 1：B/C 已快速测量；默认保持关闭
   ↓
-阶段 2：恢复期只取最新帧 + 输入 lease A/B
-  ↓
-阶段 3：input import cache
-  ↓
-阶段 4：先测 output acquire，再决定是否做 pool
-  ↓
-阶段 5：GOP / 按需 IDR
-  ↓
-阶段 6：Annex-B 短路小优化
-  ↓
-阶段 7：slice feasibility（通过门槛才产品化）
-  ↓
-阶段 8：MppTask（仍有明确瓶颈才开始）
+结束本轮；阶段 2–8 均不执行
 ```
 
-每个阶段应单独提交测量结果，禁止把 low-delay、GOP、buffer cache 和 pipeline 一次性叠加后只比较最终平均值。若阶段 1–6 已使稳态 `HOST-PACKET` P95 稳定低于 6 ms、P99 低于 8 ms，恢复后帧年龄低于两个帧周期，且网络 RTT 仍约 12 ms，则停止侵入式 RKMPP 改造，后续收益应优先从局域网、客户端 frame queue/render/VSync 和外部 photon-to-photon 测量中寻找。
+每个阶段应单独记录快速对比结果，禁止把 low-delay 和 output pool 一次性叠加后只比较最终平均值。阶段 4 的测量和未来实施条件已转入 `docs/rkmpp/FUTURE.md`。阶段 2–8 均作为 Future Work 或跳过项保留，不进入本轮 RKMPP 改造。
 
-## 6. 参考资料
+## 7. 参考资料
 
 - Rockchip MPP Developer Guide：<https://github.com/rockchip-linux/mpp/blob/develop/doc/Rockchip_Developer_Guide_MPP_EN.md>
 - Rockchip MPP encoder sample：<https://github.com/rockchip-linux/mpp/blob/develop/test/mpi_enc_test.c>
