@@ -16,8 +16,8 @@ recovery and watchdog matrices were not run, so this document does not claim the
 ## Real-hardware evidence
 
 - Initial real-hardware pairing succeeded. The user confirmed both Nintendo Switch video and working controller input.
-- After reboot, the first retest accidentally launched a stale binary from a different build directory. The production
-  binary was then rebuilt with the required `scripts/build-rkmpp.sh` default output and verified to contain the NXBT
+- After reboot, the first retest accidentally launched a stale binary from an unrelated prior build. The production
+  binary was then rebuilt with the required `./scripts/build-rkmpp.sh` and verified to contain the NXBT
   prewarm path before the successful run below.
 - A new streaming session began at `14:16:28.382`; NXBT prewarm ran at `14:16:28.383`.
 - The stored-device path reported `reconnecting` at `14:16:28.489` and `connected` at `14:16:29.391`.

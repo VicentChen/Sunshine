@@ -172,14 +172,13 @@ Remote Play 建连可能持续数秒，不能在 `gamepad::sink_t::alloc()` 或 
 - 新增或修改的方法必须添加 gtest；changed code 以 100% 覆盖为目标。
 - 测试中的 HTTP、时间、随机 ID、token 和 WebRTC transport 必须可注入或可替换，不能依赖真实 Xbox 才覆盖错误分支。
 - 本功能增加本地化时只修改 `en`，不得修改 `en-US` 或其他语言。
-- 新构建目录必须以 `cmake-build-` 开头。
-- ROCK 5B+ 构建使用 `scripts/build-rkmpp.sh`，例如：
+- Sunshine 构建有且只有一个入口，不得指定或覆盖构建目录：
 
 ```bash
-BUILD_DIR="$PWD/cmake-build-xbox-remote-rkmpp" ./scripts/build-rkmpp.sh
+./scripts/build-rkmpp.sh
 ```
 
-- 测试可执行文件必须位于对应 build 目录的 `tests/test_sunshine`。
+- 测试必须使用上述构建产生的 `test_sunshine`，不得从其他构建目录复用旧产物。
 - Windows 回归构建只能在 Windows/MSYS2 UCRT64 环境执行，并使用仓库规定的命令前缀。
 - 没有真实 Xbox、Moonlight 客户端或 ROCK 5B+ 时，不得伪造硬件步骤通过。
 - 会登录 Microsoft 账号、启动 Xbox、创建 Remote Play session 或改变主机状态的操作必须在验证记录中明确标记。
@@ -566,9 +565,10 @@ docs/rkmpp/xbox-remote-play-validation/step-XX.md
 
 ```bash
 git diff --check
-BUILD_DIR="$PWD/cmake-build-xbox-remote-rkmpp" ./scripts/build-rkmpp.sh
-./cmake-build-xbox-remote-rkmpp/tests/test_sunshine
+./scripts/build-rkmpp.sh
 ```
+
+随后运行上述构建产生的 `test_sunshine`，不得从其他构建目录复用旧产物。
 
 根据项目现有覆盖工具生成 changed-code coverage 报告。Windows 构建在可用的 MSYS2 UCRT64 环境中另行执行。
 

@@ -29,12 +29,12 @@ python3 -m unittest discover -s tools/nxbt_bridge/tests -p 'test_*.py' -v
 
 3 tests: PASSED
 
-./cmake-build-nxbt-tests/tests/test_sunshine \
+test_sunshine \
   --gtest_filter='NxbtProtocolTest.*:NxbtMappingTest.*'
 
 8 tests from 2 suites: PASSED
 
-./cmake-build-nxbt-tests/tests/test_sunshine \
+test_sunshine \
   --gtest_filter='InputGamepadSessionTest.*:*Virtualhid*Gamepad*'
 
 2 existing retained-gamepad tests: PASSED

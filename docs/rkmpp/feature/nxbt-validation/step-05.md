@@ -26,16 +26,16 @@ uses a fake NXBT sink and does not open the Bridge socket or touch Bluetooth.
 ## Automated verification
 
 ```text
-cmake --build cmake-build-nxbt-tests --target sunshine test_sunshine -j2
+./scripts/build-rkmpp.sh
 
 PASSED — both C++ targets compiled and linked.
 
-./cmake-build-nxbt-tests/tests/test_sunshine \
+test_sunshine \
   --gtest_filter='GamepadRouterTest.*:InputGamepadSessionTest.*'
 
 9 tests: PASSED
 
-./cmake-build-nxbt-tests/tests/test_sunshine \
+test_sunshine \
   --gtest_filter='GamepadRouterTest.*:InputGamepadSessionTest.*:VirtualHidDeviceTest.*'
 
 21 tests: PASSED

@@ -27,7 +27,7 @@
 
 - `audio_source` 为空时保留 Sink monitor 回退，非空时优先使用显式 Source。
 - `LinuxAudioSourceSelection` 与 `ConfigConsistencyTest` 共 7 项定向测试通过。
-- `build-rkmpp-review` 的 `test_sunshine` 和正式 `sunshine` 目标均构建成功。
+- `test_sunshine` 和正式 `sunshine` 目标均构建成功。
 - 尚未打开 HDMI 音频设备，因此真实 PCM、Moonlight 声音和 A/V 同步仍属于步骤 2–4。
 
 ### 步骤 2：PipeWire/HDMI RX 短时采集验证（待授权）

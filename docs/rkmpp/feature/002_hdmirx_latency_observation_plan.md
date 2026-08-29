@@ -47,7 +47,7 @@ rkmpp_profile_overlay = disabled
 
 验收标准：
 
-- 基线可追溯，开发构建位于独立的 `build-rkmpp-review`。
+- 基线可追溯，开发构建由 `./scripts/build-rkmpp.sh` 生成，不指定构建目录。
 - 未覆盖或清理用户的无关文件。
 
 ### 步骤 1：确认 V4L2 时间戳语义（已完成）

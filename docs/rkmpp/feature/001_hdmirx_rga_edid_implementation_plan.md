@@ -109,9 +109,9 @@ EDID 协商是输入质量和效率优化，不是串流成功的前置条件。
 - 使用 `.clang-format` 格式化所有修改的 C/C++ 文件。
 - 新增或修改方法必须添加 gtest 测试， changed code 以 100% 覆盖为目标。
 - 本次如需增加本地化，只修改 `en`，不得修改 `en-US` 或其他语言。
-- 所有新构建目录以 `cmake-build-` 开头。
-- Windows 构建命令必须通过 `C:\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c` 执行。
-- 主测试可执行文件是构建目录下的 `tests/test_sunshine`。
+- Windows/MSYS2 回归遵守仓库级平台规则；本计划不定义额外构建命令。
+- Sunshine 构建有且只有一个入口：`./scripts/build-rkmpp.sh`；不得指定或覆盖构建目录。
+- 主测试必须使用该脚本构建产生的 `test_sunshine`，不得复用其他构建目录中的旧产物。
 - ROCK 5B+ 专用硬件验证可以使用 Linux 原生命令；必须与 Windows/MSYS2 的通用构建验证分开记录。
 - 每个阶段只提交自身范围内的修改；若前序代码存在问题，先在交接记录中说明，不静默扩大范围。
 
@@ -513,29 +513,20 @@ Moonlight 请求 T
 
 ### 16.3 最终测试
 
-- 运行受影响的全部 gtest，最终运行完整 `tests/test_sunshine`。
+- 运行受影响的全部 gtest，最终运行完整 `test_sunshine`。
 - 运行 RKMPP Annex-B、layout、HDMI RX、RGA 与编码硬件 smoke。
 - H.264/H.265 码流用 `ffprobe` 和 `ffmpeg -f null` 验证。
 - 非 RKMPP Linux 构建验证 librga 缺失不造成回归。
 - Windows/MSYS2 配置或构建验证确保 Linux-only 文件没有泄漏到 Windows target。
 - 运行 clang-format 检查、Doxygen/文档构建和 `git diff --check`。
 
-Windows/MSYS2 命令示例：
-
-```text
-C:\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "cmake -S . -B cmake-build-rkmpp"
-C:\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "cmake --build cmake-build-rkmpp"
-C:\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "./cmake-build-rkmpp/tests/test_sunshine"
-```
-
-ROCK 5B+ 构建与测试目录也必须使用 `cmake-build-` 前缀，例如：
+Sunshine 构建命令：
 
 ```bash
-BUILD_DIR=cmake-build-rkmpp-review ./scripts/build-rkmpp.sh
-./cmake-build-rkmpp-review/tests/test_sunshine
+./scripts/build-rkmpp.sh
 ```
 
-具体 CMake 选项以仓库当前脚本和前序阶段新增选项为准，执行 Agent 不得照抄示例后忽略配置结果。
+不得增加其他 Sunshine 构建命令、指定构建目录或覆盖脚本的构建目录选择。Windows/MSYS2 回归遵守仓库级平台规则，但本计划不定义第二套构建入口。测试必须使用该脚本产生的 `test_sunshine`。
 
 ### 16.4 最终验收标准
 

@@ -202,19 +202,14 @@ Motion 和 rumble 在本文后续作为独立可选里程碑，不能阻塞首�
 - 新增或修改方法必须添加 gtest，changed code 以 100% 覆盖为目标。
 - Python Bridge 纯逻辑使用标准库 `unittest` 或项目明确引入的测试框架，测试不得要求真实蓝牙硬件。
 - 本次增加本地化时只修改 `en`，不得修改 `en-US` 或其他语言。
-- 所有新构建目录以 `cmake-build-` 开头。
-- ROCK 5B+ 构建必须使用 `scripts/build-rkmpp.sh`，例如：
+- Sunshine 构建有且只有一个入口，不得指定或覆盖构建目录：
 
 ```bash
-BUILD_DIR="$PWD/cmake-build-nxbt-rkmpp" ./scripts/build-rkmpp.sh
+./scripts/build-rkmpp.sh
 ```
 
-- C++ 测试可使用独立 `cmake-build-nxbt-tests` 配置；测试可执行文件必须是 `cmake-build-nxbt-tests/tests/test_sunshine`。
-- Windows 回归构建只能在 Windows/MSYS2 UCRT64 环境执行，命令必须以前缀开头：
-
-```text
-C:\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c
-```
+- C++ 测试必须使用该脚本产生的 `test_sunshine`，不得复用其他构建目录中的旧产物。
+- Windows/MSYS2 回归遵守仓库级平台规则；本计划不定义额外构建命令。
 
 - 硬件测试必须与无硬件单元测试分开记录。没有硬件时不得伪造通过结果。
 - 任何会重启 BlueZ、改变 systemd、配对/解绑设备或占用蓝牙适配器的命令，都必须在交接中明确标为有系统影响的硬件步骤。
@@ -287,11 +282,11 @@ rfkill list bluetooth
 执行现有 Sunshine input 测试，保存结果：
 
 ```bash
-./cmake-build-nxbt-tests/tests/test_sunshine \
+test_sunshine \
   --gtest_filter='InputGamepadSessionTest.*:*Virtualhid*Gamepad*'
 ```
 
-若尚无测试构建目录，按当前目标机工具链配置 `cmake-build-nxbt-tests` 后再执行；交接中记录完整配置命令。
+若构建未产生 `test_sunshine`，必须将该项记为阻塞；不得通过另行配置构建目录绕过唯一构建入口。
 
 ### 6.5 验收标准
 
@@ -397,7 +392,7 @@ tools/nxbt_bridge/tests/test_protocol.py
 ### 8.5 验证命令
 
 ```bash
-./cmake-build-nxbt-tests/tests/test_sunshine \
+test_sunshine \
   --gtest_filter='NxbtProtocolTest.*:NxbtMappingTest.*'
 
 python3 -m unittest discover -s tools/nxbt_bridge/tests -p 'test_*.py' -v
@@ -553,7 +548,7 @@ python3 -m tools.nxbt_bridge --backend=fake --socket=/tmp/nxbt-bridge-test.sock
 ### 11.4 验证命令
 
 ```bash
-./cmake-build-nxbt-tests/tests/test_sunshine \
+test_sunshine \
   --gtest_filter='GamepadRouterTest.*:InputGamepadSessionTest.*'
 ```
 
@@ -602,7 +597,7 @@ python3 -m tools.nxbt_bridge --backend=fake --socket=/tmp/nxbt-bridge-test.sock
 ### 12.5 验证命令
 
 ```bash
-./cmake-build-nxbt-tests/tests/test_sunshine \
+test_sunshine \
   --gtest_filter='NxbtClientTest.*:NxbtSinkTest.*:NxbtProtocolTest.*'
 
 python3 -m tools.nxbt_bridge --backend=fake --socket=/tmp/nxbt-bridge-test.sock
@@ -670,7 +665,7 @@ nxbt_watchdog_timeout = 150
 ### 13.5 验证命令
 
 ```bash
-./cmake-build-nxbt-tests/tests/test_sunshine \
+test_sunshine \
   --gtest_filter='*Config*:*Nxbt*:*InputGamepadSessionTest*'
 
 git diff --check
@@ -805,15 +800,15 @@ git diff --check
 ```bash
 python3 -m unittest discover -s tools/nxbt_bridge/tests -p 'test_*.py' -v
 
-./cmake-build-nxbt-tests/tests/test_sunshine
+test_sunshine
 
-BUILD_DIR="$PWD/cmake-build-nxbt-rkmpp" ./scripts/build-rkmpp.sh
+./scripts/build-rkmpp.sh
 
 git diff --check
 git status --short
 ```
 
-在支持 Doxygen 的构建环境执行文档构建，保证所有新增 C/C++ 符号满足项目要求。若现有构建脚本关闭文档，应使用单独 `cmake-build-nxbt-docs` 配置，不得跳过并声称通过。
+使用唯一构建脚本提供的文档构建能力验证所有新增 C/C++ 符号满足项目要求。若脚本未提供文档构建，必须将该项记为阻塞，不得另行配置构建目录并声称通过。
 
 ### 16.3 Windows 回归
 

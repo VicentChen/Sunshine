@@ -35,7 +35,7 @@ the slot would not yet have an owner.
 ## Automated verification
 
 ```text
-./cmake-build-nxbt-tests/tests/test_sunshine \
+test_sunshine \
   --gtest_filter='NxbtClientTest.*:NxbtSinkTest.*:NxbtProtocolTest.*:NxbtMappingTest.*:GamepadRouterTest.*:InputGamepadSessionTest.*:VirtualHidDeviceTest.*'
 
 39 tests from 7 suites: PASSED
@@ -44,7 +44,7 @@ python3 -m unittest discover -s tools/nxbt_bridge/tests -p 'test_*.py' -v
 
 13 tests: PASSED
 
-BUILD_DIR="$PWD/cmake-build-rkmpp-review" JOBS=4 ./scripts/build-rkmpp.sh
+./scripts/build-rkmpp.sh
 
 PASSED — the RKMPP Sunshine executable and web assets built successfully.
 ```
@@ -73,8 +73,8 @@ rather than overstated.
 
 ## ThreadSanitizer
 
-An independent `cmake-build-nxbt-tsan` target compiled successfully with LLVM
-22 ThreadSanitizer. A halt-on-error run was stopped before gtest execution by a
+An independent ThreadSanitizer target compiled successfully with LLVM 22. A
+halt-on-error run was stopped before gtest execution by a
 pre-existing startup heap-use-after-free between `src/config.cpp` static
 initialization and `src/platform/linux/input/virtualhid.cpp`. A continuation
 run completed all 17 selected `NxbtClientTest`, `NxbtSinkTest`, and

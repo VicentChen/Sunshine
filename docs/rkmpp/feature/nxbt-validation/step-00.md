@@ -49,12 +49,11 @@ no Bluetooth addresses are recorded in this repository.
 
 ## Sunshine input baseline
 
-An isolated `cmake-build-nxbt-tests` directory was configured with the ROCK
-5B+ LLVM 22.1.6 toolchain, prepared FFmpeg binaries, RKMPP enabled, and tests
-enabled.  The following existing test passed:
+The Sunshine build used the ROCK 5B+ LLVM 22.1.6 toolchain, prepared FFmpeg
+binaries, RKMPP enabled, and tests enabled. The following existing test passed:
 
 ```text
-./cmake-build-nxbt-tests/tests/test_sunshine \
+test_sunshine \
   --gtest_filter='InputGamepadSessionTest.*:*Virtualhid*Gamepad*'
 
 2 tests from InputGamepadSessionTest: PASSED

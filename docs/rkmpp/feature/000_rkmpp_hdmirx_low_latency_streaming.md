@@ -282,7 +282,7 @@ pkg-config --cflags --libs rockchip_mpp
 pkg-config --modversion rockchip_mpp
 v4l2-ctl -d /dev/video0 --all
 v4l2-ctl -d /dev/video0 --list-formats-ext
-cmake --build build-clang --parallel
+./scripts/build-rkmpp.sh
 ```
 
 验收标准：
@@ -329,7 +329,7 @@ cmake --build build-clang --parallel
 硬件测试建议：
 
 ```bash
-./build-clang/tests/rkmpp_hdmirx_smoke --frames 300
+rkmpp_hdmirx_smoke --frames 300
 ```
 
 测试应检查：
@@ -357,11 +357,11 @@ cmake --build build-clang --parallel
 硬件测试建议：
 
 ```bash
-./build-clang/tests/rkmpp_rkmpp_smoke --codec h264 --frames 300 --output /tmp/rkmpp.h264
+rkmpp_rkmpp_smoke --codec h264 --frames 300 --output /tmp/rkmpp.h264
 ffprobe -v error -show_streams /tmp/rkmpp.h264
 ffmpeg -v error -i /tmp/rkmpp.h264 -f null -
 
-./build-clang/tests/rkmpp_rkmpp_smoke --codec h265 --frames 300 --output /tmp/rkmpp.h265
+rkmpp_rkmpp_smoke --codec h265 --frames 300 --output /tmp/rkmpp.h265
 ffprobe -v error -show_streams /tmp/rkmpp.h265
 ffmpeg -v error -i /tmp/rkmpp.h265 -f null -
 ```
@@ -468,7 +468,7 @@ ffmpeg -v error -i /tmp/rkmpp.h265 -f null -
 - RKMPP 布局测试与 Annex-B 参数集/IDR 测试均通过。
 - 启用 RKMPP 的正式构建和关闭 RKMPP 的常规构建均通过；后者不链接 Rockchip MPP。
 - 静态检查确认 HDMI RX 到 MPP 使用 DMA-BUF import，未发现原始帧 CPU map、memcpy() 或软件颜色转换。
-- 常规构建的 ctest 未配置测试；完整 test_sunshine 受 GCC 12 缺少 std::format 支持阻塞，问题位于既有 locale 测试而非本 feature。
+- 当时的常规构建未配置测试；完整 `test_sunshine` 受 GCC 12 缺少 `std::format` 支持阻塞，问题位于既有 locale 测试而非本 feature。
 - 50 次重连、两小时长稳和 4K 输入测试按本次验收范围豁免。
 
 工作：
@@ -482,9 +482,10 @@ ffmpeg -v error -i /tmp/rkmpp.h265 -f null -
 测试：
 
 ```bash
-cmake --build build-clang --parallel
-ctest --test-dir build-clang --output-on-failure
+./scripts/build-rkmpp.sh
 ```
+
+随后运行该脚本产生的 `test_sunshine`，不得复用其他构建目录中的旧产物。
 
 另外记录：
 
