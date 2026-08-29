@@ -7,6 +7,7 @@ readonly LLVM_VERSION=22.1.6
 readonly LLVM_DIR="$PROJECT_DIR/build/toolchains/LLVM-$LLVM_VERSION-Linux-ARM64"
 readonly LLVM_ARCHIVE="$PROJECT_DIR/build/toolchains/LLVM-$LLVM_VERSION-Linux-ARM64.tar.xz"
 readonly LLVM_URL="https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION/LLVM-$LLVM_VERSION-Linux-ARM64.tar.xz"
+readonly NXBT_VENV_DIR="$PROJECT_DIR/.venv/nxbt"
 
 BUILD_DIR="${BUILD_DIR:-$PROJECT_DIR/build-rkmpp-review}"
 BREW_BIN="${BREW_BIN:-}"
@@ -30,7 +31,7 @@ run() {
 install_apt_dependencies() {
   local packages=(
     build-essential ca-certificates curl git pkg-config xz-utils
-    python3-jinja2 python3-setuptools
+    python3-jinja2 python3-setuptools python3-venv
     libayatana-appindicator3-dev libcap-dev libcurl4-openssl-dev
     libdrm-dev libevdev-dev libgbm-dev libminiupnpc-dev libnotify-dev
     libnuma-dev libopus-dev libpipewire-0.3-dev libpulse-dev libssl-dev
@@ -91,6 +92,18 @@ prepare_ffmpeg() {
   [[ -d "$BUILD_DIR/_deps/ffmpeg" ]] || die "FFmpeg archive did not produce $BUILD_DIR/_deps/ffmpeg."
 }
 
+prepare_nxbt_venv() {
+  local python_bin="$NXBT_VENV_DIR/bin/python"
+
+  [[ -d "$PROJECT_DIR/third-party/nxbt/nxbt" ]] || die "missing third-party/nxbt; initialize submodules first."
+  if [[ ! -x "$python_bin" ]]; then
+    run python3 -m venv --system-site-packages "$NXBT_VENV_DIR"
+  fi
+
+  run "$python_bin" -m pip install --no-deps --upgrade "$PROJECT_DIR/third-party/nxbt"
+  run "$python_bin" -c "import dbus; import nxbt"
+}
+
 main() {
   [[ "$(uname -s)" == Linux && "$(uname -m)" == aarch64 ]] || die "this script supports Linux ARM64 only."
 
@@ -108,6 +121,7 @@ main() {
     run git -C "$PROJECT_DIR" submodule update --init --recursive
   fi
 
+  prepare_nxbt_venv
   prepare_llvm
   prepare_ffmpeg
 
