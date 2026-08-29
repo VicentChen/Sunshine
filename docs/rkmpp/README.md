@@ -130,7 +130,18 @@ Controller 输入；手柄不需要再单独连接到 ROCK 5B+。
 controller_output = nxbt
 nxbt_socket = /run/nxbt-bridge/control.sock
 nxbt_controller_slot = 0
+back_button_timeout = 1000
 ~~~
+
+### Moonlight Android 虚拟手柄的 HOME
+
+部分已发布的 Moonlight Android 版本的虚拟手柄只有 `BACK` 和 `START`，没有独立的
+`GUIDE`/`HOME` 按钮。将 `back_button_timeout` 设为正数后，长按虚拟手柄的 `BACK`
+达到该时长会由 Sunshine 模拟一次 Home/Guide，并通过 NXBT 转发为 Switch `HOME`。
+上例的 `1000` 表示长按约 1 秒。
+
+`BACK` 的正常映射仍为 Switch `MINUS`；因此此兼容方式会先短暂发送 `MINUS`，再发送
+`HOME`。请在修改配置后重启 Sunshine 使其生效。
 
 ### 日常使用（已配对的 Switch）
 
