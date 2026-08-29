@@ -22,7 +22,7 @@ const config = ref(props.config)
     ></Checkbox>
 
     <!-- Emulated Gamepad Type -->
-    <div class="mb-3" v-if="config.controller === 'enabled' && platform !== 'macos'">
+    <div class="mb-3" v-if="config.controller === 'enabled' && platform !== 'macos' && config.controller_output !== 'nxbt'">
       <label for="gamepad" class="form-label">{{ $t('config.gamepad') }}</label>
       <select id="gamepad" class="form-select" v-model="config.gamepad">
         <option value="auto">{{ $t('_common.auto') }}</option>
@@ -62,9 +62,65 @@ const config = ref(props.config)
       <div class="form-text">{{ $t('config.gamepad_desc') }}</div>
     </div>
 
+    <!-- Controller output routing -->
+    <section v-if="config.controller === 'enabled' && platform === 'linux'" class="border rounded p-3 mb-3">
+      <h3 class="h5">{{ $t('config.controller_output_heading') }}</h3>
+      <div class="mb-3">
+        <label for="controller_output" class="form-label">{{ $t('config.controller_output') }}</label>
+        <select id="controller_output" class="form-select" v-model="config.controller_output">
+          <option value="virtual">{{ $t('config.controller_output_virtual') }}</option>
+          <option value="nxbt">{{ $t('config.controller_output_nxbt') }}</option>
+          <option value="both">{{ $t('config.controller_output_both') }}</option>
+        </select>
+        <div class="form-text">{{ $t('config.controller_output_desc') }}</div>
+      </div>
+
+      <template v-if="config.controller_output === 'nxbt' || config.controller_output === 'both'">
+        <div class="mb-3">
+          <label for="nxbt_socket" class="form-label">{{ $t('config.nxbt_socket') }}</label>
+          <input id="nxbt_socket" type="text" class="form-control monospace"
+                 placeholder="/run/nxbt-bridge/control.sock" v-model="config.nxbt_socket" />
+          <div class="form-text">{{ $t('config.nxbt_socket_desc') }}</div>
+        </div>
+        <div class="mb-3">
+          <label for="nxbt_controller_slot" class="form-label">{{ $t('config.nxbt_controller_slot') }}</label>
+          <input id="nxbt_controller_slot" type="number" min="0" max="15" class="form-control"
+                 placeholder="0" v-model="config.nxbt_controller_slot" />
+          <div class="form-text">{{ $t('config.nxbt_controller_slot_desc') }}</div>
+        </div>
+        <div class="mb-3">
+          <label for="nxbt_face_buttons" class="form-label">{{ $t('config.nxbt_face_buttons') }}</label>
+          <select id="nxbt_face_buttons" class="form-select" v-model="config.nxbt_face_buttons">
+            <option value="labels">{{ $t('config.nxbt_face_buttons_labels') }}</option>
+            <option value="positions">{{ $t('config.nxbt_face_buttons_positions') }}</option>
+          </select>
+          <div class="form-text">{{ $t('config.nxbt_face_buttons_desc') }}</div>
+        </div>
+        <div class="row">
+          <div class="col-md-6 mb-3">
+            <label for="nxbt_trigger_press_threshold" class="form-label">{{ $t('config.nxbt_trigger_press_threshold') }}</label>
+            <input id="nxbt_trigger_press_threshold" type="number" min="0" max="255" class="form-control"
+                   placeholder="64" v-model="config.nxbt_trigger_press_threshold" />
+          </div>
+          <div class="col-md-6 mb-3">
+            <label for="nxbt_trigger_release_threshold" class="form-label">{{ $t('config.nxbt_trigger_release_threshold') }}</label>
+            <input id="nxbt_trigger_release_threshold" type="number" min="0" max="255" class="form-control"
+                   placeholder="48" v-model="config.nxbt_trigger_release_threshold" />
+          </div>
+        </div>
+        <div class="form-text mb-3">{{ $t('config.nxbt_trigger_thresholds_desc') }}</div>
+        <div class="mb-3">
+          <label for="nxbt_watchdog_timeout" class="form-label">{{ $t('config.nxbt_watchdog_timeout') }}</label>
+          <input id="nxbt_watchdog_timeout" type="number" min="50" max="1000" class="form-control"
+                 placeholder="150" v-model="config.nxbt_watchdog_timeout" />
+          <div class="form-text">{{ $t('config.nxbt_watchdog_timeout_desc') }}</div>
+        </div>
+      </template>
+    </section>
+
     <!-- Additional options based on gamepad type -->
     <template v-if="config.controller === 'enabled'">
-      <template v-if="config.gamepad === 'ds4' || config.gamepad === 'ds5' || (config.gamepad === 'auto' && platform !== 'macos')">
+      <template v-if="config.controller_output !== 'nxbt' && (config.gamepad === 'ds4' || config.gamepad === 'ds5' || (config.gamepad === 'auto' && platform !== 'macos'))">
         <div class="mb-3 accordion">
           <div class="accordion-item">
             <h2 class="accordion-header">

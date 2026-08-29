@@ -56,9 +56,9 @@ namespace input {
   [[nodiscard]] std::unique_ptr<platf::deinit_t> init();
 
   /**
-   * @brief Probe whether the platform can create virtual gamepads.
+   * @brief Probe whether the configured controller outputs are unavailable.
    *
-   * @return True when at least one configured gamepad backend is available.
+   * @return True when no configured gamepad output backend is available.
    */
   bool probe_gamepads();
 
@@ -89,6 +89,11 @@ namespace input {
     void set_platform_input(platf::input_t input);
 
     /**
+     * @brief Recreate the gamepad router after a test changes output configuration.
+     */
+    void reconfigure_gamepad_router();
+
+    /**
      * @brief Allocate a gamepad directly in retained input state for a unit test.
      *
      * @param input Retained input state.
@@ -106,6 +111,13 @@ namespace input {
      * @return Assigned global gamepad slot, or -1 when unallocated.
      */
     int gamepad_id(const std::shared_ptr<input_t> &input, std::uint8_t client_index);
+
+    /**
+     * @brief Synchronously neutralize retained gamepads for a unit test.
+     *
+     * @param input Retained input state whose gamepads should be neutralized.
+     */
+    void neutralize_gamepads(const std::shared_ptr<input_t> &input);
   }  // namespace testing
 #endif
 

@@ -117,6 +117,48 @@ DISPLAY=:99 ./start-sunshine.sh     # 捕获 Xvfb :99 虚拟桌面
 
 Web UI 默认监听 https://<Rock-IP-or-hostname>:47990。脚本不会启动 Xvfb 或 HDMI 预览；这两者需按 RKMPP 运行场景单独启动。
 
+## Moonlight → NS 与手柄回传
+
+启用 NXBT Bridge 后，`NS` 是 Moonlight 中用于串流接入 ROCK 5B+ HDMI RX 的
+Sunshine 应用。它同时把 Moonlight 客户端的手柄输入转换为 Nintendo Switch Pro
+Controller 输入；手柄不需要再单独连接到 ROCK 5B+。
+
+首次部署需完成 Bridge 安装，并在实际由启动脚本使用的
+`runtime-home/config/sunshine/sunshine.conf` 中配置：
+
+~~~text
+controller_output = nxbt
+nxbt_socket = /run/nxbt-bridge/control.sock
+nxbt_controller_slot = 0
+~~~
+
+### 日常使用（已配对的 Switch）
+
+1. 打开 Switch，并停留在普通主页；不要进入“更改握法/顺序”。
+2. 在 ROCK 5B+ 上运行 `./start-sunshine.sh`。
+3. 在 Moonlight 中选择 `NS` 并开始串流。
+4. Sunshine 会在串流会话开始时预先创建虚拟 Pro Controller，并自动重连已配对的
+   Switch，不需要先按 A。连接完成后，NS 画面和手柄回传在同一条串流流程中工作。
+
+Moonlight 断流后再次选择 `NS` 即可再次连接。若 Switch 休眠，先唤醒它并回到普通
+主页后再重试。
+
+### 首次与另一台 Switch 配对
+
+每台 Switch 都需要各自完成一次蓝牙配对；配对记录保存在 ROCK 5B+ 的 BlueZ 中。
+要接入一台从未配对过的 Switch：
+
+1. 让已配对的其他 Switch 关机、休眠或保持不在附近，避免它先响应自动重连。
+2. 运行 `./start-sunshine.sh`，并在 Moonlight 中选择 `NS`。
+3. 在新 Switch 打开“控制器”→“更改握法/顺序”。
+4. 等待新 Switch 显示 Pro Controller 并完成连接；连接出现后可按 A 确认输入。
+5. 配对成功后退出“更改握法/顺序”。后续使用这台 Switch 时，应按“日常使用”的
+   步骤在普通主页上启动，以便快速重连。
+
+Bridge 会依次尝试已保存的 Switch；若它们均不可用，会回退到配对发现。因此首次切换
+到另一台 Switch 时可能比日常重连稍慢。首版只支持一个正在串流并接收输入的 Switch，
+不能同时控制多台 Switch。
+
 ## RGA 视频缩放与格式转换
 目前已接入 Rockchip 2D 图形加速器 (RGA) 支持。仅当 Moonlight 请求的分辨率与 HDMI RX 实际接收的可见分辨率不一致时，Sunshine 才会使用 RGA 对图像进行缩放与裁剪 (信箱模式或居中裁剪)，并生成 NV12 目标缓冲。对于相同尺寸的请求，HDMI RX 的原始 DMA-BUF（包括像素格式和 stride）会直接交给 RKMPP；格式或 stride 在恢复后变化时会重建直通编码器，不会回退到 RGA。在等待 EDID 协商或短暂无信号期间，屏幕将显示一个绿色的占位帧以防串流断开。
 

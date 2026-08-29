@@ -855,6 +855,13 @@ namespace config {
       platf::supported_gamepads(nullptr).front().name.data(),
       platf::supported_gamepads(nullptr).front().name.size(),
     },  // Default gamepad
+    "virtual",  // controller_output
+    "/run/nxbt-bridge/control.sock",  // nxbt_socket
+    0,  // nxbt_controller_slot
+    "labels",  // nxbt_face_buttons
+    64,  // nxbt_trigger_press_threshold
+    48,  // nxbt_trigger_release_threshold
+    150ms,  // nxbt_watchdog_timeout
     true,  // back as touchpad click enabled for PlayStation-style gamepads
     true,  // client gamepads with motion events use PlayStation-style emulation
     true,  // client gamepads with touchpads use PlayStation-style emulation
@@ -1803,6 +1810,69 @@ namespace config {
     }
 
     string_restricted_f(vars, "gamepad"s, input.gamepad, get_supported_gamepad_options());
+    std::string controller_output;
+    string_f(vars, "controller_output"s, controller_output);
+    if (!controller_output.empty()) {
+      if (controller_output == "virtual" || controller_output == "nxbt" || controller_output == "both") {
+        input.controller_output = std::move(controller_output);
+      } else {
+        BOOST_LOG(error) << "config: 'controller_output' must be virtual, nxbt, or both"sv;
+      }
+    }
+#if !defined(__linux__)
+    if (input.controller_output != "virtual") {
+      BOOST_LOG(error) << "config: NXBT controller output is supported only on Linux; using virtual output"sv;
+      input.controller_output = "virtual";
+    }
+#endif
+
+    std::string nxbt_socket;
+    string_f(vars, "nxbt_socket"s, nxbt_socket);
+    if (!nxbt_socket.empty()) {
+      if (nxbt_socket.front() == '/') {
+        input.nxbt_socket = std::move(nxbt_socket);
+      } else {
+        BOOST_LOG(error) << "config: 'nxbt_socket' must be an absolute Unix socket path"sv;
+      }
+    }
+
+    int nxbt_controller_slot = input.nxbt_controller_slot;
+    int_f(vars, "nxbt_controller_slot", nxbt_controller_slot);
+    if (nxbt_controller_slot >= 0 && nxbt_controller_slot < platf::MAX_GAMEPADS) {
+      input.nxbt_controller_slot = nxbt_controller_slot;
+    } else {
+      BOOST_LOG(error) << "config: 'nxbt_controller_slot' must be between 0 and "sv << platf::MAX_GAMEPADS - 1;
+    }
+    std::string nxbt_face_buttons;
+    string_f(vars, "nxbt_face_buttons"s, nxbt_face_buttons);
+    if (!nxbt_face_buttons.empty()) {
+      if (nxbt_face_buttons == "labels" || nxbt_face_buttons == "positions") {
+        input.nxbt_face_buttons = std::move(nxbt_face_buttons);
+      } else {
+        BOOST_LOG(error) << "config: 'nxbt_face_buttons' must be labels or positions"sv;
+      }
+    }
+
+    int press_threshold = input.nxbt_trigger_press_threshold;
+    int release_threshold = input.nxbt_trigger_release_threshold;
+    int_f(vars, "nxbt_trigger_press_threshold", press_threshold);
+    int_f(vars, "nxbt_trigger_release_threshold", release_threshold);
+    if (press_threshold < 0 || press_threshold > 255 || release_threshold < 0 || release_threshold > 255) {
+      BOOST_LOG(error) << "config: NXBT trigger thresholds must be between 0 and 255"sv;
+    } else if (release_threshold >= press_threshold) {
+      BOOST_LOG(error) << "config: 'nxbt_trigger_release_threshold' must be lower than 'nxbt_trigger_press_threshold'"sv;
+    } else {
+      input.nxbt_trigger_press_threshold = press_threshold;
+      input.nxbt_trigger_release_threshold = release_threshold;
+    }
+
+    int nxbt_watchdog_timeout = static_cast<int>(input.nxbt_watchdog_timeout.count());
+    int_f(vars, "nxbt_watchdog_timeout", nxbt_watchdog_timeout);
+    if (nxbt_watchdog_timeout >= 50 && nxbt_watchdog_timeout <= 1000) {
+      input.nxbt_watchdog_timeout = std::chrono::milliseconds {nxbt_watchdog_timeout};
+    } else {
+      BOOST_LOG(error) << "config: 'nxbt_watchdog_timeout' must be between 50 and 1000 milliseconds"sv;
+    }
     bool_f(vars, "ds4_back_as_touchpad_click", input.ds4_back_as_touchpad_click);
     bool_f(vars, "motion_as_ds4", input.motion_as_ds4);
     bool_f(vars, "touchpad_as_ds4", input.touchpad_as_ds4);

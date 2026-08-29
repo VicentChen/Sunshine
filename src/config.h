@@ -281,6 +281,13 @@ namespace config {
     std::chrono::duration<double> key_repeat_period;  ///< Interval between repeated keyboard key events.
 
     std::string gamepad;  ///< Virtual controller backend selected by configuration.
+    std::string controller_output;  ///< Controller output destination: virtual, NXBT, or both.
+    std::string nxbt_socket;  ///< Local Unix-domain socket used to reach the NXBT Bridge.
+    int nxbt_controller_slot;  ///< Fixed NXBT Bridge controller slot used by the first streamed gamepad.
+    std::string nxbt_face_buttons;  ///< Face-button mapping policy: labels or physical positions.
+    int nxbt_trigger_press_threshold;  ///< Analog trigger value that presses Switch ZL or ZR.
+    int nxbt_trigger_release_threshold;  ///< Analog trigger value that releases Switch ZL or ZR.
+    std::chrono::milliseconds nxbt_watchdog_timeout;  ///< NXBT transport health timeout.
     bool ds4_back_as_touchpad_click;  ///< Map Back/Select to touchpad click for PlayStation-style gamepads.
     bool motion_as_ds4;  ///< Prefer PlayStation-style emulation for client gamepads with motion controls.
     bool touchpad_as_ds4;  ///< Prefer PlayStation-style emulation for client gamepads with touchpad input.

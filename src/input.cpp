@@ -29,6 +29,9 @@ extern "C" {
 #include "config.h"
 #include "globals.h"
 #include "input.h"
+#include "input/gamepad_router.h"
+#include "input/nxbt_client.h"
+#include "input/nxbt_sink.h"
 #include "logging.h"
 #include "platform/common.h"
 #include "platform/virtualhid_input.h"
@@ -166,18 +169,166 @@ namespace input {
 
   static platf::input_t platf_input;
   static std::bitset<platf::MAX_GAMEPADS> gamepadMask {};
+  static std::unique_ptr<gamepad::router_t> gamepad_router;  ///< Routes parsed gamepad state to configured outputs.
+  static std::shared_ptr<nxbt::client_t> nxbt_client;  ///< Reconnecting client retained for diagnostics and orderly shutdown.
+  static gamepad::failure_log_limiter_t gamepad_router_error_log {std::chrono::seconds(5)};  ///< Limits repeated sink errors.
+
+  /**
+   * @brief Adapt Sunshine's existing platform virtual-HID API to a gamepad sink.
+   */
+  class virtual_gamepad_sink_t final: public gamepad::sink_t {
+  public:
+    /**
+     * @brief Bind the sink to the process-wide platform input backend.
+     *
+     * @param platform_input Platform input backend used by legacy virtual-HID calls.
+     */
+    explicit virtual_gamepad_sink_t(platf::input_t &platform_input):
+        platform_input_(platform_input) {
+    }
+
+    /**
+     * @copydoc gamepad::sink_t::alloc
+     */
+    bool alloc(const platf::gamepad_id_t &id, const platf::gamepad_arrival_t &arrival, platf::feedback_queue_t feedback_queue) override {
+      return platf::alloc_gamepad(platform_input_, id, arrival, feedback_queue) == 0;
+    }
+
+    /**
+     * @copydoc gamepad::sink_t::rebind
+     */
+    bool rebind(const platf::gamepad_id_t &id, platf::feedback_queue_t feedback_queue) override {
+      return platf::rebind_gamepad(platform_input_, id, feedback_queue) == 0;
+    }
+
+    /**
+     * @copydoc gamepad::sink_t::update
+     */
+    bool update(const platf::gamepad_id_t &id, const platf::gamepad_state_t &state) override {
+      platf::gamepad_update(platform_input_, id.globalIndex, state);
+      return true;
+    }
+
+    /**
+     * @copydoc gamepad::sink_t::neutralize
+     */
+    void neutralize(const platf::gamepad_id_t &id) override {
+      platf::gamepad_update(platform_input_, id.globalIndex, {});
+    }
+
+    /**
+     * @copydoc gamepad::sink_t::free
+     */
+    void free(const platf::gamepad_id_t &id) override {
+      platf::free_gamepad(platform_input_, id.globalIndex);
+    }
+
+  private:
+    platf::input_t &platform_input_;  ///< Legacy platform virtual-HID backend.
+  };
+
+  /**
+   * @brief Convert the configured output string into a router mode.
+   *
+   * @return Selected output mode, defaulting safely to virtual output.
+   */
+  gamepad::output_mode_e configured_output_mode() {
+    if (config::input.controller_output == "nxbt") {
+      return gamepad::output_mode_e::nxbt;
+    }
+    if (config::input.controller_output == "both") {
+      return gamepad::output_mode_e::both;
+    }
+    return gamepad::output_mode_e::virtual_output;
+  }
+
+  /**
+   * @brief Log one sanitized structured event emitted by the NXBT worker.
+   *
+   * @param event Connection, protocol, heartbeat, or controller-status event.
+   */
+  void log_nxbt_event(const nxbt::client_event_t &event) {
+    if (event.type == nxbt::client_event_e::controller_status) {
+      BOOST_LOG(info) << "NXBT event="sv << nxbt::client_event_name(event.type) << " slot="sv << static_cast<unsigned>(event.controller_id)
+                      << " status="sv << nxbt::controller_status_name(event.controller_status);
+      return;
+    }
+    if (event.type == nxbt::client_event_e::connected) {
+      BOOST_LOG(info) << "NXBT event="sv << nxbt::client_event_name(event.type) << " protocol="sv << nxbt::protocol_version;
+      return;
+    }
+    BOOST_LOG(warning) << "NXBT event="sv << nxbt::client_event_name(event.type) << " system_error="sv << event.system_error.value()
+                       << " protocol_error="sv << static_cast<unsigned>(event.protocol_error);
+  }
+
+  /**
+   * @brief Configure the gamepad router and optional reconnecting NXBT output.
+   */
+  void configure_gamepad_router() {
+    gamepad_router.reset();
+    nxbt_client.reset();
+    const auto mode = configured_output_mode();
+    std::shared_ptr<gamepad::sink_t> virtual_sink;
+    std::shared_ptr<gamepad::sink_t> nxbt_sink;
+    if (mode == gamepad::output_mode_e::virtual_output || mode == gamepad::output_mode_e::both) {
+      virtual_sink = std::make_shared<virtual_gamepad_sink_t>(platf_input);
+    }
+    if (mode == gamepad::output_mode_e::nxbt || mode == gamepad::output_mode_e::both) {
+      nxbt::client_options_t options;
+      options.endpoint = config::input.nxbt_socket;
+      options.heartbeat_timeout = config::input.nxbt_watchdog_timeout;
+      options.heartbeat_interval = std::max(20ms, config::input.nxbt_watchdog_timeout / 3);
+      nxbt_client = std::make_shared<nxbt::client_t>(options, nxbt::make_unix_transport_factory(), log_nxbt_event);
+      const auto policy = config::input.nxbt_face_buttons == "positions" ? nxbt::face_button_policy_e::positions : nxbt::face_button_policy_e::labels;
+      nxbt_sink = std::make_shared<nxbt::sink_t>(
+        nxbt_client,
+        policy,
+        static_cast<std::uint8_t>(config::input.nxbt_controller_slot),
+        static_cast<std::uint8_t>(config::input.nxbt_trigger_press_threshold),
+        static_cast<std::uint8_t>(config::input.nxbt_trigger_release_threshold)
+      );
+      BOOST_LOG(info) << "NXBT configured output="sv << config::input.controller_output << " socket="sv << config::input.nxbt_socket
+                      << " slot="sv << config::input.nxbt_controller_slot << " watchdog_ms="sv << config::input.nxbt_watchdog_timeout.count();
+    }
+    gamepad_router = std::make_unique<gamepad::router_t>(
+      mode,
+      std::move(virtual_sink),
+      std::move(nxbt_sink)
+    );
+  }
+
+  /**
+   * @brief Submit one state through the router and rate-limit output-failure logs.
+   *
+   * @param id Sunshine global and client-relative controller identifiers.
+   * @param state Complete Moonlight controller state.
+   */
+  void update_gamepad(const platf::gamepad_id_t &id, const platf::gamepad_state_t &state) {
+    if (gamepad_router && gamepad_router->update(id, state)) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (gamepad_router_error_log.should_log(now)) {
+      BOOST_LOG(warning) << "Gamepad output update failed for slot "sv << id.globalIndex;
+    }
+  }
 
   /**
    * @brief Release all platform resources associated with a virtual gamepad.
    *
    * @param platf_input Platf input.
-   * @param id Identifier for the controller, session, display, or resource.
+   * @param id Sunshine global and client-relative controller identifiers.
    */
-  void free_gamepad(platf::input_t &platf_input, int id) {
-    platf::gamepad_update(platf_input, id, platf::gamepad_state_t {});
-    platf::free_gamepad(platf_input, id);
+  void free_gamepad(platf::input_t &platf_input, const platf::gamepad_id_t &id) {
+    if (gamepad_router) {
+      gamepad_router->neutralize(id);
+      gamepad_router->free(id);
+    } else {
+      platf::gamepad_update(platf_input, id.globalIndex, platf::gamepad_state_t {});
+      platf::free_gamepad(platf_input, id.globalIndex);
+    }
 
-    free_id(gamepadMask, id);
+    free_id(gamepadMask, id.globalIndex);
   }
 
   /**
@@ -188,17 +339,18 @@ namespace input {
         gamepad_state {},
         back_timeout_id {},
         id {-1},
+        client_index {},
         back_button_state {button_state_e::NONE} {
     }
 
     ~gamepad_t() {
       if (id >= 0) {
         if (task_pool.running()) {
-          task_pool.push([id = this->id]() {
+          task_pool.push([id = platf::gamepad_id_t {this->id, this->client_index}]() {
             ::input::free_gamepad(platf_input, id);
           });
         } else {
-          ::input::free_gamepad(platf_input, id);
+          ::input::free_gamepad(platf_input, {id, client_index});
         }
       }
     }
@@ -208,6 +360,7 @@ namespace input {
     thread_pool_util::ThreadPool::task_id_t back_timeout_id;  ///< Back timeout ID.
 
     int id;  ///< Global gamepad slot assigned to this client controller.
+    std::uint8_t client_index;  ///< Client-relative controller index used by output sinks.
 
     // When emulating the HOME button, we may need to artificially release the back button.
     // Afterwards, the gamepad state on sunshine won't match the state on Moonlight.
@@ -343,7 +496,7 @@ namespace input {
         gamepad.back_timeout_id = nullptr;
       }
       if (gamepad.id >= 0) {
-        ::input::free_gamepad(platf_input, gamepad.id);
+        ::input::free_gamepad(platf_input, {gamepad.id, gamepad.client_index});
         gamepad.id = -1;
       }
       gamepad.gamepad_state = {};
@@ -379,7 +532,8 @@ namespace input {
         continue;
       }
 
-      if (platf::rebind_gamepad(platf_input, {gamepad.id, static_cast<std::uint8_t>(client_index)}, input->feedback_queue) != 0) {
+      const platf::gamepad_id_t id {gamepad.id, static_cast<std::uint8_t>(client_index)};
+      if (!gamepad_router || !gamepad_router->rebind(id, input->feedback_queue)) {
         free_id(gamepadMask, gamepad.id);
         gamepad.id = -1;
       }
@@ -1176,7 +1330,7 @@ namespace input {
    * @param arrival Client-reported controller metadata.
    * @return Assigned global gamepad slot, or -1 when allocation fails.
    */
-  int alloc_gamepad(std::shared_ptr<input_t> &input, int client_index, const platf::gamepad_arrival_t &arrival) {
+  int alloc_gamepad(const std::shared_ptr<input_t> &input, int client_index, const platf::gamepad_arrival_t &arrival) {
     if (client_index < 0 || client_index >= input->gamepads.size()) {
       BOOST_LOG(warning) << "ControllerNumber out of range ["sv << client_index << ']';
       return -1;
@@ -1193,13 +1347,33 @@ namespace input {
       return -1;
     }
 
-    if (platf::alloc_gamepad(platf_input, {id, static_cast<std::uint8_t>(client_index)}, arrival, input->feedback_queue)) {
+    const platf::gamepad_id_t gamepad_id {id, static_cast<std::uint8_t>(client_index)};
+    if (!gamepad_router || !gamepad_router->alloc(gamepad_id, arrival, input->feedback_queue)) {
       free_id(gamepadMask, id);
       return -1;
     }
 
     gamepad.id = id;
+    gamepad.client_index = client_index;
     return id;
+  }
+
+  /**
+   * @brief Allocate the first NXBT controller when a new stream starts.
+   *
+   * The first-version NXBT path supports one fixed controller slot. Starting
+   * its Bluetooth connection with the stream hides controller discovery time
+   * behind video startup instead of waiting for the client's first input.
+   *
+   * @param input Newly created stream input state.
+   */
+  void prewarm_nxbt_gamepad(const std::shared_ptr<input_t> &input) {
+    if (!config::input.controller || configured_output_mode() != gamepad::output_mode_e::nxbt) {
+      return;
+    }
+    if (alloc_gamepad(input, 0, {}) >= 0) {
+      BOOST_LOG(info) << "NXBT prewarm client_slot=0"sv;
+    }
   }
 
   /**
@@ -1472,7 +1646,7 @@ namespace input {
       }
     } else if (!(packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id >= 0) {
       // If this is the final event for a gamepad being removed, free the gamepad and return.
-      ::input::free_gamepad(platf_input, gamepad.id);
+      ::input::free_gamepad(platf_input, {gamepad.id, static_cast<std::uint8_t>(packet->controllerNumber)});
       gamepad.id = -1;
       return;
     }
@@ -1529,18 +1703,18 @@ namespace input {
             // Force the back button up
             gamepad.back_button_state = button_state_e::UP;
             state.buttonFlags &= ~platf::BACK;
-            platf::gamepad_update(platf_input, gamepad.id, state);
+            update_gamepad({gamepad.id, static_cast<std::uint8_t>(controller)}, state);
 
             // Press Home button
             state.buttonFlags |= platf::HOME;
-            platf::gamepad_update(platf_input, gamepad.id, state);
+            update_gamepad({gamepad.id, static_cast<std::uint8_t>(controller)}, state);
 
             // Sleep for a short time to allow the input to be detected
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
             // Release Home button
             state.buttonFlags &= ~platf::HOME;
-            platf::gamepad_update(platf_input, gamepad.id, state);
+            update_gamepad({gamepad.id, static_cast<std::uint8_t>(controller)}, state);
 
             gamepad.back_timeout_id = nullptr;
           };
@@ -1553,7 +1727,7 @@ namespace input {
       }
     }
 
-    platf::gamepad_update(platf_input, gamepad.id, gamepad_state);
+    update_gamepad({gamepad.id, static_cast<std::uint8_t>(packet->controllerNumber)}, gamepad_state);
 
     gamepad.gamepad_state = gamepad_state;
   }
@@ -1985,7 +2159,11 @@ namespace input {
         gamepad.back_timeout_id = nullptr;
       }
       if (gamepad.id >= 0) {
-        platf::gamepad_update(platf_input, gamepad.id, {});
+        if (gamepad_router) {
+          gamepad_router->neutralize({gamepad.id, static_cast<std::uint8_t>(client_index)});
+        } else {
+          platf::gamepad_update(platf_input, gamepad.id, {});
+        }
         platf::gamepad_touch(
           platf_input,
           {{gamepad.id, static_cast<std::uint8_t>(client_index)}, LI_TOUCH_EVENT_CANCEL_ALL, 0, 0.0F, 0.0F, 0.0F}
@@ -2068,6 +2246,8 @@ namespace input {
         state.inputs.swap(inputs);
       }
       destroy_gamepads(inputs);
+      gamepad_router.reset();
+      nxbt_client.reset();
       platf_input.reset();
     }
   };
@@ -2077,6 +2257,7 @@ namespace input {
    */
   [[nodiscard]] std::unique_ptr<platf::deinit_t> init() {
     platf_input = platf::input();
+    configure_gamepad_router();
 
     return std::make_unique<deinit_t>();
   }
@@ -2085,6 +2266,9 @@ namespace input {
    * @brief Probe connected gamepads and update input capability state.
    */
   bool probe_gamepads() {
+    if (configured_output_mode() != gamepad::output_mode_e::virtual_output) {
+      return false;
+    }
     const auto &gamepads = platf::supported_gamepads(std::addressof(platf_input));
     return std::ranges::none_of(gamepads, [](const auto &gamepad) {
       return gamepad.is_enabled && gamepad.name != "auto";
@@ -2126,6 +2310,10 @@ namespace input {
       dispatch_input_task([input, mail = std::move(mail)]() {
         rebind_input(input, mail);
       });
+    } else {
+      dispatch_input_task([input]() {
+        prewarm_nxbt_gamepad(input);
+      });
     }
 
     // Workaround to ensure new frames will be captured when a client connects
@@ -2144,6 +2332,13 @@ namespace input {
       terminate_gamepads();
       platf_input = std::move(input);
       gamepadMask.reset();
+      configure_gamepad_router();
+    }
+
+    void reconfigure_gamepad_router() {
+      terminate_gamepads();
+      gamepadMask.reset();
+      configure_gamepad_router();
     }
 
     int alloc_gamepad(std::shared_ptr<input_t> &input, std::uint8_t client_index, const platf::gamepad_arrival_t &metadata) {
@@ -2155,6 +2350,10 @@ namespace input {
         return -1;
       }
       return input->gamepads[client_index].id;
+    }
+
+    void neutralize_gamepads(const std::shared_ptr<input_t> &input) {
+      reset_gamepads(input);
     }
   }  // namespace testing
 #endif

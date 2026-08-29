@@ -26,6 +26,7 @@ namespace {
       original_input_ = config::input;
       config::input.controller = true;
       config::input.gamepad = "xseries";
+      config::input.controller_output = "virtual";
 
       auto platform_input = platf::input();
       ASSERT_TRUE(platform_input);
@@ -85,6 +86,14 @@ TEST_F(InputGamepadSessionTest, ReusesGamepadsAcrossPauseAndDestroysThemOnTermin
   ASSERT_GE(original_id, 0);
   EXPECT_EQ(runtime().active_device_count(), active_devices_before_gamepad + 1);
 
+  auto *adapter = platf::virtualhid::gamepad_adapter_for_testing(context(), original_id);
+  ASSERT_NE(adapter, nullptr);
+  platf::virtualhid::gamepad_update(context(), original_id, {platf::A, 255, 0, 0, 0, 0, 0});
+  EXPECT_TRUE(adapter->state().buttons.test(lvh::GamepadButton::a));
+  input::testing::neutralize_gamepads(first);
+  EXPECT_FALSE(adapter->state().buttons.test(lvh::GamepadButton::a));
+  EXPECT_EQ(runtime().active_device_count(), active_devices_before_gamepad + 1);
+
   const std::weak_ptr<input::input_t> paused = first;
   first.reset();
   EXPECT_FALSE(paused.expired());
@@ -115,4 +124,28 @@ TEST_F(InputGamepadSessionTest, RefreshesSharedMouseAfterLicenseStateChanges) {
   ASSERT_NE(context().mouse, nullptr);
   EXPECT_NE(context().mouse->device_id(), original_mouse_id);
   EXPECT_EQ(runtime().active_device_count(), active_devices);
+}
+
+TEST_F(InputGamepadSessionTest, ReportsNxbtAvailableWithoutVirtualGamepadSupport) {
+  input::testing::set_platform_input({});
+  EXPECT_TRUE(input::probe_gamepads());
+
+  config::input.controller_output = "nxbt";
+  EXPECT_FALSE(input::probe_gamepads());
+
+  config::input.controller_output = "both";
+  EXPECT_FALSE(input::probe_gamepads());
+}
+
+TEST_F(InputGamepadSessionTest, PrewarmsFirstNxbtControllerWhenSessionStarts) {
+  config::input.controller_output = "nxbt";
+  config::input.nxbt_socket = "/tmp/sunshine-nxbt-prewarm-missing.sock";
+  input::testing::reconfigure_gamepad_router();
+
+  auto session = input::alloc(std::make_shared<safe::mail_raw_t>(), "nxbt-prewarm-session");
+  EXPECT_EQ(input::testing::gamepad_id(session, 0), 0);
+
+  input::terminate_gamepads("nxbt-prewarm-session");
+  config::input.controller_output = "virtual";
+  input::testing::reconfigure_gamepad_router();
 }

@@ -1,0 +1,35 @@
+[Unit]
+Description=Sunshine NXBT Bridge
+Documentation=https://docs.lizardbyte.dev/projects/sunshine/
+Requires=bluetooth.service
+After=bluetooth.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Root is intentional for the first release: raw Bluetooth L2CAP and BlueZ
+# ProfileManager permissions have not yet been proven safe under a narrower set.
+User=root
+Group=nxbt-bridge
+WorkingDirectory=/usr/lib/nxbt-bridge
+Environment=PYTHONPATH=/usr/lib/nxbt-bridge
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=-/etc/default/nxbt-bridge
+ExecStart=/usr/bin/python3 -m nxbt_bridge --backend=nxbt --socket=/run/nxbt-bridge/control.sock --watchdog-ms=150 $NXBT_BRIDGE_ARGS
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=nxbt-bridge
+RuntimeDirectoryMode=0770
+UMask=0007
+TimeoutStopSec=5
+KillSignal=SIGTERM
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/run/nxbt-bridge
+
+[Install]
+WantedBy=multi-user.target

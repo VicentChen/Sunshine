@@ -363,6 +363,73 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### controller_output
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Select where Sunshine sends streamed controller input. This option is Linux-only; other platforms always
+            use virtual output. It is independent of @ref gamepad, so @code{gamepad = switch} continues to select the
+            existing host virtual Switch Pro profile rather than NXBT.
+        </td>
+    </tr>
+    <tr><td>Default</td><td colspan="2">@code{}virtual@endcode</td></tr>
+    <tr><td>Example</td><td colspan="2">@code{}controller_output = nxbt@endcode</td></tr>
+    <tr><td rowspan="3">Choices</td><td>virtual</td><td>Host virtual gamepad only</td></tr>
+    <tr><td>nxbt</td><td>Local NXBT Bridge only</td></tr>
+    <tr><td>both</td><td>Host virtual gamepad and NXBT Bridge</td></tr>
+</table>
+
+### nxbt_socket
+
+<table>
+    <tr><td>Description</td><td colspan="2">Absolute path to the restricted local Unix packet socket exposed by the NXBT Bridge.</td></tr>
+    <tr><td>Default</td><td colspan="2">@code{}/run/nxbt-bridge/control.sock@endcode</td></tr>
+    <tr><td>Example</td><td colspan="2">@code{}nxbt_socket = /run/nxbt-bridge/control.sock@endcode</td></tr>
+</table>
+
+### nxbt_controller_slot
+
+<table>
+    <tr><td>Description</td><td colspan="2">Bridge controller slot assigned to the first streamed gamepad. The initial implementation supports one NXBT controller.</td></tr>
+    <tr><td>Default</td><td colspan="2">@code{}0@endcode</td></tr>
+    <tr><td>Range</td><td colspan="2">0–15</td></tr>
+</table>
+
+### nxbt_face_buttons
+
+<table>
+    <tr><td>Description</td><td colspan="2">Choose whether face-button conversion preserves printed labels or physical positions.</td></tr>
+    <tr><td>Default</td><td colspan="2">@code{}labels@endcode</td></tr>
+    <tr><td rowspan="2">Choices</td><td>labels</td><td>Sunshine A maps to Switch A</td></tr>
+    <tr><td>positions</td><td>Sunshine A maps to the Switch B position</td></tr>
+</table>
+
+### nxbt_trigger_press_threshold
+
+<table>
+    <tr><td>Description</td><td colspan="2">Analog trigger value that presses the digital Switch ZL or ZR button.</td></tr>
+    <tr><td>Default</td><td colspan="2">@code{}64@endcode</td></tr>
+    <tr><td>Range</td><td colspan="2">0–255</td></tr>
+</table>
+
+### nxbt_trigger_release_threshold
+
+<table>
+    <tr><td>Description</td><td colspan="2">Analog trigger value that releases ZL or ZR. It must be lower than @ref nxbt_trigger_press_threshold.</td></tr>
+    <tr><td>Default</td><td colspan="2">@code{}48@endcode</td></tr>
+    <tr><td>Range</td><td colspan="2">0–255</td></tr>
+</table>
+
+### nxbt_watchdog_timeout
+
+<table>
+    <tr><td>Description</td><td colspan="2">NXBT transport health timeout in milliseconds. The Bridge independently neutralizes stale controller state.</td></tr>
+    <tr><td>Default</td><td colspan="2">@code{}150@endcode</td></tr>
+    <tr><td>Range</td><td colspan="2">50–1000</td></tr>
+</table>
+
 ### ds4_back_as_touchpad_click
 
 <table>

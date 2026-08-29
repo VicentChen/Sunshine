@@ -13,7 +13,7 @@ operator-approved BlueZ test window.
 | --- | --- |
 | Sunshine HEAD | `3791805710a3e92e777a9190052a0a0bd7af2f96` |
 | NXBT submodule HEAD | `ec4b800ad6c55de96bb6c7f9f84b5bdc59a4c975` |
-| Initial worktree state | Modified `docs/rkmpp/AGENTS.md`; untracked `docs/rkmpp/NXBT_PLAN.md` |
+| Initial worktree state | Modified `docs/rkmpp/AGENTS.md`; then-untracked NXBT plan now archived as `docs/rkmpp/feature/003_nxbt_bridge_implementation_plan.md` |
 
 All pre-existing worktree changes were preserved.  No pairing record, systemd
 unit, BlueZ configuration, adapter power state, or Bluetooth connection was
