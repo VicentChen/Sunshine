@@ -39,7 +39,8 @@ namespace input::gamepad {
      * @return @c true when the mode has all of its required sinks.
      */
     bool fully_configured(output_mode_e mode, const std::shared_ptr<sink_t> &virtual_sink, const std::shared_ptr<sink_t> &nxbt_sink) {
-      return (mode == output_mode_e::virtual_output && virtual_sink) ||
+      return mode == output_mode_e::disabled ||
+             (mode == output_mode_e::virtual_output && virtual_sink) ||
              (mode == output_mode_e::nxbt && nxbt_sink) ||
              (mode == output_mode_e::both && virtual_sink && nxbt_sink);
     }
@@ -61,6 +62,10 @@ namespace input::gamepad {
       mode_(mode),
       virtual_sink_(std::move(virtual_sink)),
       nxbt_sink_(std::move(nxbt_sink)) {
+  }
+
+  output_mode_e router_t::mode() const {
+    return mode_;
   }
 
   bool router_t::alloc(const platf::gamepad_id_t &id, const platf::gamepad_arrival_t &arrival, platf::feedback_queue_t feedback_queue) {

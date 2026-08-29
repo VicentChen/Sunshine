@@ -164,6 +164,7 @@ namespace proc {
 
     _app_id = app_id;
     _app = *iter;
+    input::select_gamepad_output(_app.name);
     _app_prep_begin = std::begin(_app.prep_cmds);
     _app_prep_it = _app_prep_begin;
 
@@ -366,6 +367,7 @@ namespace proc {
     }
 
     _app_id = -1;
+    input::select_gamepad_output({});
   }
 
   const std::vector<ctx_t> &proc_t::get_apps() const {

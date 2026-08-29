@@ -149,3 +149,19 @@ TEST_F(InputGamepadSessionTest, PrewarmsFirstNxbtControllerWhenSessionStarts) {
   config::input.controller_output = "virtual";
   input::testing::reconfigure_gamepad_router();
 }
+
+TEST_F(InputGamepadSessionTest, RoutesOnlyNintendoSwitchControllerInputToTheConfiguredOutput) {
+  const platf::gamepad_arrival_t metadata {LI_CTYPE_XBOX, 0, 0};
+  const auto active_devices_before_gamepad = runtime().active_device_count();
+
+  input::select_gamepad_output("HDMI Input");
+  auto hdmi_input = input::alloc(std::make_shared<safe::mail_raw_t>(), "hdmi-input-routing");
+  ASSERT_GE(input::testing::alloc_gamepad(hdmi_input, 0, metadata), 0);
+  EXPECT_EQ(runtime().active_device_count(), active_devices_before_gamepad);
+  input::terminate_gamepads("hdmi-input-routing");
+
+  input::select_gamepad_output("Nintendo Switch");
+  auto switch_input = input::alloc(std::make_shared<safe::mail_raw_t>(), "switch-input-routing");
+  ASSERT_GE(input::testing::alloc_gamepad(switch_input, 0, metadata), 0);
+  EXPECT_EQ(runtime().active_device_count(), active_devices_before_gamepad + 1);
+}

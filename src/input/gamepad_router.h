@@ -17,6 +17,7 @@ namespace input::gamepad {
    * @brief Selects the gamepad output targets for one logical controller.
    */
   enum class output_mode_e {
+    disabled,  ///< Accept controller state without forwarding it to an output backend.
     virtual_output,  ///< Send input only to the host virtual-HID backend.
     nxbt,  ///< Send input only to the NXBT Bridge backend.
     both,  ///< Send input to virtual-HID first and NXBT Bridge second.
@@ -116,6 +117,13 @@ namespace input::gamepad {
      * @param nxbt_sink NXBT Bridge output sink.
      */
     router_t(output_mode_e mode, std::shared_ptr<sink_t> virtual_sink, std::shared_ptr<sink_t> nxbt_sink);
+
+    /**
+     * @brief Return the output mode selected for this router.
+     *
+     * @return Immutable output mode.
+     */
+    output_mode_e mode() const;
 
     /**
      * @brief Allocate all selected outputs atomically.

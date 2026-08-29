@@ -1,6 +1,6 @@
 /**
  * @file tests/unit/test_gamepad_router.cpp
- * @brief Tests for virtual-HID and NXBT gamepad output routing.
+ * @brief Tests for disabled, virtual-HID, and NXBT gamepad output routing.
  */
 
 // standard includes
@@ -133,6 +133,21 @@ TEST(GamepadRouterTest, RoutesOnlyTheSelectedOutput) {
   nxbt_router.neutralize(id_for());
   nxbt_router.free(id_for());
   EXPECT_EQ(calls, (std::vector<std::string> {"nxbt.alloc", "nxbt.update", "nxbt.neutralize", "nxbt.free"}));
+}
+
+TEST(GamepadRouterTest, DisabledOutputAcceptsControllerLifecycleWithoutForwarding) {
+  std::vector<std::string> calls;
+  auto virtual_sink = std::make_shared<fake_sink_t>("virtual", calls);
+  auto nxbt_sink = std::make_shared<fake_sink_t>("nxbt", calls);
+  input::gamepad::router_t router {input::gamepad::output_mode_e::disabled, virtual_sink, nxbt_sink};
+
+  EXPECT_EQ(router.mode(), input::gamepad::output_mode_e::disabled);
+  EXPECT_TRUE(router.alloc(id_for(), {}, {}));
+  EXPECT_TRUE(router.rebind(id_for(), {}));
+  EXPECT_TRUE(router.update(id_for(), {}));
+  router.neutralize(id_for());
+  router.free(id_for());
+  EXPECT_TRUE(calls.empty());
 }
 
 TEST(GamepadRouterTest, AllocatesBothInOrderAndRollsBackOnSecondFailure) {

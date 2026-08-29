@@ -63,6 +63,17 @@ namespace input {
   bool probe_gamepads();
 
   /**
+   * @brief Select the gamepad output route for a launched Sunshine application.
+   *
+   * Nintendo Switch uses the configured controller output. All other
+   * applications currently accept controller input without forwarding it so
+   * unfinished application backends cannot control the Switch.
+   *
+   * @param app_name Configured Sunshine application name, or empty when no app is active.
+   */
+  void select_gamepad_output(std::string_view app_name);
+
+  /**
    * @brief Recreate the shared libvirtualhid mouse after a license-state change.
    *
    * The work is serialized with streamed input so the mouse backend can switch

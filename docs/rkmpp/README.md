@@ -143,6 +143,19 @@ back_button_timeout = 1000
 `BACK` 的正常映射仍为 Switch `MINUS`；因此此兼容方式会先短暂发送 `MINUS`，再发送
 `HOME`。请在修改配置后重启 Sunshine 使其生效。
 
+### 按 Sunshine 应用路由手柄
+
+手柄输出在创建串流输入时按启动的 Sunshine 应用绑定，避免不同目标同时收到虚拟手柄输入：
+
+| Sunshine 应用 | 手柄输出 |
+| --- | --- |
+| `Nintendo Switch` | 使用 `controller_output` 配置；本部署设为 NXBT，输入转发到 Switch。 |
+| `Xbox` | 当前禁用，等待 Xbox Remote Play 输入后端实现。 |
+| `HDMI Input`、`Desktop` 和其他应用 | 禁用，不转发到 NXBT 或主机虚拟手柄。 |
+
+应用切换或停止时，Sunshine 会先向旧输出发送中立状态并释放该手柄。应用名称来自
+`runtime-home/config/sunshine/apps.json`；如重命名 `Nintendo Switch`，需要同步更新路由规则。
+
 ### 日常使用（已配对的 Switch）
 
 1. 打开 Switch，并停留在普通主页；不要进入“更改握法/顺序”。
