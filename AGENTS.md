@@ -1,9 +1,7 @@
-Read `docs/rkmpp/AGENTS.md`
+Read and obey `docs/rkmpp/AGENTS.md` as the most important rules.
 
 On Windows we use msys2 and ucrt64 to compile.
 You need to prefix commands with `C:\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c`.
-
-Prefix build directories with `cmake-build-`.
 
 The test executable is named `test_sunshine` and will be located inside the `tests` directory within
 the build directory.

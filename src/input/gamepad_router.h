@@ -21,6 +21,10 @@ namespace input::gamepad {
     virtual_output,  ///< Send input only to the host virtual-HID backend.
     nxbt,  ///< Send input only to the NXBT Bridge backend.
     both,  ///< Send input to virtual-HID first and NXBT Bridge second.
+    xbox_remote,  ///< Send input only to the Xbox Remote Play backend.
+    virtual_and_xbox_remote,  ///< Send input to virtual-HID first and Xbox Remote Play second.
+    nxbt_and_xbox_remote,  ///< Send input to NXBT first and Xbox Remote Play second.
+    all,  ///< Send input to virtual-HID, NXBT, and Xbox Remote Play in that order.
   };
 
   /**
@@ -105,18 +109,24 @@ namespace input::gamepad {
   };
 
   /**
-   * @brief Routes one logical controller to virtual-HID, NXBT, or both sinks.
+   * @brief Routes one logical controller to selected virtual-HID, NXBT, and Xbox sinks.
    */
   class router_t {
   public:
     /**
-     * @brief Create a router with optional virtual-HID and NXBT output sinks.
+     * @brief Create a router with optional virtual-HID, NXBT, and Xbox output sinks.
      *
      * @param mode Selected output mode.
      * @param virtual_sink Host virtual-HID output sink.
      * @param nxbt_sink NXBT Bridge output sink.
+     * @param xbox_remote_sink Xbox Remote Play output sink.
      */
-    router_t(output_mode_e mode, std::shared_ptr<sink_t> virtual_sink, std::shared_ptr<sink_t> nxbt_sink);
+    router_t(
+      output_mode_e mode,
+      std::shared_ptr<sink_t> virtual_sink,
+      std::shared_ptr<sink_t> nxbt_sink,
+      std::shared_ptr<sink_t> xbox_remote_sink = {}
+    );
 
     /**
      * @brief Return the output mode selected for this router.
@@ -185,5 +195,6 @@ namespace input::gamepad {
     output_mode_e mode_;  ///< Selected output mode.
     std::shared_ptr<sink_t> virtual_sink_;  ///< Optional host virtual-HID sink.
     std::shared_ptr<sink_t> nxbt_sink_;  ///< Optional NXBT Bridge sink.
+    std::shared_ptr<sink_t> xbox_remote_sink_;  ///< Optional Xbox Remote Play sink.
   };
 }  // namespace input::gamepad

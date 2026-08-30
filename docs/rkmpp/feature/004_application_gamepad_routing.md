@@ -1,5 +1,7 @@
 # Application gamepad routing
 
+> Historical boundary: Xbox routing was subsequently implemented by [Feature 005](005_xbox_remote_play.md).
+
 ## Objective
 
 Route Moonlight controller input according to the active Sunshine application:

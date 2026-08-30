@@ -430,6 +430,47 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr><td>Range</td><td colspan="2">50–1000</td></tr>
 </table>
 
+### xbox_remote_enabled
+
+#### Xbox Remote Play setup
+
+On supported Linux builds, launching the built-in `Xbox` application automatically starts Xbox Remote Play controller forwarding. Before the first launch, create the private credential file with `xbox-remote-probe login <absolute-token-file>`. The token file must be a regular file owned by the Sunshine service user with mode `0600`.
+
+When the account has exactly one Home console, Sunshine discovers and selects it automatically. Accounts with multiple consoles must use `xbox-remote-probe consoles <absolute-token-file>` and copy the intended console's stable ID into @ref xbox_remote_console_id. The Input page shows the sanitized worker state, current stage, recovery policy, and connection epoch. It never displays credentials, the console ID, SDP, ICE data, or the Home session ID. Disabling the option turns off the automatic connection and restores the previous controller behavior.
+
+<table>
+    <tr><td>Description</td><td colspan="2">Allow application-scoped Xbox Remote Play controller forwarding. The worker starts automatically when the launched application name exactly matches @ref xbox_remote_app.</td></tr>
+    <tr><td>Default</td><td colspan="2">enabled</td></tr>
+</table>
+
+### xbox_remote_app
+
+<table>
+    <tr><td>Description</td><td colspan="2">Exact Sunshine application name permitted to start the Xbox Remote Play worker.</td></tr>
+    <tr><td>Default</td><td colspan="2">@code{}Xbox@endcode</td></tr>
+</table>
+
+### xbox_remote_token_file
+
+<table>
+    <tr><td>Description</td><td colspan="2">Absolute path to the owner-only Microsoft OAuth credential file created by the compatibility probe. Credential contents are never logged.</td></tr>
+    <tr><td>Default</td><td colspan="2">@code{}&lt;Sunshine app data&gt;/xbox-remote/tokens.json@endcode</td></tr>
+</table>
+
+### xbox_remote_console_id
+
+<table>
+    <tr><td>Description</td><td colspan="2">Optional stable Home console identifier selected during validation. When empty, Sunshine automatically selects the console only if discovery returns exactly one. Sunshine does not write this identifier to logs.</td></tr>
+    <tr><td>Default</td><td colspan="2">empty; automatically select one uniquely discovered console</td></tr>
+</table>
+
+### xbox_remote_wake
+
+<table>
+    <tr><td>Description</td><td colspan="2">Run the validated XCCS WakeUp gate before provisioning a Remote Play session.</td></tr>
+    <tr><td>Default</td><td colspan="2">enabled</td></tr>
+</table>
+
 ### ds4_back_as_touchpad_click
 
 <table>

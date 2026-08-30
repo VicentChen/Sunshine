@@ -1,6 +1,16 @@
-# Moonlight → Sunshine → Xbox Remote Play 手柄回传分步实施计划
+# Feature 005：Moonlight → Sunshine → Xbox Remote Play 手柄回传
 
-> 状态：待实施
+## 0. 2026-08-31 应用启动语义更正
+
+用户明确要求 Moonlight 连接 Sunshine 内置 `Xbox` 应用后自动启动 Xbox Remote Play，不应以缺少手动 enable 配置为由保持静默。本更正优先于后文中“默认关闭”的旧决策，具体为：
+
+- Xbox Remote Play 在支持的 Linux 构建中默认启用，但保留显式关闭作为回退开关。
+- 启动名为 `Xbox` 的 Sunshine 应用时，必须立即在后台建立 Remote Play worker，不需要用户先手动填写 enable 项。
+- 已登录账号只发现一台 Home Xbox 时自动选取；发现多台时才要求显式的稳定主机 ID。
+- Device Code 首次登录仍由独立探针完成，因为它需要用户在浏览器中交互；已有的安全 token 文件由 Xbox 应用自动使用。
+- 同一 Moonlight 客户端暂停/恢复时保留 Xbox 手柄快速重绑；不同客户端接管单会话 Xbox 应用时，中立并迁移旧客户端的保留绑定与反馈队列，不在 Xbox 端断开逻辑手柄。
+
+> 状态：实施计划已完成并归档；步骤 01–06 已通过，步骤 07 经用户明确授权跳过，步骤 08–11 的可用自动化门禁已通过；步骤 09–10 真机验证、步骤 11 长时/不可用门禁及步骤 12 最终真机验收均明确保留为未通过项
 >
 > 目标平台：ROCK 5B+ / RK3588 / Linux aarch64
 >
@@ -52,6 +62,7 @@ Xbox HDMI 输出
 - Xbox User Token、XSTS 和 xHome GSSV token 链。
 - 家庭主机发现和显式主机选择。
 - Home session 的 play、state、configuration、SDP、ICE、keepalive 和 delete。
+- Xbox/HDMI 应用在 `ConnectedStandby` 时通过 XCCS `Power/WakeUp` 显式唤醒主机，并等待 `On` 和 HDMI RX 锁定。
 - 一个 Remote Play session、一个 Xbox 主机和至少一个逻辑手柄。
 - `control`、`input`、`message`、`chat` 四条兼容 data channel。
 - 完整手柄状态发送、短期数字按键边沿保留、latest-state-wins 队列。
@@ -66,7 +77,7 @@ Xbox HDMI 输出
 - Xbox Remote Play 视频解码、音频解码、渲染、录制或与 HDMI RX 混流。
 - 触摸、鼠标、键盘、聊天音频和屏幕键盘协议。
 - 多 Xbox session 并行运行。
-- 自动开启、唤醒或关闭 Xbox。
+- 自动关闭 Xbox；非 Xbox/HDMI 应用不得隐式唤醒主机。
 - 在日志、诊断包或配置导出中暴露 access token、refresh token、XSTS token 或 `gsToken`。
 
 ## 3. 已确认的架构决策
@@ -93,6 +104,14 @@ Remote Play 建连可能持续数秒，不能在 `gamepad::sink_t::alloc()` 或 
 - `sink_t::update()` 只提交完整状态到有界队列，不执行 HTTP、DNS、磁盘 I/O 或阻塞式 WebRTC 操作。
 - 应用停止时先发送中立状态和 `gamepadChanged: false`，再关闭 peer connection 并删除服务器 session。
 - Moonlight 短时断线和 Remote Play 断线分别管理，不能混成同一个状态。
+
+Xbox Home Remote Play 可以在 `ConnectedStandby` 下进行后台串流而不点亮电源灯或恢复 HDMI。由于本项目丢弃 Remote Play 视频并依赖 HDMI RX，Xbox/HDMI 应用必须在创建 Home session 前执行独立的唤醒门禁：
+
+- 使用 Xbox web XSTS token 调用 XCCS `/commands`，发送 `Power/WakeUp`。
+- `On` 状态直接通过，不重复发送 WakeUp。
+- WakeUp POST 响应丢失时不得盲目重放；继续有界轮询当前电源状态，只有仍未进入 `On` 才报告结果不明。
+- 服务状态进入 `On` 后还必须验证 HDMI RX 获得有效 timings；只有服务状态或只有 HDMI 状态均不足以单独判定门禁通过。
+- 唤醒必须支持取消和超时，失败时不得继续创建 Home session。
 
 ### 3.3 保留完整 WebRTC 协商，媒体只做 no-op 消费
 
@@ -185,7 +204,7 @@ Remote Play 建连可能持续数秒，不能在 `gamepad::sink_t::alloc()` 或 
 - 每阶段证据写入：
 
 ```text
-docs/rkmpp/xbox-remote-play-validation/step-XX.md
+docs/rkmpp/feature/xbox-remote-play-validation/step-XX.md
 ```
 
 验证记录不得包含 token、完整 Xbox ID、Microsoft 账号、内网地址或公网地址。
@@ -267,6 +286,7 @@ docs/rkmpp/xbox-remote-play-validation/step-XX.md
 #### 工作项
 
 - 实现主机发现和稳定的主机选择标识。
+- 实现 XCCS `Power/WakeUp`，并对 `ConnectedStandby → On` 做有界轮询。
 - 实现 `POST /v5/sessions/home/play`。
 - 实现 `/state` 轮询、`/configuration` 解析和 keepalive pulse。
 - 实现 SDP、ICE endpoint 的请求模型，但本步骤可不连接 peer connection。
@@ -279,16 +299,19 @@ docs/rkmpp/xbox-remote-play-validation/step-XX.md
 - 覆盖未找到主机、重复主机、401 刷新后重试、404、429、500、超时、取消和畸形响应。
 - fake clock 验证 keepalive 调度，不使用真实长时间 sleep。
 - 验证正常停止和所有失败分支都会尝试删除已创建的 session。
+- fake HTTP 覆盖已开机跳过、WakeUp 精确请求、401 刷新、网络结果不明不重放、超时、取消和不可唤醒状态。
 
 #### 真机验证
 
 - 列出目标 Xbox，创建一个 session，观察到 `Provisioned` 后立即删除。
+- 从 `ConnectedStandby` 发送一次 WakeUp，观察到 `On` 并确认 HDMI RX 恢复有效 timings。
 - 重复执行 5 次，Xbox 服务端不得残留可见的旧 session，探针不得出现线程或文件描述符增长。
 
 #### 通过标准和产物
 
 - fake server 测试全部通过。
 - 5 次真机 create/delete 全部成功；若服务器没有 session 查询接口，则以 DELETE 响应和下一次 create 成功作为可验证证据，并在记录中说明限制。
+- WakeUp 只发送一次且在时限内同时满足 `On` 和 HDMI RX lock；主机已为 `On` 时不得发送电源命令。
 - `step-03.md` 包含各状态耗时、HTTP 状态码摘要和脱敏后的错误样例。
 
 ---
@@ -391,16 +414,16 @@ docs/rkmpp/xbox-remote-play-validation/step-XX.md
 
 #### 真机验证
 
-- 只发送中立状态，然后分别测试 A、D-pad Up、左右摇杆四方向、LT 和 RT。
-- 每个测试动作均使用“按下/移动 → 保持 → 释放/回中”，观察 Xbox 端结果。
-- 在 Xbox 端触发普通振动和扳机振动，验证探针记录正确马达值。
+- 建立真实 Home Remote Play session，先发送中立状态，再发送有界的脚本快照，证明 Xbox 接受输入 data channel 数据且释放后能回到中立。
+- 真机探针只验证协议交付、通道存活、最终中立和确定性清理；它不作为用户可见按键方向、扳机范围或振动映射的验收界面。
+- 摇杆方向、LT/RT、普通振动、扳机振动和重连行为推迟到 Sunshine sink 接入后，通过 Moonlight 的真实手柄链路逐项验收。
 
 #### 通过标准和产物
 
 - 自动化协议测试全部通过。
-- 真机矩阵中每个方向、按钮和扳机均与预期一致；由该步骤明确 Sunshine Y 轴是否需要翻转。
-- 释放后 Xbox 不存在持续按键、摇杆偏移或扳机残留。
-- `step-06.md` 保存输入矩阵和振动矩阵，不保存账号或网络信息。
+- 真机 session 接受脚本快照，data channel 保持可用，最终中立状态成功发送，且 cleanup 后无残留 session、线程或文件描述符。
+- 本步骤不决定 Sunshine Y 轴翻转；最终符号由 Moonlight → Sunshine → Xbox 实际链路验证决定。
+- `step-06.md` 保存协议交付和清理证据，并明确列出推迟到 Moonlight 的用户可见项目；不保存账号或网络信息。
 
 ---
 
@@ -408,7 +431,7 @@ docs/rkmpp/xbox-remote-play-validation/step-XX.md
 
 #### 目标
 
-在修改 Sunshine 前，证明完整最小产品可以在 ROCK 5B+ 长时间工作，并决定 sidecar 或内置模式。
+在修改 Sunshine 前，证明 Remote Play transport、keepalive、输入 data channel 和清理逻辑可以在 ROCK 5B+ 长时间工作，并决定 sidecar 或内置模式。用户可见输入映射不再由独立探针验收。
 
 #### 工作项
 
@@ -427,14 +450,14 @@ docs/rkmpp/xbox-remote-play-validation/step-XX.md
 
 #### 真机验证
 
-- 真实 Xbox 连续运行 30 分钟。
-- 期间完成至少 500 次离散 press/release 和持续摇杆圆周输入。
+- 真实 Xbox 连续运行 30 分钟，并以固定节拍发送中立快照来覆盖输入 data channel、sequence/timestamp、keepalive 和清理路径。
+- 离散边沿、持续模拟量和队列压力由 fake transport 自动测试覆盖；独立探针不得以不可归因的可见按键脚本替代 Moonlight 验收。
 - 不解码媒体，记录 5 分钟稳定窗口内的 CPU、RSS 和网络吞吐。
 - 正常停止后 Xbox 输入归零，session 删除，进程退出。
 
 #### 通过标准和产物
 
-- 30 分钟内无粘键、通道异常关闭、keepalive 失败或持续资源增长。
+- 30 分钟内无通道异常关闭、keepalive 失败、session 泄漏或持续资源增长，结束时成功发送中立状态。
 - `step-07.md` 包含资源曲线摘要和部署形态决策及理由。
 - 只有本步骤为 `PASS` 才能开始修改 Sunshine 输入路由。
 
@@ -469,6 +492,7 @@ docs/rkmpp/xbox-remote-play-validation/step-XX.md
 - 所有 gamepad router 和 Xbox sink gtest 通过。
 - 现有 virtual-HID/NXBT 测试结果与基线一致。
 - `step-08.md` 记录最终线程所有权、队列容量、溢出规则和每个 sink 方法的阻塞契约。
+- 本步骤完成后才通过 Moonlight 实际手柄验证摇杆符号、扳机范围和释放行为；发现的符号修正在 sink 映射层完成，不回写为探针的臆测结论。
 
 ---
 
@@ -476,33 +500,35 @@ docs/rkmpp/xbox-remote-play-validation/step-XX.md
 
 #### 目标
 
-让用户可以只对 Xbox/HDMI 应用启用 Remote Play 手柄回传，并能完成首次登录、主机选择和故障诊断。
+让 Moonlight 启动内置 Xbox 应用时自动建立 Remote Play 手柄回传，并能完成首次登录、自动或显式主机选择及故障诊断。
 
 #### 工作项
 
-- 增加明确的 Xbox Remote Play enable/output 配置，不默认改变现有用户行为。
+- 默认允许内置 Xbox 应用自动启动 Remote Play，并保留明确的关闭开关作为回退路径。
+- 为 Xbox/HDMI 应用增加显式 WakeUp 配置；功能启用时在 Home session 前执行唤醒门禁，其他应用不得唤醒 Xbox。
 - 将 session start/stop 绑定到目标 Sunshine 应用，而不是绑定到第一个手柄包。
 - 提供 Device Code、登录状态、脱敏账号标识、主机选择和 session 状态入口。
-- 只有显式选择的 Xbox 应用可以启动 session。
-- 配置校验拒绝缺失主机、不可写 token 路径、无效输出组合和不支持的平台。
+- 只有目标 Xbox 应用可以启动 session。
+- 单台 Home Xbox 自动选择；多台主机要求显式选择，避免连接到错误设备。
+- 配置校验拒绝不可写 token 路径、无效输出组合和不支持的平台。
 - 如果增加本地化，只更新 `en`。
 
 #### 自动验证
 
-- 配置默认值证明功能默认关闭。
+- 配置默认值证明内置 Xbox 应用自动启用，显式关闭时不创建 session。
 - 应用 A 启用、应用 B 未启用的生命周期测试证明 B 不会创建 Xbox session。
 - start/cancel/stop、重复 start、Moonlight reconnect 和 Sunshine shutdown 均有状态机测试。
 - ConfigConsistencyTest 和相关 Web UI/API 测试通过。
 
 #### 人工验证
 
-- 从干净 token store 完成一次 Device Code 登录和主机选择。
+- 从干净 token store 完成一次 Device Code 登录，并验证单台主机自动选择。
 - 启动非 Xbox 应用，确认没有 Remote Play 网络活动。
 - 启动 Xbox/HDMI 应用，确认 session 进入 ready；停止应用，确认中立状态和 DELETE 完成。
 
 #### 通过标准和产物
 
-- 默认配置对现有 Sunshine 行为零变化。
+- 默认配置只改变内置 Xbox 应用的行为，其他 Sunshine 应用保持不创建 Xbox session。
 - 状态页面和日志可以区分认证、Xbox 不在线、Provisioning、ICE、Handshake 和输入通道故障。
 - UI、日志和配置导出不包含任何 token。
 - `step-09.md` 记录用户操作流程和各失败状态截图/文本，敏感信息必须脱敏。

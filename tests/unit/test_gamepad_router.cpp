@@ -135,6 +135,50 @@ TEST(GamepadRouterTest, RoutesOnlyTheSelectedOutput) {
   EXPECT_EQ(calls, (std::vector<std::string> {"nxbt.alloc", "nxbt.update", "nxbt.neutralize", "nxbt.free"}));
 }
 
+TEST(GamepadRouterTest, RoutesXboxAndThreeSinkCombinationsInDeterministicOrder) {
+  std::vector<std::string> calls;
+  auto virtual_sink = std::make_shared<fake_sink_t>("virtual", calls);
+  auto nxbt_sink = std::make_shared<fake_sink_t>("nxbt", calls);
+  auto xbox_sink = std::make_shared<fake_sink_t>("xbox", calls);
+  input::gamepad::router_t xbox_router {
+    input::gamepad::output_mode_e::xbox_remote,
+    virtual_sink,
+    nxbt_sink,
+    xbox_sink,
+  };
+  ASSERT_TRUE(xbox_router.alloc(id_for(), {}, {}));
+  EXPECT_TRUE(xbox_router.update(id_for(), {}));
+  xbox_router.neutralize(id_for());
+  xbox_router.free(id_for());
+  EXPECT_EQ(calls, (std::vector<std::string> {"xbox.alloc", "xbox.update", "xbox.neutralize", "xbox.free"}));
+
+  calls.clear();
+  input::gamepad::router_t all_router {
+    input::gamepad::output_mode_e::all,
+    virtual_sink,
+    nxbt_sink,
+    xbox_sink,
+  };
+  ASSERT_TRUE(all_router.alloc(id_for(), {}, {}));
+  EXPECT_TRUE(all_router.rebind(id_for(), {}));
+  all_router.neutralize(id_for());
+  all_router.free(id_for());
+  EXPECT_EQ(calls, (std::vector<std::string> {
+                     "virtual.alloc",
+                     "nxbt.alloc",
+                     "xbox.alloc",
+                     "virtual.rebind",
+                     "nxbt.rebind",
+                     "xbox.rebind",
+                     "virtual.neutralize",
+                     "nxbt.neutralize",
+                     "xbox.neutralize",
+                     "xbox.free",
+                     "nxbt.free",
+                     "virtual.free",
+                   }));
+}
+
 TEST(GamepadRouterTest, DisabledOutputAcceptsControllerLifecycleWithoutForwarding) {
   std::vector<std::string> calls;
   auto virtual_sink = std::make_shared<fake_sink_t>("virtual", calls);
@@ -214,11 +258,17 @@ TEST(GamepadRouterTest, RejectsModesWhoseSelectedSinkIsUnavailable) {
   std::vector<std::string> calls;
   auto virtual_sink = std::make_shared<fake_sink_t>("virtual", calls);
   auto nxbt_sink = std::make_shared<fake_sink_t>("nxbt", calls);
+  auto xbox_sink = std::make_shared<fake_sink_t>("xbox", calls);
   std::vector<input::gamepad::router_t> routers {
     {input::gamepad::output_mode_e::virtual_output, {}, nxbt_sink},
     {input::gamepad::output_mode_e::nxbt, virtual_sink, {}},
     {input::gamepad::output_mode_e::both, virtual_sink, {}},
     {input::gamepad::output_mode_e::both, {}, nxbt_sink},
+    {input::gamepad::output_mode_e::xbox_remote, virtual_sink, nxbt_sink},
+    {input::gamepad::output_mode_e::virtual_and_xbox_remote, virtual_sink, nxbt_sink},
+    {input::gamepad::output_mode_e::nxbt_and_xbox_remote, virtual_sink, nxbt_sink},
+    {input::gamepad::output_mode_e::all, virtual_sink, nxbt_sink},
+    {input::gamepad::output_mode_e::all, virtual_sink, {}, xbox_sink},
   };
   for (auto &router : routers) {
     EXPECT_FALSE(router.alloc(id_for(), {}, {}));

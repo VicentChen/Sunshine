@@ -42,10 +42,15 @@ main() {
   [[ -d "$BUILD_DIR/_deps/ffmpeg" ]] || die "FFmpeg is missing. Did you run setup-env-rkmpp.sh?"
 
   local multiarch
+  local llvm_lib_dir
+  local llvm_triple
   local link_flags
   multiarch="$("/usr/bin/gcc" -print-multiarch)"
   [[ -n "$multiarch" ]] || die "unable to determine the Debian multiarch directory."
-  link_flags="-stdlib=libc++ -L$LLVM_DIR/lib/$multiarch -Wl,-rpath,$LLVM_DIR/lib/$multiarch -Wl,--no-as-needed -lc++abi -lunwind -Wl,--as-needed"
+  llvm_triple="$("$LLVM_DIR/bin/clang" --print-target-triple)"
+  llvm_lib_dir="$LLVM_DIR/lib/$llvm_triple"
+  [[ -f "$llvm_lib_dir/libc++.so" ]] || die "LLVM libc++ is missing from $llvm_lib_dir."
+  link_flags="-stdlib=libc++ -L$llvm_lib_dir -Wl,-rpath,$llvm_lib_dir -Wl,--no-as-needed -lc++abi -lunwind -Wl,--as-needed"
 
   run "$brew_prefix/bin/cmake" -S "$PROJECT_DIR" -B "$BUILD_DIR" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
@@ -61,18 +66,23 @@ main() {
     -DFFMPEG_PREPARED_BINARIES="$BUILD_DIR/_deps/ffmpeg" \
     -DEVDEV_LIBRARY="/usr/lib/$multiarch/libevdev.a" \
     -DBUILD_DOCS=OFF \
-    -DBUILD_TESTS=OFF \
+    -DBUILD_TESTS=ON \
     -DBUILD_TESTING=OFF \
     -DSUNSHINE_ENABLE_CUDA=OFF \
     -DSUNSHINE_ENABLE_TRAY=OFF \
     -DSUNSHINE_ENABLE_RKMPP=ON \
+    -DSUNSHINE_BUILD_XBOX_REMOTE_PROBE=ON \
     -DSUNSHINE_SYSTEM_VULKAN_HEADERS=OFF \
     -DSUNSHINE_SYSTEM_WAYLAND_PROTOCOLS=OFF \
     -DSUNSHINE_ASSETS_DIR_DEF="$BUILD_DIR/assets"
 
-  run "$brew_prefix/bin/cmake" --build "$BUILD_DIR" --parallel "$JOBS"
+  run "$brew_prefix/bin/cmake" --build "$BUILD_DIR" --target sunshine test_sunshine xbox-remote-probe --parallel "$JOBS"
   [[ -x "$BUILD_DIR/sunshine" ]] || die "build completed without $BUILD_DIR/sunshine."
+  [[ -x "$BUILD_DIR/tests/test_sunshine" ]] || die "build completed without $BUILD_DIR/tests/test_sunshine."
+  [[ -x "$BUILD_DIR/xbox-remote-probe" ]] || die "build completed without $BUILD_DIR/xbox-remote-probe."
   printf "\nBuilt: %s\n" "$BUILD_DIR/sunshine"
+  printf "Tests: %s\n" "$BUILD_DIR/tests/test_sunshine"
+  printf "Probe: %s\n" "$BUILD_DIR/xbox-remote-probe"
 }
 
 main "$@"

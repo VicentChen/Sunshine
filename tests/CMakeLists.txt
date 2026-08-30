@@ -110,6 +110,9 @@ endif()
 file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS
         ${CMAKE_SOURCE_DIR}/tests/*.h
         ${CMAKE_SOURCE_DIR}/tests/*.cpp)
+if(NOT SUNSHINE_BUILD_XBOX_REMOTE_PROBE)
+    list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/test_xbox_remote_transport.cpp)
+endif()
 if(SUNSHINE_ENABLE_TRAY AND (WIN32 OR APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
     set(SUNSHINE_TRAY_TEST_ICON_SOURCE_DIR
             "${CMAKE_SOURCE_DIR}/src_assets/common/assets/web/public/images")
@@ -213,6 +216,10 @@ add_executable(${PROJECT_NAME}
         ${TEST_SOURCES}
         ${SUNSHINE_SOURCES})
 
+if(SUNSHINE_BUILD_XBOX_REMOTE_PROBE)
+    target_link_libraries(${PROJECT_NAME} LibDataChannel::LibDataChannelStatic)
+endif()
+
 # Copy files needed for config consistency tests to build directory
 # This ensures both CLI and CLion can access the same files relative to the test executable
 # Using configure_file ensures files are copied when they change between builds
@@ -277,6 +284,7 @@ if(RKMPP_FOUND)
     add_executable(rkmpp_rkmpp_annexb_test
         "${CMAKE_SOURCE_DIR}/tests/rkmpp_rkmpp_annexb_test.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/rkmpp_annexb.cpp")
+    target_link_libraries(rkmpp_rkmpp_annexb_test PRIVATE RockchipMPP::rockchip_mpp)
     target_compile_definitions(rkmpp_rkmpp_annexb_test PRIVATE SUNSHINE_BUILD_RKMPP)
     target_compile_options(rkmpp_rkmpp_annexb_test PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
 

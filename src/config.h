@@ -288,6 +288,11 @@ namespace config {
     int nxbt_trigger_press_threshold;  ///< Analog trigger value that presses Switch ZL or ZR.
     int nxbt_trigger_release_threshold;  ///< Analog trigger value that releases Switch ZL or ZR.
     std::chrono::milliseconds nxbt_watchdog_timeout;  ///< NXBT transport health timeout.
+    bool xbox_remote_enabled;  ///< Allow application-scoped Xbox Remote Play controller forwarding.
+    std::string xbox_remote_app;  ///< Exact Sunshine application name permitted to start Xbox Remote Play.
+    std::string xbox_remote_token_file;  ///< Owner-only Microsoft OAuth credential file.
+    std::string xbox_remote_console_id;  ///< Optional stable Xbox identifier; empty selects one uniquely discovered console.
+    bool xbox_remote_wake;  ///< Wake the selected console before creating a Home session.
     bool ds4_back_as_touchpad_click;  ///< Map Back/Select to touchpad click for PlayStation-style gamepads.
     bool motion_as_ds4;  ///< Prefer PlayStation-style emulation for client gamepads with motion controls.
     bool touchpad_as_ds4;  ///< Prefer PlayStation-style emulation for client gamepads with touchpad input.

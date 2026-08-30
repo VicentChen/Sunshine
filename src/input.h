@@ -5,12 +5,18 @@
 #pragma once
 
 // standard includes
+#include <cstdint>
 #include <functional>
+#include <string>
 #include <string_view>
 
 // local includes
 #include "platform/common.h"
 #include "thread_safe.h"
+
+#ifdef SUNSHINE_TESTS
+  #include "xbox_remote/worker.h"
+#endif
 
 namespace input {
   struct input_t;
@@ -65,13 +71,31 @@ namespace input {
   /**
    * @brief Select the gamepad output route for a launched Sunshine application.
    *
-   * Nintendo Switch uses the configured controller output. All other
-   * applications currently accept controller input without forwarding it so
-   * unfinished application backends cannot control the Switch.
+   * Nintendo Switch uses the configured controller output. An explicitly configured
+   * Xbox application uses the application-scoped Remote Play worker when enabled.
+   * Other applications accept controller input without forwarding it.
    *
    * @param app_name Configured Sunshine application name, or empty when no app is active.
    */
   void select_gamepad_output(std::string_view app_name);
+
+  /**
+   * @brief Sanitized Xbox Remote Play lifecycle snapshot.
+   */
+  struct xbox_remote_status_t {
+    std::string state;  ///< Fixed lifecycle state name.
+    std::string stage;  ///< Fixed current connection stage.
+    std::string failure_stage;  ///< Fixed failure stage, empty outside failed state.
+    std::string failure_kind;  ///< Fixed retry, reauthentication, or permanent policy.
+    std::uint64_t epoch = 0;  ///< Monotonic connection generation without remote identifiers.
+  };
+
+  /**
+   * @brief Return the current application-scoped Xbox Remote Play status.
+   *
+   * @return Sanitized state and failure stage without credentials or console identifiers.
+   */
+  xbox_remote_status_t xbox_remote_status();
 
   /**
    * @brief Recreate the shared libvirtualhid mouse after a license-state change.
@@ -92,6 +116,15 @@ namespace input {
 
 #ifdef SUNSHINE_TESTS
   namespace testing {
+    /**
+     * @brief Override production Xbox connection creation for lifecycle tests.
+     *
+     * Passing an empty factory restores production connection creation.
+     *
+     * @param factory Test connection factory or an empty factory.
+     */
+    void set_xbox_remote_connection_factory(::xbox_remote::worker::connection_factory_t factory);
+
     /**
      * @brief Replace the global platform input backend for a unit test.
      *

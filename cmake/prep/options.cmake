@@ -17,6 +17,8 @@ option(BUILD_WERROR "Enable -Werror flag." OFF)
 option(SUNSHINE_CONFIGURE_ONLY "Configure special files only, then exit." OFF)
 
 option(SUNSHINE_ENABLE_TRAY "Enable system tray icon." ON)
+option(SUNSHINE_BUILD_XBOX_REMOTE_PROBE
+        "Build Xbox Remote Play support and its compatibility probe." OFF)
 
 if(WIN32)
     option(SUNSHINE_USE_STATIC_QT

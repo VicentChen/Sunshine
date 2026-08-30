@@ -1,0 +1,69 @@
+[
+  {
+    "type": "Message",
+    "content": {"version": [0, 2, 0], "systemUis": []},
+    "id": "startup-1",
+    "target": "/streaming/systemUi/configuration",
+    "cv": ""
+  },
+  {
+    "type": "Message",
+    "content": {"clientAppInstallId": "00000000-0000-0000-0000-000000000000"},
+    "id": "startup-2",
+    "target": "/streaming/properties/clientappinstallidchanged",
+    "cv": ""
+  },
+  {
+    "type": "Message",
+    "content": {"orientation": 0},
+    "id": "startup-3",
+    "target": "/streaming/characteristics/orientationchanged",
+    "cv": ""
+  },
+  {
+    "type": "Message",
+    "content": {"touchInputEnabled": false},
+    "id": "startup-4",
+    "target": "/streaming/characteristics/touchinputenabledchanged",
+    "cv": ""
+  },
+  {
+    "type": "Message",
+    "content": {
+      "supportsCustomResolution": true,
+      "supportsHevc": false,
+      "supportsHdr": false,
+      "supportsFps": 60,
+      "maxWidth": 1920,
+      "maxHeight": 1080,
+      "maxBitrateKbps": 20000,
+      "video": {
+        "width": 1920,
+        "height": 1080,
+        "maxWidth": 1920,
+        "maxHeight": 1080,
+        "maxBitrateKbps": 20000
+      }
+    },
+    "id": "startup-5",
+    "target": "/streaming/characteristics/clientdevicecapabilities",
+    "cv": ""
+  },
+  {
+    "type": "Message",
+    "content": {
+      "horizontal": 1920,
+      "vertical": 1080,
+      "preferredWidth": 1920,
+      "preferredHeight": 1080,
+      "safeAreaLeft": 0,
+      "safeAreaTop": 0,
+      "safeAreaRight": 1920,
+      "safeAreaBottom": 1080,
+      "supportsCustomResolution": true
+    },
+    "id": "startup-6",
+    "target": "/streaming/characteristics/dimensionschanged",
+    "cv": ""
+  }
+]

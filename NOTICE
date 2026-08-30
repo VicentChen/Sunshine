@@ -1,3 +1,18 @@
 ©2018 Valve Corporation. Steam and the Steam logo are trademarks and/or
 registered trademarks of Valve Corporation in the U.S. and/or other countries. All
 rights reserved.
+
+Xbox Remote Play WebRTC support uses libdatachannel, pinned to commit
+c6696d157b5612df2a741d9a03b192b47ab6cefb and distributed under the Mozilla
+Public License 2.0. The upstream source and license are available at
+https://github.com/paullouisageneau/libdatachannel.
+
+The enabled libdatachannel build includes libjuice under the Mozilla Public
+License 2.0, usrsctp under the BSD 3-Clause license, and libsrtp under its
+BSD-style license. Their copyright notices, complete license texts, and source
+are available in the corresponding dependency source directories fetched by
+the pinned libdatachannel revision and at:
+
+- https://github.com/paullouisageneau/libjuice
+- https://github.com/sctplab/usrsctp
+- https://github.com/cisco/libsrtp

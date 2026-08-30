@@ -862,6 +862,11 @@ namespace config {
     64,  // nxbt_trigger_press_threshold
     48,  // nxbt_trigger_release_threshold
     150ms,  // nxbt_watchdog_timeout
+    true,  // xbox_remote_enabled
+    "Xbox",  // xbox_remote_app
+    platf::appdata().string() + "/xbox-remote/tokens.json",  // xbox_remote_token_file
+    {},  // xbox_remote_console_id
+    true,  // xbox_remote_wake
     true,  // back as touchpad click enabled for PlayStation-style gamepads
     true,  // client gamepads with motion events use PlayStation-style emulation
     true,  // client gamepads with touchpads use PlayStation-style emulation
@@ -1872,6 +1877,42 @@ namespace config {
       input.nxbt_watchdog_timeout = std::chrono::milliseconds {nxbt_watchdog_timeout};
     } else {
       BOOST_LOG(error) << "config: 'nxbt_watchdog_timeout' must be between 50 and 1000 milliseconds"sv;
+    }
+
+    bool_f(vars, "xbox_remote_enabled", input.xbox_remote_enabled);
+    string_f(vars, "xbox_remote_app"s, input.xbox_remote_app);
+    string_f(vars, "xbox_remote_token_file"s, input.xbox_remote_token_file);
+    string_f(vars, "xbox_remote_console_id"s, input.xbox_remote_console_id);
+    bool_f(vars, "xbox_remote_wake", input.xbox_remote_wake);
+    if (input.xbox_remote_app.find_first_not_of(" \t\r\n") == std::string::npos) {
+      input.xbox_remote_app.clear();
+    }
+    if (input.xbox_remote_console_id.find_first_not_of(" \t\r\n") == std::string::npos) {
+      input.xbox_remote_console_id.clear();
+    }
+#if !defined(SUNSHINE_XBOX_REMOTE_PLAY) || !defined(__linux__)
+    if (input.xbox_remote_enabled) {
+      BOOST_LOG(error) << "config: Xbox Remote Play is unavailable on this platform or build; disabling it"sv;
+      input.xbox_remote_enabled = false;
+    }
+#endif
+    if (input.xbox_remote_enabled && input.xbox_remote_app.empty()) {
+      BOOST_LOG(error) << "config: Xbox Remote Play requires 'xbox_remote_app'; disabling it"sv;
+      input.xbox_remote_enabled = false;
+    }
+    if (input.xbox_remote_enabled && !fs::path {input.xbox_remote_token_file}.is_absolute()) {
+      BOOST_LOG(error) << "config: 'xbox_remote_token_file' must be an absolute path; disabling Xbox Remote Play"sv;
+      input.xbox_remote_enabled = false;
+    }
+    if (input.xbox_remote_enabled) {
+      std::error_code token_error;
+      const auto token_status = fs::symlink_status(input.xbox_remote_token_file, token_error);
+      const auto required_permissions = fs::perms::owner_read | fs::perms::owner_write;
+      const auto forbidden_permissions = fs::perms::group_all | fs::perms::others_all;
+      if (token_error || !fs::is_regular_file(token_status) || (token_status.permissions() & required_permissions) != required_permissions || (token_status.permissions() & forbidden_permissions) != fs::perms::none) {
+        BOOST_LOG(error) << "config: 'xbox_remote_token_file' must be an existing owner-only read/write regular file; disabling Xbox Remote Play"sv;
+        input.xbox_remote_enabled = false;
+      }
     }
     bool_f(vars, "ds4_back_as_touchpad_click", input.ds4_back_as_touchpad_click);
     bool_f(vars, "motion_as_ds4", input.motion_as_ds4);

@@ -1,0 +1,10 @@
+{
+  "serverDetails": {
+    "ipV4Address": "192.0.2.10",
+    "ipV4Port": 9002,
+    "iceExchangePath": "/v5/sessions/home/redacted-session/ice",
+    "futureServiceField": null
+  },
+  "keepAlivePulseInSeconds": 300,
+  "futureTopLevelField": []
+}

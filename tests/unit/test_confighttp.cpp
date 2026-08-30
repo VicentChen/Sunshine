@@ -321,6 +321,7 @@ protected:
     };
 
     server->resource["^/virtual-input-status-test$"]["GET"] = confighttp::getVirtualInputStatus;
+    server->resource["^/xbox-remote-status-test$"]["GET"] = confighttp::getXboxRemoteStatus;
     server->resource["^/virtual-input-license-test$"]["GET"] = confighttp::getVirtualInputLicense;
     server->resource["^/virtual-input-license-test$"]["POST"] = confighttp::updateVirtualInputLicense;
 
@@ -472,6 +473,7 @@ INSTANTIATE_TEST_SUITE_P(
     endpoint_request_t {"CsrfToken", "GET", "/csrf-token-test", ""},
     endpoint_request_t {"BrowseDirectory", "GET", "/browse-test", ""},
     endpoint_request_t {"VirtualInputStatus", "GET", "/virtual-input-status-test", ""},
+    endpoint_request_t {"XboxRemoteStatus", "GET", "/xbox-remote-status-test", ""},
     endpoint_request_t {"VirtualInputLicense", "GET", "/virtual-input-license-test", ""},
     endpoint_request_t {"VirtualInputLicenseUpdate", "POST", "/virtual-input-license-test", R"({"action":"validate"})"}
   ),
@@ -1383,6 +1385,20 @@ TEST(ConfigHttpDriverStatusTest, BuildDriverStatus_DevelopmentVersionIsCompatibl
   ASSERT_TRUE(status["version_compatible"].get<bool>());
 }
 
+TEST(ConfigHttpXboxRemoteStatusTest, BuildsOnlySanitizedLifecycleFields) {
+  const auto status = confighttp::build_xbox_remote_status("failed", "authentication", "authentication", "reauthentication_required", 4);
+
+  EXPECT_EQ(status.size(), 5);
+  EXPECT_EQ(status["state"].get<std::string>(), "failed");
+  EXPECT_EQ(status["stage"].get<std::string>(), "authentication");
+  EXPECT_EQ(status["failure_stage"].get<std::string>(), "authentication");
+  EXPECT_EQ(status["failure_kind"].get<std::string>(), "reauthentication_required");
+  EXPECT_EQ(status["epoch"].get<std::uint64_t>(), 4);
+  EXPECT_FALSE(status.contains("token"));
+  EXPECT_FALSE(status.contains("console_id"));
+  EXPECT_FALSE(status.contains("account"));
+}
+
 TEST(ConfigHttpDriverStatusTest, BuildsLiveVirtualInputDriverStatus) {
   const auto virtualhid = confighttp::get_virtualhid_driver_status();
   EXPECT_TRUE(virtualhid.contains("installed"));
@@ -1417,6 +1433,21 @@ TEST_F(ConfigHttpTest, VirtualInputStatusReturnsBothBackends) {
   ASSERT_TRUE(body.contains("vigembus"));
   EXPECT_TRUE(body.at("virtualhid").contains("installed"));
   EXPECT_TRUE(body.at("vigembus").contains("installed"));
+}
+
+TEST_F(ConfigHttpTest, XboxRemoteStatusReturnsOnlySanitizedWorkerState) {
+  SimpleWeb::CaseInsensitiveMultimap headers;
+  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+
+  const auto response = client->request("GET", "/xbox-remote-status-test", "", headers);
+  ASSERT_EQ(response->status_code, "200 OK");
+  const auto body = nlohmann::json::parse(response->content.string());
+  EXPECT_EQ(body.size(), 5);
+  EXPECT_TRUE(body.contains("state"));
+  EXPECT_TRUE(body.contains("stage"));
+  EXPECT_TRUE(body.contains("failure_stage"));
+  EXPECT_TRUE(body.contains("failure_kind"));
+  EXPECT_TRUE(body.contains("epoch"));
 }
 
 TEST_F(ConfigHttpTest, VirtualInputLicenseReturnsCurrentStatus) {

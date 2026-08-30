@@ -5,6 +5,7 @@
 #pragma once
 
 // standard includes
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -102,6 +103,18 @@ namespace confighttp {
   nlohmann::json build_driver_status(bool installed, const std::string &version, std::string_view minimum_version);
 
   /**
+   * @brief Build a credential-free Xbox Remote Play status response.
+   *
+   * @param state Fixed lifecycle state.
+   * @param stage Fixed current connection stage.
+   * @param failure_stage Fixed failure stage, empty outside failures.
+   * @param failure_kind Fixed recovery policy, empty outside terminal failures.
+   * @param epoch Monotonic connection generation.
+   * @return Status JSON containing no token, account, or console identifiers.
+   */
+  nlohmann::json build_xbox_remote_status(std::string_view state, std::string_view stage, std::string_view failure_stage, std::string_view failure_kind, std::uint64_t epoch);
+
+  /**
    * @brief Convert a libvirtualhid license result into a Web UI response.
    *
    * @param result License operation result.
@@ -124,6 +137,14 @@ namespace confighttp {
   nlohmann::json get_vigembus_driver_status();
 
   void getVirtualInputStatus(const resp_https_t &response, const req_https_t &request);
+
+  /**
+   * @brief Return the sanitized Xbox Remote Play worker status.
+   *
+   * @param response HTTP response object.
+   * @param request Authenticated HTTP request.
+   */
+  void getXboxRemoteStatus(const resp_https_t &response, const req_https_t &request);
 
   void getVirtualInputLicense(const resp_https_t &response, const req_https_t &request);
 

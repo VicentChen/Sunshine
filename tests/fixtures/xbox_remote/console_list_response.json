@@ -1,0 +1,12 @@
+{
+  "results": [
+    {
+      "serverId": "redacted-home-console",
+      "deviceName": "Fixture Xbox",
+      "consoleType": "XboxSeriesX",
+      "powerState": "On",
+      "futureServiceField": "ignored"
+    }
+  ],
+  "futureTopLevelField": true
+}

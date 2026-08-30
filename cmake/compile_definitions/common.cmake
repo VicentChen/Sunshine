@@ -177,6 +177,24 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/input/nxbt_protocol.h"
         "${CMAKE_SOURCE_DIR}/src/input/nxbt_sink.cpp"
         "${CMAKE_SOURCE_DIR}/src/input/nxbt_sink.h"
+        "${CMAKE_SOURCE_DIR}/src/input/xbox_remote_sink.cpp"
+        "${CMAKE_SOURCE_DIR}/src/input/xbox_remote_sink.h"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/input_queue.cpp"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/input_queue.h"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/protocol.cpp"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/protocol.h"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/session.cpp"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/session.h"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/startup.cpp"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/startup.h"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/auth.cpp"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/auth.h"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/http_runtime.cpp"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/http_runtime.h"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/token_store.cpp"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/token_store.h"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/worker.cpp"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/worker.h"
         "${CMAKE_SOURCE_DIR}/src/audio.cpp"
         "${CMAKE_SOURCE_DIR}/src/audio.h"
         "${CMAKE_SOURCE_DIR}/src/platform/common.h"
@@ -195,6 +213,15 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/stat_trackers.h"
         "${CMAKE_SOURCE_DIR}/src/stat_trackers.cpp"
         ${PLATFORM_TARGET_FILES})
+
+if(SUNSHINE_BUILD_XBOX_REMOTE_PROBE)
+    list(APPEND SUNSHINE_DEFINITIONS SUNSHINE_XBOX_REMOTE_PLAY)
+    list(APPEND SUNSHINE_TARGET_FILES
+            "${CMAKE_SOURCE_DIR}/src/xbox_remote/production_connection.cpp"
+            "${CMAKE_SOURCE_DIR}/src/xbox_remote/production_connection.h"
+            "${CMAKE_SOURCE_DIR}/src/xbox_remote/transport.cpp"
+            "${CMAKE_SOURCE_DIR}/src/xbox_remote/transport.h")
+endif()
 
 if(NOT SUNSHINE_ASSETS_DIR_DEF)
     set(SUNSHINE_ASSETS_DIR_DEF "${SUNSHINE_ASSETS_DIR}")

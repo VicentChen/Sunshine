@@ -1,0 +1,20 @@
+{
+  "messageType": "offer",
+  "sdp": "v=0\r\ns=redacted\r\n",
+  "configuration": {
+    "chatConfiguration": {
+      "bytesPerSample": 2,
+      "expectedClipDurationMs": 20,
+      "format": {
+        "codec": "opus",
+        "container": "webm"
+      },
+      "numChannels": 1,
+      "sampleFrequencyHz": 24000
+    },
+    "chat": {"minVersion": 1, "maxVersion": 1},
+    "control": {"minVersion": 1, "maxVersion": 3},
+    "input": {"minVersion": 1, "maxVersion": 8},
+    "message": {"minVersion": 1, "maxVersion": 1}
+  }
+}

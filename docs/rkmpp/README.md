@@ -150,7 +150,7 @@ back_button_timeout = 1000
 | Sunshine 应用 | 手柄输出 |
 | --- | --- |
 | `Nintendo Switch` | 使用 `controller_output` 配置；本部署设为 NXBT，输入转发到 Switch。 |
-| `Xbox` | 当前禁用，等待 Xbox Remote Play 输入后端实现。 |
+| `Xbox` | 使用 Xbox Remote Play 输入后端转发手柄，不创建主机虚拟手柄；详见 [Feature 005](feature/005_xbox_remote_play.md)。 |
 | `HDMI Input`、`Desktop` 和其他应用 | 禁用，不转发到 NXBT 或主机虚拟手柄。 |
 
 应用切换或停止时，Sunshine 会先向旧输出发送中立状态并释放该手柄。应用名称来自

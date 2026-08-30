@@ -33,11 +33,17 @@ extern "C" {
 #include "input/gamepad_router.h"
 #include "input/nxbt_client.h"
 #include "input/nxbt_sink.h"
+#include "input/xbox_remote_sink.h"
 #include "logging.h"
 #include "platform/common.h"
 #include "platform/virtualhid_input.h"
 #include "thread_pool.h"
 #include "utility.h"
+
+#ifdef SUNSHINE_XBOX_REMOTE_PLAY
+  #include "xbox_remote/production_connection.h"
+  #include "xbox_remote/worker.h"
+#endif
 
 // Win32 WHEEL_DELTA constant
 #ifndef WHEEL_DELTA
@@ -172,6 +178,13 @@ namespace input {
   static std::bitset<platf::MAX_GAMEPADS> gamepadMask {};
   static std::shared_ptr<gamepad::router_t> gamepad_router;  ///< Router selected for newly created stream inputs.
   static gamepad::failure_log_limiter_t gamepad_router_error_log {std::chrono::seconds(5)};  ///< Limits repeated sink errors.
+#ifdef SUNSHINE_XBOX_REMOTE_PLAY
+  static std::mutex xbox_remote_lifecycle_mutex;  ///< Serializes application-scoped Xbox worker replacement.
+  static std::shared_ptr<::xbox_remote::worker::session_t> xbox_remote_worker;  ///< Active application-scoped Xbox worker.
+  #ifdef SUNSHINE_TESTS
+  static ::xbox_remote::worker::connection_factory_t xbox_remote_test_factory;  ///< Injectable lifecycle-test connection factory.
+  #endif
+#endif
 
   /**
    * @brief Adapt Sunshine's existing platform virtual-HID API to a gamepad sink.
@@ -246,9 +259,12 @@ namespace input {
    * @brief Select the controller output mode for one configured Sunshine application.
    *
    * @param app_name Configured Sunshine application name.
-   * @return NXBT or configured output for Nintendo Switch, otherwise disabled.
+   * @return NXBT/configured output for Nintendo Switch, Xbox Remote Play for the explicitly selected app, or disabled.
    */
   gamepad::output_mode_e output_mode_for_application(std::string_view app_name) {
+    if (config::input.xbox_remote_enabled && app_name == config::input.xbox_remote_app) {
+      return gamepad::output_mode_e::xbox_remote;
+    }
     if (app_name == "Nintendo Switch"sv) {
       return configured_output_mode();
     }
@@ -277,7 +293,7 @@ namespace input {
   /**
    * @brief Configure the gamepad router and optional reconnecting NXBT output.
    */
-  void configure_gamepad_router(gamepad::output_mode_e mode) {
+  void configure_gamepad_router(gamepad::output_mode_e mode, std::shared_ptr<gamepad::sink_t> xbox_remote_sink = {}) {
     std::shared_ptr<gamepad::sink_t> virtual_sink;
     std::shared_ptr<gamepad::sink_t> nxbt_sink;
     if (mode == gamepad::output_mode_e::virtual_output || mode == gamepad::output_mode_e::both) {
@@ -303,10 +319,63 @@ namespace input {
     auto router = std::make_shared<gamepad::router_t>(
       mode,
       std::move(virtual_sink),
-      std::move(nxbt_sink)
+      std::move(nxbt_sink),
+      std::move(xbox_remote_sink)
     );
     std::atomic_store_explicit(&gamepad_router, std::move(router), std::memory_order_release);
   }
+
+#ifdef SUNSHINE_XBOX_REMOTE_PLAY
+  /**
+   * @brief Stop and release the active Xbox worker after disabling new routing.
+   */
+  void stop_xbox_remote_worker() {
+    std::shared_ptr<::xbox_remote::worker::session_t> worker;
+    {
+      std::lock_guard lock {xbox_remote_lifecycle_mutex};
+      worker.swap(xbox_remote_worker);
+    }
+    if (worker) {
+      worker->stop();
+      BOOST_LOG(info) << "Xbox Remote Play state=idle"sv;
+    }
+  }
+
+  /**
+   * @brief Start an Xbox worker and bind it to the shared gamepad router.
+   *
+   * @return @c true when the asynchronous worker was accepted.
+   */
+  bool start_xbox_remote_worker() {
+    ::xbox_remote::production::options_t options;
+    options.token_file = config::input.xbox_remote_token_file;
+    options.console_id = config::input.xbox_remote_console_id;
+    options.wake_console = config::input.xbox_remote_wake;
+    auto factory = ::xbox_remote::production::make_connection_factory(std::move(options));
+  #ifdef SUNSHINE_TESTS
+    {
+      std::lock_guard lock {xbox_remote_lifecycle_mutex};
+      if (xbox_remote_test_factory) {
+        factory = xbox_remote_test_factory;
+      }
+    }
+  #endif
+    auto worker = std::make_shared<::xbox_remote::worker::session_t>(std::move(factory));
+    auto sink = std::make_shared<input::xbox_remote::sink_t>(worker);
+    configure_gamepad_router(gamepad::output_mode_e::xbox_remote, std::move(sink));
+    if (!worker->start()) {
+      configure_gamepad_router(gamepad::output_mode_e::disabled);
+      BOOST_LOG(error) << "Xbox Remote Play state=failed stage=worker_start"sv;
+      return false;
+    }
+    {
+      std::lock_guard lock {xbox_remote_lifecycle_mutex};
+      xbox_remote_worker = std::move(worker);
+    }
+    BOOST_LOG(info) << "Xbox Remote Play state=starting"sv;
+    return true;
+  }
+#endif
 
   /**
    * @brief Get the controller router selected for newly created stream inputs.
@@ -536,6 +605,62 @@ namespace input {
     for (const auto &[session_id, input] : inputs) {
       static_cast<void>(session_id);
       destroy_gamepads(input);
+    }
+  }
+
+  /**
+   * @brief Transfer retained Xbox gamepads to a replacement client session.
+   *
+   * Xbox Remote Play supports one logical gamepad in the first version. Keep
+   * that remote gamepad attached while moving its local slot and feedback queue
+   * to a different paired client. This avoids an unsupported immediate remote
+   * detach/attach pair, while a same-client resume still uses @ref rebind_input.
+   *
+   * @param target Newly connected stream input that takes ownership.
+   * @param inputs Retained inputs belonging to other paired clients.
+   */
+  void transfer_superseded_xbox_gamepads(const std::shared_ptr<input_t> &target, const std::vector<std::shared_ptr<input_t>> &inputs) {
+    bool transferred = false;
+    for (const auto &input : inputs) {
+      for (auto &controller : input->gamepads) {
+        if (controller.id < 0 || !controller.router || controller.router->mode() != gamepad::output_mode_e::xbox_remote) {
+          continue;
+        }
+        const auto client_index = static_cast<std::size_t>(controller.client_index);
+        if (client_index >= target->gamepads.size() || target->gamepads[client_index].id >= 0) {
+          continue;
+        }
+        if (controller.back_timeout_id) {
+          task_pool.cancel(controller.back_timeout_id);
+          controller.back_timeout_id = nullptr;
+        }
+        const platf::gamepad_id_t id {controller.id, controller.client_index};
+        controller.router->neutralize(id);
+        if (!controller.router->rebind(id, target->feedback_queue)) {
+          controller.router->free(id);
+          free_id(gamepadMask, controller.id);
+          controller.id = -1;
+          controller.router.reset();
+          controller.gamepad_state = {};
+          controller.back_button_state = button_state_e::NONE;
+          continue;
+        }
+
+        auto &replacement = target->gamepads[client_index];
+        replacement.id = controller.id;
+        replacement.client_index = controller.client_index;
+        replacement.router = controller.router;
+        replacement.gamepad_state = {};
+        replacement.back_button_state = button_state_e::NONE;
+        controller.id = -1;
+        controller.router.reset();
+        controller.gamepad_state = {};
+        controller.back_button_state = button_state_e::NONE;
+        transferred = true;
+      }
+    }
+    if (transferred) {
+      BOOST_LOG(info) << "Xbox Remote Play transferred a retained controller to a newly connected client"sv;
     }
   }
 
@@ -2277,6 +2402,9 @@ namespace input {
       }
       destroy_gamepads(inputs);
       std::atomic_store_explicit(&gamepad_router, std::shared_ptr<gamepad::router_t> {}, std::memory_order_release);
+#ifdef SUNSHINE_XBOX_REMOTE_PLAY
+      stop_xbox_remote_worker();
+#endif
       platf_input.reset();
     }
   };
@@ -2305,8 +2433,40 @@ namespace input {
   }
 
   void select_gamepad_output(const std::string_view app_name) {
-    configure_gamepad_router(output_mode_for_application(app_name));
+    const auto mode = output_mode_for_application(app_name);
+#ifdef SUNSHINE_XBOX_REMOTE_PLAY
+    configure_gamepad_router(gamepad::output_mode_e::disabled);
+    stop_xbox_remote_worker();
+    if (mode == gamepad::output_mode_e::xbox_remote) {
+      start_xbox_remote_worker();
+    } else {
+      configure_gamepad_router(mode);
+    }
+#else
+    if (mode == gamepad::output_mode_e::xbox_remote) {
+      BOOST_LOG(error) << "Xbox Remote Play is unavailable in this build"sv;
+      configure_gamepad_router(gamepad::output_mode_e::disabled);
+    } else {
+      configure_gamepad_router(mode);
+    }
+#endif
     BOOST_LOG(info) << "Gamepad output selected for application ["sv << app_name << ']';
+  }
+
+  xbox_remote_status_t xbox_remote_status() {
+#ifdef SUNSHINE_XBOX_REMOTE_PLAY
+    std::shared_ptr<::xbox_remote::worker::session_t> worker;
+    {
+      std::lock_guard lock {xbox_remote_lifecycle_mutex};
+      worker = xbox_remote_worker;
+    }
+    if (worker) {
+      return {std::string {::xbox_remote::worker::state_name(worker->state())}, worker->stage(), worker->failure_stage(), worker->failure_kind(), worker->epoch()};
+    }
+    return {"idle", {}, {}, {}, 0};
+#else
+    return {"unavailable", {}, {}, {}, 0};
+#endif
   }
 
   void refresh_virtual_mouse() {
@@ -2323,6 +2483,7 @@ namespace input {
    */
   std::shared_ptr<input_t> alloc(safe::mail_t mail, std::string session_id) {
     std::shared_ptr<input_t> input;
+    std::vector<std::shared_ptr<input_t>> superseded_xbox_inputs;
     bool resumed = false;
     {
       auto &state = retained_input_state();
@@ -2337,8 +2498,21 @@ namespace input {
           mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback)
         );
         input->gamepad_router = selected_gamepad_router();
+        if (input->gamepad_router && input->gamepad_router->mode() == gamepad::output_mode_e::xbox_remote) {
+          superseded_xbox_inputs.reserve(state.inputs.size());
+          for (const auto &[retained_session_id, retained_input] : state.inputs) {
+            static_cast<void>(retained_session_id);
+            superseded_xbox_inputs.push_back(retained_input);
+          }
+        }
         state.inputs.try_emplace(std::move(session_id), input);
       }
+    }
+
+    if (!superseded_xbox_inputs.empty()) {
+      dispatch_input_task([input, inputs = std::move(superseded_xbox_inputs)]() {
+        transfer_superseded_xbox_gamepads(input, inputs);
+      });
     }
 
     if (resumed) {
@@ -2363,6 +2537,17 @@ namespace input {
 
 #ifdef SUNSHINE_TESTS
   namespace testing {
+    void set_xbox_remote_connection_factory(::xbox_remote::worker::connection_factory_t factory) {
+  #ifdef SUNSHINE_XBOX_REMOTE_PLAY
+      configure_gamepad_router(gamepad::output_mode_e::disabled);
+      stop_xbox_remote_worker();
+      std::lock_guard lock {xbox_remote_lifecycle_mutex};
+      xbox_remote_test_factory = std::move(factory);
+  #else
+      static_cast<void>(factory);
+  #endif
+    }
+
     void set_platform_input(platf::input_t input) {
       terminate_gamepads();
       platf_input = std::move(input);

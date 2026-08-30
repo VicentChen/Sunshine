@@ -50,6 +50,10 @@ node_modules/
 *.mo
 *.pot
 
+# Test artifacts
+/test_sunshine.log*
+/write_file_test_*.txt
+
 # Dummy macOS files
 .DS_Store
 

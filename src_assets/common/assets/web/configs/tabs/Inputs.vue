@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import PlatformLayout from '../../PlatformLayout.vue'
 import Checkbox from "../../Checkbox.vue";
 
@@ -9,6 +9,26 @@ const props = defineProps([
 ])
 
 const config = ref(props.config)
+const xboxRemoteStatus = ref({ state: 'idle', stage: '', failure_stage: '', failure_kind: '', epoch: 0 })
+let xboxStatusTimer
+
+async function refreshXboxRemoteStatus() {
+  try {
+    const response = await fetch('./api/xbox-remote/status')
+    if (response.ok) {
+      xboxRemoteStatus.value = await response.json()
+    }
+  } catch (_) {
+    xboxRemoteStatus.value = { state: 'unavailable', stage: '', failure_stage: 'status_request', failure_kind: '', epoch: 0 }
+  }
+}
+
+onMounted(() => {
+  refreshXboxRemoteStatus()
+  xboxStatusTimer = window.setInterval(refreshXboxRemoteStatus, 2000)
+})
+
+onBeforeUnmount(() => window.clearInterval(xboxStatusTimer))
 </script>
 
 <template>
@@ -115,6 +135,48 @@ const config = ref(props.config)
                  placeholder="150" v-model="config.nxbt_watchdog_timeout" />
           <div class="form-text">{{ $t('config.nxbt_watchdog_timeout_desc') }}</div>
         </div>
+      </template>
+
+      <hr />
+      <Checkbox class="mb-3"
+                id="xbox_remote_enabled"
+                locale-prefix="config"
+                v-model="config.xbox_remote_enabled"
+                default="true"
+      ></Checkbox>
+      <div class="alert alert-secondary py-2" role="status">
+        {{ $t('config.xbox_remote_status') }}:
+        <strong>{{ xboxRemoteStatus.state }}</strong>
+        <span v-if="xboxRemoteStatus.epoch"> #{{ xboxRemoteStatus.epoch }}</span>
+        <span v-if="xboxRemoteStatus.stage"> / {{ xboxRemoteStatus.stage }}</span>
+        <span v-if="xboxRemoteStatus.failure_stage"> — {{ xboxRemoteStatus.failure_stage }}</span>
+        <span v-if="xboxRemoteStatus.failure_kind"> ({{ xboxRemoteStatus.failure_kind }})</span>
+      </div>
+      <template v-if="config.xbox_remote_enabled === 'enabled'">
+        <div class="mb-3">
+          <label for="xbox_remote_app" class="form-label">{{ $t('config.xbox_remote_app') }}</label>
+          <input id="xbox_remote_app" type="text" class="form-control"
+                 placeholder="Xbox" v-model="config.xbox_remote_app" />
+          <div class="form-text">{{ $t('config.xbox_remote_app_desc') }}</div>
+        </div>
+        <div class="mb-3">
+          <label for="xbox_remote_token_file" class="form-label">{{ $t('config.xbox_remote_token_file') }}</label>
+          <input id="xbox_remote_token_file" type="text" class="form-control monospace"
+                 placeholder="/home/user/.config/sunshine/xbox-remote/tokens.json" v-model="config.xbox_remote_token_file" />
+          <div class="form-text">{{ $t('config.xbox_remote_token_file_desc') }}</div>
+        </div>
+        <div class="mb-3">
+          <label for="xbox_remote_console_id" class="form-label">{{ $t('config.xbox_remote_console_id') }}</label>
+          <input id="xbox_remote_console_id" type="password" class="form-control monospace"
+                 autocomplete="off" v-model="config.xbox_remote_console_id" />
+          <div class="form-text">{{ $t('config.xbox_remote_console_id_desc') }}</div>
+        </div>
+        <Checkbox class="mb-3"
+                  id="xbox_remote_wake"
+                  locale-prefix="config"
+                  v-model="config.xbox_remote_wake"
+                  default="true"
+        ></Checkbox>
       </template>
     </section>
 

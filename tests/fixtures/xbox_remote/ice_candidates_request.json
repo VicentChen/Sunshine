@@ -1,0 +1,7 @@
+{
+  "messageType": "iceCandidate",
+  "candidate": [
+    "{\"candidate\":\"candidate:fixture 1 udp 2122260223 192.0.2.20 50000 typ host\",\"sdpMLineIndex\":0,\"sdpMid\":\"0\",\"usernameFragment\":\"fixture-ufrag\"}",
+    "{\"candidate\":\"a=end-of-candidates\",\"sdpMLineIndex\":0,\"sdpMid\":\"\",\"usernameFragment\":\"fixture-ufrag\"}"
+  ]
+}

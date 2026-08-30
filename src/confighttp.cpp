@@ -271,6 +271,16 @@ namespace confighttp {
     return output_tree;
   }
 
+  nlohmann::json build_xbox_remote_status(std::string_view state, std::string_view stage, std::string_view failure_stage, std::string_view failure_kind, std::uint64_t epoch) {
+    return {
+      {"state", std::string {state}},
+      {"stage", std::string {stage}},
+      {"failure_stage", std::string {failure_stage}},
+      {"failure_kind", std::string {failure_kind}},
+      {"epoch", epoch},
+    };
+  }
+
   /**
    * @brief Return a stable Web UI name for a libvirtualhid license state.
    *
@@ -1893,6 +1903,22 @@ namespace confighttp {
   }
 
   /**
+   * @brief Get the current application-scoped Xbox Remote Play status.
+   * @param response The HTTP response object.
+   * @param request The authenticated HTTP request object.
+   *
+   * @api_examples{/api/xbox-remote/status| GET| null}
+   */
+  void getXboxRemoteStatus(const resp_https_t &response, const req_https_t &request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+    const auto status = input::xbox_remote_status();
+    send_response(response, build_xbox_remote_status(status.state, status.stage, status.failure_stage, status.failure_kind, status.epoch));
+  }
+
+  /**
    * @brief Get the current libvirtualhid machine license status.
    *
    * @param response HTTP response object.
@@ -2224,6 +2250,7 @@ namespace confighttp {
     server.resource["^/api/virtual-input/license$"]["GET"] = getVirtualInputLicense;
     server.resource["^/api/virtual-input/license$"]["POST"] = updateVirtualInputLicense;
     server.resource["^/api/virtual-input/status$"]["GET"] = getVirtualInputStatus;
+    server.resource["^/api/xbox-remote/status$"]["GET"] = getXboxRemoteStatus;
 
     // static/dynamic resources
     server.resource["^/images/sunshine.ico$"]["GET"] = getFaviconImage;

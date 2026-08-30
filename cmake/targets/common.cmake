@@ -24,6 +24,9 @@ elseif(UNIX)
 endif()
 
 target_link_libraries(sunshine ${SUNSHINE_EXTERNAL_LIBRARIES} ${EXTRA_LIBS})
+if(SUNSHINE_BUILD_XBOX_REMOTE_PROBE)
+    target_link_libraries(sunshine LibDataChannel::LibDataChannelStatic)
+endif()
 target_compile_definitions(sunshine PUBLIC ${SUNSHINE_DEFINITIONS})
 
 # CLion complains about unknown flags after running cmake, and cannot add symbols to the index for cuda files
@@ -35,6 +38,34 @@ endif()
 
 target_compile_options(sunshine PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${SUNSHINE_COMPILE_OPTIONS}>;$<$<COMPILE_LANGUAGE:CUDA>:${SUNSHINE_COMPILE_OPTIONS_CUDA};-std=c++17>)  # cmake-lint: disable=C0301
 target_link_options(sunshine PRIVATE ${SUNSHINE_LINK_OPTIONS})
+
+if(SUNSHINE_BUILD_XBOX_REMOTE_PROBE)
+    add_executable(xbox-remote-probe
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/probe_main.cpp"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/auth.cpp"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/auth.h"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/http_runtime.cpp"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/http_runtime.h"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/input_queue.cpp"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/input_queue.h"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/protocol.cpp"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/protocol.h"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/session.cpp"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/session.h"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/startup.cpp"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/startup.h"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/transport.cpp"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/transport.h"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/token_store.cpp"
+        "${CMAKE_SOURCE_DIR}/src/xbox_remote/token_store.h")
+    target_link_libraries(xbox-remote-probe PRIVATE
+            ${CURL_LIBRARIES}
+            nlohmann_json::nlohmann_json
+            LibDataChannel::LibDataChannelStatic)
+    target_compile_definitions(xbox-remote-probe PRIVATE ${SUNSHINE_DEFINITIONS})
+    target_compile_options(xbox-remote-probe PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
+    target_link_options(xbox-remote-probe PRIVATE ${SUNSHINE_LINK_OPTIONS})
+endif()
 
 # Homebrew build fails the vite build if we set these environment variables
 if(${SUNSHINE_BUILD_HOMEBREW})

@@ -1,0 +1,6 @@
+{
+  "type": "Handshake",
+  "version": "messageV1",
+  "id": "fixture-handshake",
+  "cv": "0"
+}
