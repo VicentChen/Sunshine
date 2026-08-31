@@ -68,3 +68,6 @@
 [submodule "third-party/nxbt"]
 	path = third-party/nxbt
 	url = https://github.com/VicentChen/nxbt.git
+[submodule "third-party/imgui"]
+	path = third-party/imgui
+	url = https://github.com/ocornut/imgui.git
