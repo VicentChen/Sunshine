@@ -80,12 +80,24 @@ namespace input {
   void select_gamepad_output(std::string_view app_name);
 
   /**
-   * @brief Stop an application-scoped Xbox worker when the final stream ends.
+   * @brief Retain the Xbox worker for the configured grace period after the final stream ends.
    *
-   * Other controller routes are left unchanged. A later Moonlight resume will
-   * select the application route again and create a fresh Remote Play session.
+   * The controller is neutralized by stream teardown while the Remote Play
+   * connection remains available for a fast Moonlight resume. Expiration stops
+   * the worker unless a new stream cancels the pending timeout first.
    */
   void suspend_xbox_remote_for_disconnected_stream();
+
+  /**
+   * @brief Reuse or recreate the Xbox worker before a Moonlight stream starts.
+   *
+   * This operation is a no-op for applications that are not routed to Xbox
+   * Remote Play. A compatible starting or ready worker cancels its idle timeout
+   * and remains attached; failed, stopped, or missing workers are replaced.
+   *
+   * @param app_name Currently running Sunshine application name.
+   */
+  void resume_xbox_remote_for_stream(std::string_view app_name);
 
   /**
    * @brief Sanitized Xbox Remote Play lifecycle snapshot.
@@ -163,6 +175,16 @@ namespace input {
      * @return Assigned global gamepad slot, or -1 when unallocated.
      */
     int gamepad_id(const std::shared_ptr<input_t> &input, std::uint8_t client_index);
+
+    /**
+     * @brief Submit a complete gamepad state through a retained test input.
+     *
+     * @param input Retained input state.
+     * @param client_index Client-relative controller index.
+     * @param state Complete controller state.
+     * @return True when an allocated router accepted the state.
+     */
+    bool update_gamepad(const std::shared_ptr<input_t> &input, std::uint8_t client_index, const platf::gamepad_state_t &state);
 
     /**
      * @brief Synchronously neutralize retained gamepads for a unit test.

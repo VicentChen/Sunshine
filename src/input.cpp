@@ -181,6 +181,8 @@ namespace input {
 #ifdef SUNSHINE_XBOX_REMOTE_PLAY
   static std::mutex xbox_remote_lifecycle_mutex;  ///< Serializes application-scoped Xbox worker replacement.
   static std::shared_ptr<::xbox_remote::worker::session_t> xbox_remote_worker;  ///< Active application-scoped Xbox worker.
+  static task_pool_util::TaskPool::task_id_t xbox_remote_idle_task;  ///< Pending final-stream idle expiration task.
+  static std::uint64_t xbox_remote_idle_generation = 0;  ///< Invalidates stale idle expiration callbacks.
   #ifdef SUNSHINE_TESTS
   static ::xbox_remote::worker::connection_factory_t xbox_remote_test_factory;  ///< Injectable lifecycle-test connection factory.
   #endif
@@ -327,9 +329,25 @@ namespace input {
 
 #ifdef SUNSHINE_XBOX_REMOTE_PLAY
   /**
+   * @brief Cancel any pending Xbox idle expiration callback.
+   */
+  void cancel_xbox_remote_idle_timeout() {
+    task_pool_util::TaskPool::task_id_t idle_task;
+    {
+      std::lock_guard lock {xbox_remote_lifecycle_mutex};
+      ++xbox_remote_idle_generation;
+      idle_task = std::exchange(xbox_remote_idle_task, nullptr);
+    }
+    if (idle_task) {
+      task_pool.cancel(idle_task);
+    }
+  }
+
+  /**
    * @brief Stop and release the active Xbox worker after disabling new routing.
    */
   void stop_xbox_remote_worker() {
+    cancel_xbox_remote_idle_timeout();
     std::shared_ptr<::xbox_remote::worker::session_t> worker;
     {
       std::lock_guard lock {xbox_remote_lifecycle_mutex};
@@ -374,6 +392,62 @@ namespace input {
     }
     BOOST_LOG(info) << "Xbox Remote Play state=starting"sv;
     return true;
+  }
+
+  /**
+   * @brief Stop the Xbox worker when a matching final-stream grace period expires.
+   *
+   * @param generation Idle timer generation captured when the callback was queued.
+   */
+  void expire_xbox_remote_idle_timeout(std::uint64_t generation) {
+    std::shared_ptr<::xbox_remote::worker::session_t> worker;
+    {
+      std::lock_guard lock {xbox_remote_lifecycle_mutex};
+      if (generation != xbox_remote_idle_generation || !xbox_remote_worker) {
+        return;
+      }
+      xbox_remote_idle_task = nullptr;
+      configure_gamepad_router(gamepad::output_mode_e::disabled);
+      worker.swap(xbox_remote_worker);
+    }
+    worker->stop();
+    BOOST_LOG(info) << "Xbox Remote Play state=idle reason=stream_idle_timeout"sv;
+  }
+
+  /**
+   * @brief Arm the configured Xbox worker grace period after the final stream disconnects.
+   */
+  void arm_xbox_remote_idle_timeout() {
+    const auto timeout = config::input.xbox_remote_idle_timeout;
+    if (timeout <= std::chrono::milliseconds::zero()) {
+      configure_gamepad_router(gamepad::output_mode_e::disabled);
+      stop_xbox_remote_worker();
+      return;
+    }
+
+    task_pool_util::TaskPool::task_id_t previous_task;
+    std::uint64_t generation;
+    {
+      std::lock_guard lock {xbox_remote_lifecycle_mutex};
+      generation = ++xbox_remote_idle_generation;
+      previous_task = std::exchange(xbox_remote_idle_task, nullptr);
+    }
+    if (previous_task) {
+      task_pool.cancel(previous_task);
+    }
+
+    auto timer = task_pool.pushDelayed(expire_xbox_remote_idle_timeout, timeout, generation);
+    bool keep_timer = false;
+    {
+      std::lock_guard lock {xbox_remote_lifecycle_mutex};
+      keep_timer = generation == xbox_remote_idle_generation && static_cast<bool>(xbox_remote_worker);
+      if (keep_timer) {
+        xbox_remote_idle_task = timer.task_id;
+      }
+    }
+    if (!keep_timer) {
+      task_pool.cancel(timer.task_id);
+    }
   }
 #endif
 
@@ -674,6 +748,15 @@ namespace input {
     input->touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
     input->feedback_queue = mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback);
 
+    const auto previous_router = input->gamepad_router;
+    const auto active_router = selected_gamepad_router();
+    const bool migrate_xbox_router = previous_router && active_router && previous_router != active_router &&
+                                     previous_router->mode() == gamepad::output_mode_e::xbox_remote &&
+                                     active_router->mode() == gamepad::output_mode_e::xbox_remote;
+    if (migrate_xbox_router) {
+      input->gamepad_router = active_router;
+    }
+
     for (int client_index = 0; client_index < input->gamepads.size(); ++client_index) {
       auto &gamepad = input->gamepads[client_index];
       if (gamepad.id < 0) {
@@ -681,7 +764,19 @@ namespace input {
       }
 
       const platf::gamepad_id_t id {gamepad.id, static_cast<std::uint8_t>(client_index)};
-      if (!input->gamepad_router || !input->gamepad_router->rebind(id, input->feedback_queue)) {
+      if (migrate_xbox_router && gamepad.router == previous_router) {
+        previous_router->neutralize(id);
+        previous_router->free(id);
+        gamepad.router.reset();
+        if (active_router->alloc(id, {}, input->feedback_queue)) {
+          gamepad.router = active_router;
+          continue;
+        }
+      } else if (gamepad.router && gamepad.router->rebind(id, input->feedback_queue)) {
+        continue;
+      }
+
+      {
         if (gamepad.router) {
           gamepad.router->neutralize(id);
           gamepad.router->free(id);
@@ -2461,10 +2556,38 @@ namespace input {
       worker_active = static_cast<bool>(xbox_remote_worker);
     }
     if (worker_active) {
-      configure_gamepad_router(gamepad::output_mode_e::disabled);
-      stop_xbox_remote_worker();
-      BOOST_LOG(info) << "Xbox Remote Play stopped because the final Moonlight stream ended"sv;
+      arm_xbox_remote_idle_timeout();
+      BOOST_LOG(info) << "Xbox Remote Play state=idle_grace timeout_ms="sv << config::input.xbox_remote_idle_timeout.count();
     }
+#endif
+  }
+
+  void resume_xbox_remote_for_stream(const std::string_view app_name) {
+#ifdef SUNSHINE_XBOX_REMOTE_PLAY
+    if (output_mode_for_application(app_name) != gamepad::output_mode_e::xbox_remote) {
+      return;
+    }
+
+    cancel_xbox_remote_idle_timeout();
+    std::shared_ptr<::xbox_remote::worker::session_t> worker;
+    {
+      std::lock_guard lock {xbox_remote_lifecycle_mutex};
+      worker = xbox_remote_worker;
+    }
+    const auto router = selected_gamepad_router();
+    if (worker && router && router->mode() == gamepad::output_mode_e::xbox_remote) {
+      const auto state = worker->state();
+      if (state == ::xbox_remote::worker::state_e::starting || state == ::xbox_remote::worker::state_e::ready) {
+        BOOST_LOG(info) << "Xbox Remote Play reused for resumed Moonlight stream"sv;
+        return;
+      }
+    }
+
+    configure_gamepad_router(gamepad::output_mode_e::disabled);
+    stop_xbox_remote_worker();
+    start_xbox_remote_worker();
+#else
+    static_cast<void>(app_name);
 #endif
   }
 
@@ -2585,6 +2708,14 @@ namespace input {
         return -1;
       }
       return input->gamepads[client_index].id;
+    }
+
+    bool update_gamepad(const std::shared_ptr<input_t> &input, std::uint8_t client_index, const platf::gamepad_state_t &state) {
+      if (!input || client_index >= input->gamepads.size()) {
+        return false;
+      }
+      const auto &gamepad = input->gamepads[client_index];
+      return gamepad.id >= 0 && gamepad.router && gamepad.router->update({gamepad.id, client_index}, state);
     }
 
     void neutralize_gamepads(const std::shared_ptr<input_t> &input) {

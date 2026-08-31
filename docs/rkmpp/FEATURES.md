@@ -36,6 +36,6 @@
 - 支持 Home Remote Play 会话创建、状态轮询、SDP/ICE 交换、四条必需 WebRTC data channel、启动握手、keepalive 和会话删除；视频/音频轨只消费 RTP，不创建第二套解码、渲染或播放链路。
 - 支持一个 Xbox 手柄的完整状态快照，包括按键、方向键、双摇杆和双扳机；使用有界非阻塞队列、状态合并、边沿保留、重连中立边界和输入静默 watchdog，避免阻塞 Sunshine 输入线程或重放旧按键。
 - 支持解析 Xbox 的普通与扳机振动反馈，并把四马达强度转发到当前 Moonlight 手柄；无效、过期或旧会话反馈会被丢弃。
-- 后台 worker 支持取消、分级错误、有限指数退避重试和会话 epoch 隔离；Moonlight 最后一条流结束时会发送中立状态、移除手柄、关闭 WebRTC 并删除 Home 会话，后续恢复会创建新会话。
+- 后台 worker 支持取消、分级错误、有限指数退避重试和会话 epoch 隔离；Moonlight 最后一条流结束时会发送中立手柄状态，并默认保留 Home 会话和 WebRTC 连接 300 秒供快速恢复。保活时间可配置，窗口内恢复会复用同一 worker，超时后恢复会创建新 worker 并迁移保留的手柄；明确退出应用仍会立即移除手柄、关闭 WebRTC 并删除 Home 会话。
 - Web UI 和认证状态 API 只显示脱敏的状态、阶段、失败类型和 epoch。使用 RKMPP 串流时，认证、发现、唤醒、建连、失败和断开阶段还会临时显示 OSD，进入可用状态后自动清除。
 - 独立探针已通过真实 Xbox 的认证、Home REST、SDP/ICE、四通道、启动握手、输入协议投递和清理验证；Sunshine 集成的最终 Moonlight→Sunshine→Xbox 按键、摇杆/扳机方向、振动、重连和故障真机矩阵仍待执行。

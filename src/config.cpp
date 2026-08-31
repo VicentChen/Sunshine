@@ -867,6 +867,7 @@ namespace config {
     platf::appdata().string() + "/xbox-remote/tokens.json",  // xbox_remote_token_file
     {},  // xbox_remote_console_id
     true,  // xbox_remote_wake
+    5min,  // xbox_remote_idle_timeout
     true,  // back as touchpad click enabled for PlayStation-style gamepads
     true,  // client gamepads with motion events use PlayStation-style emulation
     true,  // client gamepads with touchpads use PlayStation-style emulation
@@ -1884,6 +1885,9 @@ namespace config {
     string_f(vars, "xbox_remote_token_file"s, input.xbox_remote_token_file);
     string_f(vars, "xbox_remote_console_id"s, input.xbox_remote_console_id);
     bool_f(vars, "xbox_remote_wake", input.xbox_remote_wake);
+    int xbox_remote_idle_timeout = static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(input.xbox_remote_idle_timeout).count());
+    int_between_f(vars, "xbox_remote_idle_timeout", xbox_remote_idle_timeout, {0, 86400});
+    input.xbox_remote_idle_timeout = std::chrono::seconds {xbox_remote_idle_timeout};
     if (input.xbox_remote_app.find_first_not_of(" \t\r\n") == std::string::npos) {
       input.xbox_remote_app.clear();
     }

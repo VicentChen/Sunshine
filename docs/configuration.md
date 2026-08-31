@@ -471,6 +471,14 @@ When the account has exactly one Home console, Sunshine discovers and selects it
     <tr><td>Default</td><td colspan="2">enabled</td></tr>
 </table>
 
+### xbox_remote_idle_timeout
+
+<table>
+    <tr><td>Description</td><td colspan="2">Number of seconds to retain the Xbox Remote Play worker after the final Moonlight stream disconnects while the Xbox application remains active. Resuming during this grace period reuses the existing Home session and WebRTC connection. Explicit application exit always stops the worker immediately.</td></tr>
+    <tr><td>Default</td><td colspan="2">@code{}300@endcode</td></tr>
+    <tr><td>Range</td><td colspan="2">0–86400; zero disables the grace period</td></tr>
+</table>
+
 ### ds4_back_as_touchpad_click
 
 <table>

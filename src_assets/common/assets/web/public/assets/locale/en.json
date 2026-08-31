@@ -283,6 +283,8 @@
     "xbox_remote_console_id_desc": "Optional stable Home console identifier. Leave empty to select the console automatically when the account has exactly one. Sunshine never writes this value or OAuth credentials to logs.",
     "xbox_remote_wake": "Wake Xbox Before Connecting",
     "xbox_remote_wake_desc": "Use the validated XCCS WakeUp gate before provisioning a Remote Play session.",
+    "xbox_remote_idle_timeout": "Xbox Remote Play Idle Timeout",
+    "xbox_remote_idle_timeout_desc": "Keep the Remote Play connection alive for this many seconds after the final Moonlight stream stops (0–86400). A resumed stream reuses the connection; 0 closes it immediately.",
     "xbox_remote_status": "Xbox Remote Play Status",
     "global_prep_cmd": "Command Preparations",
     "global_prep_cmd_desc": "Configure a list of commands to be executed before or after running any application. If any of the specified preparation commands fail, the application launch process will be aborted.",

@@ -4,15 +4,18 @@
  */
 
 // standard includes
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <utility>
 
 // local includes
-#include "tests/tests_common.h"
 #include "src/config.h"
+#include "tests/tests_common.h"
 
 namespace {
+  using namespace std::chrono_literals;
+
   /**
    * @brief Preserve input configuration and provide a private temporary token file.
    */
@@ -50,6 +53,7 @@ TEST_F(XboxRemoteConfigTest, DefaultsToAutomaticXboxApplicationWithSafeSelectors
   EXPECT_TRUE(std::filesystem::path {config::input.xbox_remote_token_file}.is_absolute());
   EXPECT_TRUE(config::input.xbox_remote_console_id.empty());
   EXPECT_TRUE(config::input.xbox_remote_wake);
+  EXPECT_EQ(config::input.xbox_remote_idle_timeout, 5min);
 }
 
 TEST_F(XboxRemoteConfigTest, AppliesCompleteValidatedConfiguration) {
@@ -61,6 +65,7 @@ TEST_F(XboxRemoteConfigTest, AppliesCompleteValidatedConfiguration) {
     "\n"
     "xbox_remote_console_id = stable-console\n"
     "xbox_remote_wake = false\n"
+    "xbox_remote_idle_timeout = 42\n"
   );
 
   EXPECT_TRUE(config::input.xbox_remote_enabled);
@@ -68,6 +73,7 @@ TEST_F(XboxRemoteConfigTest, AppliesCompleteValidatedConfiguration) {
   EXPECT_EQ(config::input.xbox_remote_token_file, token_file_);
   EXPECT_EQ(config::input.xbox_remote_console_id, "stable-console");
   EXPECT_FALSE(config::input.xbox_remote_wake);
+  EXPECT_EQ(config::input.xbox_remote_idle_timeout, 42s);
 }
 
 TEST_F(XboxRemoteConfigTest, AllowsUniqueConsoleAutoSelection) {
@@ -108,4 +114,16 @@ TEST_F(XboxRemoteConfigTest, RejectsIncompleteRelativeMissingAndReadOnlyStores) 
   config::input.xbox_remote_enabled = true;
   config::apply_config_for_test("xbox_remote_token_file = " + token_file_.string() + "\n");
   EXPECT_FALSE(config::input.xbox_remote_enabled);
+}
+
+TEST_F(XboxRemoteConfigTest, BoundsRemotePlayIdleTimeout) {
+  config::input.xbox_remote_idle_timeout = 5min;
+  config::apply_config_for_test("xbox_remote_idle_timeout = -1\n");
+  EXPECT_EQ(config::input.xbox_remote_idle_timeout, 5min);
+
+  config::apply_config_for_test("xbox_remote_idle_timeout = 86401\n");
+  EXPECT_EQ(config::input.xbox_remote_idle_timeout, 5min);
+
+  config::apply_config_for_test("xbox_remote_idle_timeout = 0\n");
+  EXPECT_EQ(config::input.xbox_remote_idle_timeout, 0s);
 }

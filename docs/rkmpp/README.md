@@ -156,6 +156,10 @@ back_button_timeout = 1000
 | `Xbox` | 使用 Xbox Remote Play 输入后端转发手柄，不创建主机虚拟手柄；详见 [功能总览](FEATURES.md#xbox)。 |
 | `HDMI Input`、`Desktop` 和其他应用 | 禁用，不转发到 NXBT 或主机虚拟手柄。 |
 
+Xbox 串流停止但应用仍在运行时，Sunshine 会先发送中立手柄状态，并默认保留 Remote Play
+连接 300 秒供快速恢复；可通过 `xbox_remote_idle_timeout` 调整，设为 `0` 表示立即关闭。
+明确退出 Xbox 应用时会立即关闭连接，不等待空闲超时。
+
 应用切换或停止时，Sunshine 会先向旧输出发送中立状态并释放该手柄。应用名称来自
 `runtime-home/config/sunshine/apps.json`；如重命名 `Nintendo Switch`，需要同步更新路由规则。
 

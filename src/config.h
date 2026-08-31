@@ -293,6 +293,7 @@ namespace config {
     std::string xbox_remote_token_file;  ///< Owner-only Microsoft OAuth credential file.
     std::string xbox_remote_console_id;  ///< Optional stable Xbox identifier; empty selects one uniquely discovered console.
     bool xbox_remote_wake;  ///< Wake the selected console before creating a Home session.
+    std::chrono::milliseconds xbox_remote_idle_timeout;  ///< Grace period that retains Remote Play after the final stream disconnects.
     bool ds4_back_as_touchpad_click;  ///< Map Back/Select to touchpad click for PlayStation-style gamepads.
     bool motion_as_ds4;  ///< Prefer PlayStation-style emulation for client gamepads with motion controls.
     bool touchpad_as_ds4;  ///< Prefer PlayStation-style emulation for client gamepads with touchpad input.

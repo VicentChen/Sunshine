@@ -2241,6 +2241,7 @@ namespace stream {
      * @brief Start the audio, video, and control workers for a streaming session.
      */
     int start(session_t &session, const std::string &addr_string) {
+      input::resume_xbox_remote_for_stream(proc::proc.get_last_run_app_name());
       session.input = input::alloc(session.mail, session.input_session_id);
 
       session.broadcast_ref = broadcast.ref();

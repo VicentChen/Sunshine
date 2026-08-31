@@ -177,6 +177,12 @@ onBeforeUnmount(() => window.clearInterval(xboxStatusTimer))
                   v-model="config.xbox_remote_wake"
                   default="true"
         ></Checkbox>
+        <div class="mb-3">
+          <label for="xbox_remote_idle_timeout" class="form-label">{{ $t('config.xbox_remote_idle_timeout') }}</label>
+          <input id="xbox_remote_idle_timeout" type="number" min="0" max="86400" class="form-control"
+                 placeholder="300" v-model="config.xbox_remote_idle_timeout" />
+          <div class="form-text">{{ $t('config.xbox_remote_idle_timeout_desc') }}</div>
+        </div>
       </template>
     </section>
 
