@@ -110,9 +110,24 @@ endif()
 file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS
         ${CMAKE_SOURCE_DIR}/tests/*.h
         ${CMAKE_SOURCE_DIR}/tests/*.cpp)
-if(NOT SUNSHINE_BUILD_XBOX_REMOTE_PROBE)
-    list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/test_xbox_remote_transport.cpp)
-endif()
+
+# VicentChen-authored unit tests are maintained as three independent modules.
+# Keep them out of the upstream test_sunshine source set so each module can be
+# built and executed without mixing unrelated project-specific coverage.
+file(GLOB_RECURSE RKMPP_UNIT_TEST_SOURCES CONFIGURE_DEPENDS
+        ${CMAKE_SOURCE_DIR}/tests/unit/rkmpp/*.h
+        ${CMAKE_SOURCE_DIR}/tests/unit/rkmpp/*.cpp)
+file(GLOB_RECURSE NS_UNIT_TEST_SOURCES CONFIGURE_DEPENDS
+        ${CMAKE_SOURCE_DIR}/tests/unit/ns/*.h
+        ${CMAKE_SOURCE_DIR}/tests/unit/ns/*.cpp)
+file(GLOB_RECURSE XBOX_UNIT_TEST_SOURCES CONFIGURE_DEPENDS
+        ${CMAKE_SOURCE_DIR}/tests/unit/xbox/*.h
+        ${CMAKE_SOURCE_DIR}/tests/unit/xbox/*.cpp)
+list(REMOVE_ITEM TEST_SOURCES
+        ${RKMPP_UNIT_TEST_SOURCES}
+        ${NS_UNIT_TEST_SOURCES}
+        ${XBOX_UNIT_TEST_SOURCES})
+list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/module_tests_main.cpp)
 if(SUNSHINE_ENABLE_TRAY AND (WIN32 OR APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
     set(SUNSHINE_TRAY_TEST_ICON_SOURCE_DIR
             "${CMAKE_SOURCE_DIR}/src_assets/common/assets/web/public/images")
@@ -184,21 +199,6 @@ list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/rkmpp_rkmpp_annexb_test.
 # The RGA hardware smoke has its own main() and is built only after CMake has
 # compiled the required im2d API probe.
 list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/rkmpp_rga_smoke.cpp)
-# These sources depend on RKMPP headers and are excluded entirely when support
-# is disabled; the ON build supplies them through the platform source list and
-# the dedicated layout target below.
-if(NOT RKMPP_FOUND)
-    list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_hdmirx.cpp)
-    list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_edid.cpp)
-    list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_edid_negotiator.cpp)
-    list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_rkmpp_input.cpp)
-    list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_input_state_machine.cpp)
-    list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_rkmpp_stress.cpp)
-endif()
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_rga.cpp)
-    list(REMOVE_ITEM TEST_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_edid.cpp)
-endif()
 # Add macOS-specific test files only when building tests for macOS
 if (APPLE)
     file(GLOB_RECURSE MACOS_TEST_SOURCES CONFIGURE_DEPENDS
@@ -216,24 +216,48 @@ add_executable(${PROJECT_NAME}
         ${TEST_SOURCES}
         ${SUNSHINE_SOURCES})
 
-# RKMPP validation must be safe to run against a developer's real user profile.
-# The upstream HTTP pairing test persists fixture clients through the production
-# state path, so exclude the source at compile time instead of relying on a
-# gtest runtime filter that can be omitted accidentally.
+# Each project-specific module has its own executable and contains only its
+# explicitly grouped test sources plus the module test main. The upstream HTTP
+# pairing test therefore cannot be compiled or executed by these targets.
+set(MODULE_TEST_MAIN ${CMAKE_SOURCE_DIR}/tests/module_tests_main.cpp)
 set(RKMPP_TEST_TARGET test_sunshine_rkmpp)
 if(RKMPP_FOUND)
-    set(RKMPP_TEST_SOURCES ${TEST_SOURCES})
-    list(REMOVE_ITEM RKMPP_TEST_SOURCES
-            ${CMAKE_SOURCE_DIR}/tests/unit/test_http_pairing.cpp)
     add_executable(${RKMPP_TEST_TARGET}
-            ${RKMPP_TEST_SOURCES}
+            ${MODULE_TEST_MAIN}
+            ${RKMPP_UNIT_TEST_SOURCES}
             ${SUNSHINE_SOURCES})
-    target_compile_definitions(${RKMPP_TEST_TARGET} PRIVATE SUNSHINE_RKMPP_TESTS)
+    target_compile_definitions(${RKMPP_TEST_TARGET} PRIVATE
+            SUNSHINE_MODULE_TESTS
+            SUNSHINE_TEST_MODULE="rkmpp")
+endif()
+
+set(NS_TEST_TARGET test_sunshine_ns)
+add_executable(${NS_TEST_TARGET}
+        ${MODULE_TEST_MAIN}
+        ${NS_UNIT_TEST_SOURCES}
+        ${SUNSHINE_SOURCES})
+target_compile_definitions(${NS_TEST_TARGET} PRIVATE
+        SUNSHINE_MODULE_TESTS
+        SUNSHINE_TEST_MODULE="ns")
+
+set(XBOX_TEST_TARGET test_sunshine_xbox)
+if(SUNSHINE_BUILD_XBOX_REMOTE_PROBE)
+    add_executable(${XBOX_TEST_TARGET}
+            ${MODULE_TEST_MAIN}
+            ${XBOX_UNIT_TEST_SOURCES}
+            ${SUNSHINE_SOURCES})
+    target_compile_definitions(${XBOX_TEST_TARGET} PRIVATE
+            SUNSHINE_MODULE_TESTS
+            SUNSHINE_TEST_MODULE="xbox")
 endif()
 
 set(SUNSHINE_TEST_TARGETS ${PROJECT_NAME})
 if(TARGET ${RKMPP_TEST_TARGET})
     list(APPEND SUNSHINE_TEST_TARGETS ${RKMPP_TEST_TARGET})
+endif()
+list(APPEND SUNSHINE_TEST_TARGETS ${NS_TEST_TARGET})
+if(TARGET ${XBOX_TEST_TARGET})
+    list(APPEND SUNSHINE_TEST_TARGETS ${XBOX_TEST_TARGET})
 endif()
 
 if(SUNSHINE_BUILD_XBOX_REMOTE_PROBE)

@@ -1,5 +1,5 @@
 /**
- * @file tests/unit/test_xbox_remote_startup.cpp
+ * @file tests/unit/xbox/test_xbox_remote_startup.cpp
  * @brief Offline tests for the Xbox data-channel startup coordinator.
  */
 

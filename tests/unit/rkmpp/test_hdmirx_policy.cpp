@@ -1,5 +1,5 @@
 /**
- * @file tests/unit/platform/test_hdmirx_policy.cpp
+ * @file tests/unit/rkmpp/test_hdmirx_policy.cpp
  * @brief Unit tests for hardware-independent HDMI RX sizing policy.
  */
 #include "../../tests_common.h"

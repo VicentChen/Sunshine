@@ -1,5 +1,5 @@
 /**
- * @file tests/unit/test_nxbt_protocol.cpp
+ * @file tests/unit/ns/test_nxbt_protocol.cpp
  * @brief Unit tests for the versioned NXBT Bridge wire protocol.
  */
 
@@ -9,7 +9,7 @@
 #include <vector>
 
 // local includes
-#include "../tests_common.h"
+#include "tests/tests_common.h"
 #include "src/input/nxbt_protocol.h"
 
 namespace {

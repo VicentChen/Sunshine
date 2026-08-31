@@ -1,5 +1,5 @@
 /**
- * @file tests/unit/test_nxbt_mapping.cpp
+ * @file tests/unit/ns/test_nxbt_mapping.cpp
  * @brief Unit tests for Sunshine-to-NXBT input conversion.
  */
 
@@ -8,7 +8,7 @@
 #include <limits>
 
 // local includes
-#include "../tests_common.h"
+#include "tests/tests_common.h"
 #include "src/input/nxbt_mapping.h"
 
 TEST(NxbtMappingTest, MapsEverySupportedButtonAndIgnoresUnsupportedButtons) {

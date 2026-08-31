@@ -4,7 +4,7 @@ if(FREEBSD)
     add_compile_definitions(SUNSHINE_PLATFORM="freebsd")
     # FreeBSD installs packages to /usr/local/lib, which is not in the default linker search path.
     # link_directories() is directory-scoped and propagates to all subdirectories (including tests/),
-    # so all targets (sunshine and both test executables) can resolve libraries found via pkg_check_modules.
+    # so Sunshine and every test executable can resolve libraries found via pkg_check_modules.
     link_directories(/usr/local/lib)
 else()
     add_compile_definitions(SUNSHINE_PLATFORM="linux")
@@ -104,7 +104,7 @@ list(REMOVE_ITEM PLATFORM_LIBRARIES RockchipMPP::rockchip_mpp)
 list(REMOVE_ITEM PLATFORM_LIBRARIES LibRGA::librga)
 list(REMOVE_ITEM PLATFORM_TARGET_FILES ${_RKMPP_PLATFORM_FILES})
 list(REMOVE_ITEM PLATFORM_TARGET_FILES ${_RGA_PLATFORM_FILES})
-foreach(_RKMPP_TARGET sunshine test_sunshine test_sunshine_rkmpp)
+foreach(_RKMPP_TARGET sunshine test_sunshine test_sunshine_rkmpp test_sunshine_ns test_sunshine_xbox)
     if(TARGET ${_RKMPP_TARGET})
         get_property(_RKMPP_TARGET_LINK_LIBRARIES TARGET ${_RKMPP_TARGET} PROPERTY LINK_LIBRARIES)
         list(REMOVE_ITEM _RKMPP_TARGET_LINK_LIBRARIES RockchipMPP::rockchip_mpp)

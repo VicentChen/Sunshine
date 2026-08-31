@@ -1,5 +1,5 @@
 /**
- * @file tests/unit/platform/test_edid.cpp
+ * @file tests/unit/rkmpp/test_edid.cpp
  * @brief Unit tests for EDID data model, parser, ioctl abstraction, and restore guard.
  *
  * All tests use mock/fake ioctl backends.  No root access or /dev/video0

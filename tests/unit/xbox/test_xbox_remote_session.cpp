@@ -1,5 +1,5 @@
 /**
- * @file tests/unit/test_xbox_remote_session.cpp
+ * @file tests/unit/xbox/test_xbox_remote_session.cpp
  * @brief Offline tests for Xbox Home discovery and REST session lifecycle.
  */
 
@@ -18,7 +18,7 @@
 #include <nlohmann/json.hpp>
 
 // local includes
-#include "../tests_common.h"
+#include "tests/tests_common.h"
 #include "src/xbox_remote/session.h"
 
 namespace {

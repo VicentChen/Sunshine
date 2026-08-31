@@ -1,5 +1,5 @@
 /**
- * @file tests/unit/test_gamepad_router.cpp
+ * @file tests/unit/ns/test_gamepad_router.cpp
  * @brief Tests for disabled, virtual-HID, and NXBT gamepad output routing.
  */
 
@@ -11,7 +11,7 @@
 #include <vector>
 
 // local includes
-#include "../tests_common.h"
+#include "tests/tests_common.h"
 #include "src/input/gamepad_router.h"
 
 namespace {

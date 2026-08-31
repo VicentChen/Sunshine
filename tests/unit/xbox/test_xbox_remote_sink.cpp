@@ -1,5 +1,5 @@
 /**
- * @file tests/unit/test_xbox_remote_sink.cpp
+ * @file tests/unit/xbox/test_xbox_remote_sink.cpp
  * @brief Tests for Sunshine Xbox Remote Play gamepad mapping and lifecycle.
  */
 
@@ -12,7 +12,7 @@
 #include <vector>
 
 // local includes
-#include "../tests_common.h"
+#include "tests/tests_common.h"
 #include "src/globals.h"
 #include "src/input/xbox_remote_sink.h"
 

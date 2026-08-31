@@ -1,5 +1,5 @@
 /**
- * @file tests/unit/test_nxbt_client.cpp
+ * @file tests/unit/ns/test_nxbt_client.cpp
  * @brief Tests for the reconnecting NXBT client worker and gamepad sink.
  */
 
@@ -19,7 +19,7 @@
 #include <vector>
 
 // local includes
-#include "../tests_common.h"
+#include "tests/tests_common.h"
 #include "src/input/nxbt_client.h"
 #include "src/input/nxbt_mapping.h"
 #include "src/input/nxbt_sink.h"

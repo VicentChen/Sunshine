@@ -1,5 +1,5 @@
 /**
- * @file tests/unit/test_xbox_remote_input_queue.cpp
+ * @file tests/unit/xbox/test_xbox_remote_input_queue.cpp
  * @brief Offline tests for bounded Xbox input scheduling and packetization.
  */
 

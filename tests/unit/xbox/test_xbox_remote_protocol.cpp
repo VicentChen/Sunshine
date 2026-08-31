@@ -1,5 +1,5 @@
 /**
- * @file tests/unit/test_xbox_remote_protocol.cpp
+ * @file tests/unit/xbox/test_xbox_remote_protocol.cpp
  * @brief Contract tests for the Xbox Home Remote Play protocol layer.
  */
 
@@ -18,7 +18,7 @@
 #include <nlohmann/json.hpp>
 
 // local includes
-#include "../tests_common.h"
+#include "tests/tests_common.h"
 #include "src/xbox_remote/protocol.h"
 
 namespace {

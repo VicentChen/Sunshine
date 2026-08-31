@@ -1,5 +1,5 @@
 /**
- * @file tests/unit/test_xbox_remote_transport.cpp
+ * @file tests/unit/xbox/test_xbox_remote_transport.cpp
  * @brief Unit tests for the isolated Xbox WebRTC transport gate.
  */
 

@@ -1,8 +1,8 @@
 /**
- * @file tests/unit/test_frame_profile.cpp
+ * @file tests/unit/rkmpp/test_frame_profile.cpp
  * @brief Unit tests for bounded per-frame performance statistics.
  */
-#include "../tests_common.h"
+#include "tests/tests_common.h"
 
 #include <src/frame_profile.h>
 

@@ -1,5 +1,5 @@
 /**
- * @file tests/unit/test_nxbt_config.cpp
+ * @file tests/unit/ns/test_nxbt_config.cpp
  * @brief Tests for NXBT controller-output configuration parsing and validation.
  */
 
@@ -8,7 +8,7 @@
 #include <utility>
 
 // local includes
-#include "../tests_common.h"
+#include "tests/tests_common.h"
 #include "src/config.h"
 
 namespace {

@@ -1,5 +1,5 @@
 /**
- * @file tests/unit/platform/test_rkmpp_input.cpp
+ * @file tests/unit/rkmpp/test_rkmpp_input.cpp
  * @brief Unit tests for RKMPP's generic DMA-BUF input contract.
  */
 #ifdef SUNSHINE_BUILD_RKMPP

@@ -1,5 +1,5 @@
 /**
- * @file tests/unit/platform/test_input_state_machine.cpp
+ * @file tests/unit/rkmpp/test_input_state_machine.cpp
  * @brief Unit tests for the HDMI RX input state machine (Stage 5).
  *
  * Tests cover:

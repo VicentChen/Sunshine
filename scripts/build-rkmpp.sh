@@ -76,12 +76,18 @@ main() {
     -DSUNSHINE_SYSTEM_WAYLAND_PROTOCOLS=OFF \
     -DSUNSHINE_ASSETS_DIR_DEF="$BUILD_DIR/assets"
 
-  run "$brew_prefix/bin/cmake" --build "$BUILD_DIR" --target sunshine test_sunshine_rkmpp xbox-remote-probe --parallel "$JOBS"
+  run "$brew_prefix/bin/cmake" --build "$BUILD_DIR" \
+    --target sunshine test_sunshine_rkmpp test_sunshine_ns test_sunshine_xbox xbox-remote-probe \
+    --parallel "$JOBS"
   [[ -x "$BUILD_DIR/sunshine" ]] || die "build completed without $BUILD_DIR/sunshine."
   [[ -x "$BUILD_DIR/tests/test_sunshine_rkmpp" ]] || die "build completed without $BUILD_DIR/tests/test_sunshine_rkmpp."
+  [[ -x "$BUILD_DIR/tests/test_sunshine_ns" ]] || die "build completed without $BUILD_DIR/tests/test_sunshine_ns."
+  [[ -x "$BUILD_DIR/tests/test_sunshine_xbox" ]] || die "build completed without $BUILD_DIR/tests/test_sunshine_xbox."
   [[ -x "$BUILD_DIR/xbox-remote-probe" ]] || die "build completed without $BUILD_DIR/xbox-remote-probe."
   printf "\nBuilt: %s\n" "$BUILD_DIR/sunshine"
   printf "RKMPP tests: %s\n" "$BUILD_DIR/tests/test_sunshine_rkmpp"
+  printf "NS tests: %s\n" "$BUILD_DIR/tests/test_sunshine_ns"
+  printf "Xbox tests: %s\n" "$BUILD_DIR/tests/test_sunshine_xbox"
   printf "Probe: %s\n" "$BUILD_DIR/xbox-remote-probe"
 }
 

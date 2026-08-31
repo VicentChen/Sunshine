@@ -1,5 +1,5 @@
 /**
- * @file tests/unit/test_xbox_remote_config.cpp
+ * @file tests/unit/xbox/test_xbox_remote_config.cpp
  * @brief Tests for Xbox Remote Play configuration defaults and validation.
  */
 
@@ -9,7 +9,7 @@
 #include <utility>
 
 // local includes
-#include "../tests_common.h"
+#include "tests/tests_common.h"
 #include "src/config.h"
 
 namespace {

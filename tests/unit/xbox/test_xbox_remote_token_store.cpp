@@ -1,5 +1,5 @@
 /**
- * @file tests/unit/test_xbox_remote_token_store.cpp
+ * @file tests/unit/xbox/test_xbox_remote_token_store.cpp
  * @brief Tests for secure Xbox Remote Play OAuth credential persistence.
  */
 
@@ -16,7 +16,7 @@
 #endif
 
 // local includes
-#include "../tests_common.h"
+#include "tests/tests_common.h"
 #include "src/xbox_remote/token_store.h"
 
 namespace {

@@ -1,28 +1,41 @@
+/**
+ * @file tests/unit/rkmpp/test_rkmpp_stress.cpp
+ * @brief Tests RKMPP encoder lifecycle resource stability.
+ */
+
 #include <gtest/gtest.h>
 
 #ifdef SUNSHINE_BUILD_RKMPP
 
-#include "src/platform/linux/rkmpp.h"
+  #include "src/platform/linux/rkmpp.h"
 
-#include <dirent.h>
+  #include <dirent.h>
 
 namespace {
   int count_fds() {
     int fd_count = 0;
     DIR *dir = opendir("/proc/self/fd");
-    if (!dir) return -1;
-    while (readdir(dir)) fd_count++;
+    if (!dir) {
+      return -1;
+    }
+    while (readdir(dir)) {
+      fd_count++;
+    }
     closedir(dir);
     return fd_count;
   }
-}
+}  // namespace
 
 TEST(RkmppStressTest, EncoderLifecycleNoFdLeaks) {
   // Repeatedly construct and destroy the public RKMPP encoder. This exercises
   // the MPP context/configuration lifetime without relying on video.cpp's
   // private session factory or a stale encode-device mock.
   platf::rkmpp::input_layout_t layout {
-    1920, 1080, 1920, 1080, MPP_FMT_YUV420SP
+    1920,
+    1080,
+    1920,
+    1080,
+    MPP_FMT_YUV420SP
   };
   const platf::rkmpp::encoder_config_t config {
     .codec = platf::rkmpp::codec_e::h264,

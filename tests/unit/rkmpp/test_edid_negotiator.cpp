@@ -1,3 +1,8 @@
+/**
+ * @file tests/unit/rkmpp/test_edid_negotiator.cpp
+ * @brief Tests HDMI RX session EDID negotiation and fallback behavior.
+ */
+
 #include "src/platform/linux/edid.h"
 #include "src/platform/linux/input_state_machine.h"
 

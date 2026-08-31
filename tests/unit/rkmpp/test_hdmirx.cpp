@@ -1,5 +1,5 @@
 /**
- * @file tests/unit/platform/test_hdmirx.cpp
+ * @file tests/unit/rkmpp/test_hdmirx.cpp
  * @brief Unit tests for HDMI RX format mapping.
  */
 #include "../../tests_common.h"

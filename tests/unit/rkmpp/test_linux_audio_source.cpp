@@ -1,5 +1,5 @@
 /**
- * @file tests/unit/platform/test_linux_audio_source.cpp
+ * @file tests/unit/rkmpp/test_linux_audio_source.cpp
  * @brief Tests for Linux audio source selection.
  */
 #include "../../tests_common.h"

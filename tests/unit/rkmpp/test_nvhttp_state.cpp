@@ -1,5 +1,5 @@
 /**
- * @file tests/unit/test_nvhttp_state.cpp
+ * @file tests/unit/rkmpp/test_nvhttp_state.cpp
  * @brief Tests isolated GameStream state loading behavior.
  */
 

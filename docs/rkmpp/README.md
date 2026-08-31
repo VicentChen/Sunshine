@@ -105,8 +105,9 @@ SKIP_SUBMODULES=1 ./scripts/build-rkmpp.sh
 ~~~
 
 SKIP_APT 和 SKIP_BREW 仅适用于已确认依赖完备的机器。默认关闭文档、第三方自测、
-CUDA 和托盘；Sunshine 的 RKMPP 专用测试保持启用。脚本会构建 `sunshine`、
-`test_sunshine_rkmpp` 和 `xbox-remote-probe`。
+CUDA 和托盘；Sunshine 的项目专用测试保持启用。脚本会构建 `sunshine`、
+`test_sunshine_rkmpp`、`test_sunshine_ns`、`test_sunshine_xbox` 和
+`xbox-remote-probe`。
 
 ## 启动脚本
 
@@ -248,14 +249,17 @@ audio_source = alsa_input.platform-hdmiin-sound.HDMI__hw_rockchiphdmiin__source.
 
 ## 测试
 
-`scripts/build-rkmpp.sh` 会生成隔离用户配对状态的专用测试：
+`scripts/build-rkmpp.sh` 会生成三个相互独立、并与用户配对状态隔离的专用测试模块：
 
 ~~~bash
 ./build-rkmpp-review/tests/test_sunshine_rkmpp
+./build-rkmpp-review/tests/test_sunshine_ns
+./build-rkmpp-review/tests/test_sunshine_xbox
 ~~~
 
-RKMPP 工作不得运行通用 `test_sunshine`。专用目标不会编译或运行
-`tests/unit/test_http_pairing.cpp`，并使用独立的测试状态路径。
+三个模块的源码分别位于 `tests/unit/rkmpp/`、`tests/unit/ns/` 和
+`tests/unit/xbox/`。项目专用工作不得运行上游通用 `test_sunshine`；模块目标不会编译
+或运行 `tests/unit/test_http_pairing.cpp`，并各自使用独立的测试状态路径。
 
 ## 日志检查与性能耗时
 

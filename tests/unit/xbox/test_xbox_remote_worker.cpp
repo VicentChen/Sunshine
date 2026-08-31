@@ -1,9 +1,9 @@
 /**
- * @file tests/unit/test_xbox_remote_worker.cpp
+ * @file tests/unit/xbox/test_xbox_remote_worker.cpp
  * @brief Tests for the cancellable Xbox Remote Play background worker.
  */
 
-#include "../tests_common.h"
+#include "tests/tests_common.h"
 #include "src/xbox_remote/worker.h"
 
 #ifdef SUNSHINE_XBOX_REMOTE_PLAY

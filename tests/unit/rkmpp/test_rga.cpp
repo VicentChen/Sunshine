@@ -1,5 +1,5 @@
 /**
- * @file tests/unit/platform/test_rga.cpp
+ * @file tests/unit/rkmpp/test_rga.cpp
  * @brief Unit tests for the hardware-independent librga wrapper boundary.
  */
 #include <linux/videodev2.h>
