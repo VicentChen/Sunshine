@@ -404,6 +404,8 @@
     "qsv_slow_hevc": "Allow Slow HEVC Encoding",
     "qsv_slow_hevc_desc": "This can enable HEVC encoding on older Intel GPUs, at the cost of higher GPU usage and worse performance.",
     "restart_note": "Sunshine is restarting to apply changes.",
+    "vulkan_ui": "Enable Vulkan UI",
+    "vulkan_ui_desc": "Master switch for the RKMPP Vulkan UI system. Enabled by default; disabling it bypasses all Vulkan UI rendering and HDMI RX composition.",
     "rkmpp_profile": "Profile HDMI RX and RKMPP Latency",
     "rkmpp_profile_desc": "Collect bounded per-frame host latency statistics for HDMI RX capture, optional RGA conversion, RKMPP encoding, packetization, and network submission. The HDMI RX timestamp is currently end-of-frame, so the first metric is RX EOF to dequeue rather than complete signal-input latency.",
     "rkmpp_profile_overlay": "Show RKMPP Latency Overlay",

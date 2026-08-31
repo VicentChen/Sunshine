@@ -231,7 +231,9 @@ if(${SUNSHINE_ENABLE_VULKAN})
     list(APPEND PLATFORM_LIBRARIES ${VULKAN_LIBRARY})
     list(APPEND PLATFORM_TARGET_FILES
             "${CMAKE_SOURCE_DIR}/src/platform/linux/vulkan_encode.h"
-            "${CMAKE_SOURCE_DIR}/src/platform/linux/vulkan_encode.cpp")
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/vulkan_encode.cpp"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/vulkan_ui.h"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/vulkan_ui.cpp")
 
     # compile GLSL -> SPIR-V -> C include at build time
     set(VULKAN_SHADER_DIR "${CMAKE_BINARY_DIR}/generated-src/shaders")

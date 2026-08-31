@@ -55,13 +55,15 @@ namespace {
       return fill_status;
     }
 
-    platf::rga::status_t check_process(std::uintptr_t, const platf::rga::image_layout_t &, const platf::rga::rectangle_t &, std::uintptr_t, const platf::rga::image_layout_t &, const platf::rga::rectangle_t &) override {
+    platf::rga::status_t check_process(std::uintptr_t, const platf::rga::image_layout_t &, const platf::rga::rectangle_t &, std::uintptr_t, const platf::rga::image_layout_t &, const platf::rga::rectangle_t &, platf::rga::color_space_e color_space) override {
       ++process_checks;
+      last_process_check_color_space = color_space;
       return process_check_status;
     }
 
-    platf::rga::status_t process(std::uintptr_t, const platf::rga::image_layout_t &, const platf::rga::rectangle_t &, std::uintptr_t, const platf::rga::image_layout_t &, const platf::rga::rectangle_t &) override {
+    platf::rga::status_t process(std::uintptr_t, const platf::rga::image_layout_t &, const platf::rga::rectangle_t &, std::uintptr_t, const platf::rga::image_layout_t &, const platf::rga::rectangle_t &, platf::rga::color_space_e color_space) override {
       ++processes;
+      last_process_color_space = color_space;
       return process_status;
     }
 
@@ -97,6 +99,8 @@ namespace {
     int resizes {};
     int color_checks {};
     int color_converts {};
+    platf::rga::color_space_e last_process_check_color_space {platf::rga::color_space_e::default_};
+    platf::rga::color_space_e last_process_color_space {platf::rga::color_space_e::default_};
     std::vector<std::string> events;
     platf::rga::status_t release_status {successful_status()};
     platf::rga::status_t fill_check_status {successful_status()};
@@ -143,6 +147,8 @@ namespace {
    */
   platf::rga::image_layout_t layout_for(platf::rga::pixel_format_e format) {
     switch (format) {
+      case platf::rga::pixel_format_e::rgba8888:
+        return {10, 128, 64, 512, 32'768, format};
       case platf::rga::pixel_format_e::bgr888:
         return {10, 128, 64, 384, 24'576, format};
       case platf::rga::pixel_format_e::nv24:
@@ -178,7 +184,7 @@ namespace {
 
   TEST(RgaImport, ValidatesMinimumAllocationAndStrideForEveryMappedFormat) {
     fake_backend_t backend;
-    for (const auto format : {platf::rga::pixel_format_e::bgr888, platf::rga::pixel_format_e::nv24, platf::rga::pixel_format_e::nv16, platf::rga::pixel_format_e::nv12}) {
+    for (const auto format : {platf::rga::pixel_format_e::rgba8888, platf::rga::pixel_format_e::bgr888, platf::rga::pixel_format_e::nv24, platf::rga::pixel_format_e::nv16, platf::rga::pixel_format_e::nv12}) {
       auto valid = layout_for(format);
       EXPECT_TRUE(platf::rga::imported_buffer_t::import(backend, valid));
       auto undersized = valid;
@@ -284,6 +290,20 @@ namespace {
     EXPECT_EQ(backend.events, (std::vector<std::string> {"close:100"}));
   }
 
+  TEST(RgaTarget, AllocatesPackedRgbaForExternalVulkanImport) {
+    fake_backend_t backend;
+    fake_allocator_t allocator;
+    allocator.events = &backend.events;
+    {
+      auto target = platf::rga::target_buffer_t::allocate_rgba8888(backend, allocator, 320, 180);
+      EXPECT_EQ(target.layout().format, platf::rga::pixel_format_e::rgba8888);
+      EXPECT_EQ(target.layout().stride, 1280U);
+      EXPECT_EQ(target.layout().allocation_size, 230'400U);
+      EXPECT_TRUE(target.rga_buffer());
+    }
+    EXPECT_EQ(backend.events, (std::vector<std::string> {"release:1", "close:100"}));
+  }
+
   TEST(RgaTarget, RejectsOddDimensionsAndInvalidStrideBeforeAllocation) {
     fake_backend_t backend;
     fake_allocator_t allocator;
@@ -316,6 +336,15 @@ namespace {
     EXPECT_EQ(backend.resizes, 1);
     EXPECT_EQ(backend.color_checks, 1);
     EXPECT_EQ(backend.color_converts, 1);
+  }
+
+  TEST(RgaOperations, PreservesExplicitBt709LimitedProcessMode) {
+    fake_backend_t backend;
+    auto source = platf::rga::imported_buffer_t::import(backend, layout_for(platf::rga::pixel_format_e::rgba8888));
+    auto destination = platf::rga::imported_buffer_t::import(backend, nv12_layout(11));
+    platf::rga::process(source, {0, 0, 128, 64}, destination, {0, 0, 128, 64}, platf::rga::color_space_e::rgb_to_yuv_bt709_limited);
+    EXPECT_EQ(backend.last_process_check_color_space, platf::rga::color_space_e::rgb_to_yuv_bt709_limited);
+    EXPECT_EQ(backend.last_process_color_space, platf::rga::color_space_e::rgb_to_yuv_bt709_limited);
   }
 
   TEST(RgaOperations, ConvertsImcheckFailureToErrorAndSkipsOperation) {
@@ -383,8 +412,13 @@ namespace {
     auto destination = platf::rga::imported_buffer_t::import(backend, nv12_layout());
     EXPECT_THROW(platf::rga::fill(destination, {0, 0, 129, 64}, 0), platf::rga::error_t);
     EXPECT_THROW(platf::rga::fill(destination, {1, 0, 126, 64}, 0), platf::rga::error_t);
+    auto source = platf::rga::imported_buffer_t::import(backend, layout_for(platf::rga::pixel_format_e::rgba8888));
+    EXPECT_THROW(platf::rga::process(source, {0, 0, 129, 64}, destination, {0, 0, 128, 64}), platf::rga::error_t);
+    EXPECT_THROW(platf::rga::process(source, {0, 0, 128, 64}, destination, {1, 0, 126, 64}), platf::rga::error_t);
     EXPECT_EQ(backend.fill_checks, 0);
     EXPECT_EQ(backend.fills, 0);
+    EXPECT_EQ(backend.process_checks, 0);
+    EXPECT_EQ(backend.processes, 0);
   }
 
   TEST(RgaBuild, ReportsDisabledWhenTheRequiredSdkWasNotConfigured) {

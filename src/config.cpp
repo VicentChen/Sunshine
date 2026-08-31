@@ -795,7 +795,8 @@ namespace config {
     false,  // rkmpp_profile
     false,  // rkmpp_profile_overlay
     false,  // rkmpp_low_delay
-    false  // rkmpp_disable_reencode
+    false,  // rkmpp_disable_reencode
+    true  // vulkan_ui
   };
 
   /**
@@ -1709,6 +1710,7 @@ namespace config {
     bool_f(vars, "rkmpp_profile_overlay", video.rkmpp_profile_overlay);
     bool_f(vars, "rkmpp_low_delay", video.rkmpp_low_delay);
     bool_f(vars, "rkmpp_disable_reencode", video.rkmpp_disable_reencode);
+    bool_f(vars, "vulkan_ui", video.vulkan_ui);
     if (video.rkmpp_profile_overlay) {
       video.rkmpp_profile = true;
     }

@@ -200,6 +200,7 @@ Bridge 会依次尝试已保存的 Switch；若它们均不可用，会回退到
 
 | 选项 | 配置键 | 默认值 | 作用 |
 | --- | --- | --- | --- |
+| Enable Vulkan UI | `vulkan_ui` | `enabled` | Vulkan UI 唯一总控；关闭后跳过全部 Vulkan UI 渲染和 HDMI RX 合成。 |
 | Profile HDMI RX and RKMPP Latency | `rkmpp_profile` | `disabled` | 采集 HDMI RX、RGA、MPP、封包和发送阶段的有界延迟统计，并周期性写入日志。 |
 | Show RKMPP Latency Overlay | `rkmpp_profile_overlay` | `disabled` | 把最新统计通过 MPP OSD 烧录到 Moonlight 画面；同时启用统计采集。 |
 | RKMPP Low-Delay Experiment | `rkmpp_low_delay` | `disabled` | 启用 MPP low-delay 实验配置。现有 A/B 没有证明它优于默认值，因此保持关闭。 |
@@ -211,11 +212,31 @@ Bridge 会依次尝试已保存的 Switch；若它们均不可用，会回退到
 ~~~text
 capture = hdmirx
 encoder = rkmpp
+vulkan_ui = enabled
 rkmpp_profile = enabled
 rkmpp_profile_overlay = enabled
 rkmpp_low_delay = disabled
 rkmpp_disable_reencode = disabled
 ~~~
+
+### Vulkan UI 总控开关
+
+`vulkan_ui` 是 Vulkan UI 的唯一总控，默认启用。Sunshine 缓存一个 960x180 的不透明
+RGBA DMA-BUF。Vulkan 在 optimal-tiled image 中绘制静态诊断页面，再由 GPU copy 到这块
+共享 buffer；RGA 在直通 HDMI RX buffer 或分辨率/格式转换后的 NV12 target 底部居中、
+距下边缘 32 像素的位置同步执行一次 BT.709 limited 覆盖，然后交给 MPP。页面状态不变时
+不会重复提交 Vulkan 绘制。RGB 与 YUV 色域通过 librga 的 source/destination buffer
+属性显式指定，不能写入 `improcess()` 的 transform usage 位。
+
+~~~text
+vulkan_ui = enabled
+~~~
+
+Gate 4 已通过真实 4K HDMI RX/Moonlight 画面和 4 个 capture slot 连续轮转验证。阶段 5
+也已通过真实 Moonlight 画面复验：首个会话能显示，页面方向、文字和横向布局均正常。
+该静态页面只用于打通渲染与合成链路，后续正式交互层计划接入 ImGui。Vulkan
+初始化、模型校验或单帧 RGA 失败时，Sunshine 会在当前会话中关闭 UI 并继续基本编码。
+若需临时绕过所有 Vulkan UI 路径，可将唯一总控设置为 `vulkan_ui = disabled`。
 
 ## RGA 视频缩放与格式转换
 

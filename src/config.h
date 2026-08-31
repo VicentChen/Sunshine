@@ -208,6 +208,7 @@ namespace config {
     bool rkmpp_profile_overlay;  ///< Burn the latest RKMPP profile snapshot into encoded video.
     bool rkmpp_low_delay;  ///< Request the RKMPP low-delay encoder setting for an A/B experiment.
     bool rkmpp_disable_reencode;  ///< Disable RKMPP rate-control re-encode attempts for an A/B experiment.
+    bool vulkan_ui;  ///< Enable the RKMPP Vulkan UI system and its active implementation stage.
   };
 
   /**

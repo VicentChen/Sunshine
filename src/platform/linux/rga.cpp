@@ -34,10 +34,17 @@ namespace platf::rga {
      * @brief Determine a format's packed bytes per pixel.
      *
      * @param format Wrapper pixel format.
-     * @return Three for BGR888, or one for semi-planar YUV formats.
+     * @return Four for RGBA8888, three for BGR888, or one for semi-planar YUV formats.
      */
     std::uint32_t bytes_per_luma_pixel(pixel_format_e format) noexcept {
-      return format == pixel_format_e::bgr888 ? 3U : 1U;
+      switch (format) {
+        case pixel_format_e::rgba8888:
+          return 4U;
+        case pixel_format_e::bgr888:
+          return 3U;
+        default:
+          return 1U;
+      }
     }
 
     /**
@@ -49,6 +56,8 @@ namespace platf::rga {
      */
     std::uint64_t allocation_rows(pixel_format_e format, std::uint32_t height) noexcept {
       switch (format) {
+        case pixel_format_e::rgba8888:
+          return height;
         case pixel_format_e::nv12:
           return static_cast<std::uint64_t>(height) + height / 2U;
         case pixel_format_e::nv16:
@@ -134,8 +143,8 @@ namespace platf::rga {
       if (layout.stride < minimum_stride) {
         return invalid_status("DMA-BUF stride is smaller than the visible row");
       }
-      if (layout.format == pixel_format_e::bgr888 && layout.stride % 3U != 0) {
-        return invalid_status("BGR888 DMA-BUF stride must contain whole pixels");
+      if ((layout.format == pixel_format_e::rgba8888 && layout.stride % 4U != 0) || (layout.format == pixel_format_e::bgr888 && layout.stride % 3U != 0)) {
+        return invalid_status("packed RGB DMA-BUF stride must contain whole pixels");
       }
       const auto rows = allocation_rows(layout.format, layout.height);
       if (rows == 0 || rows > std::numeric_limits<std::uint64_t>::max() / layout.stride) {
@@ -273,6 +282,8 @@ namespace platf::rga {
      */
     int native_format(pixel_format_e format) noexcept {
       switch (format) {
+        case pixel_format_e::rgba8888:
+          return RK_FORMAT_RGBA_8888;
         case pixel_format_e::bgr888:
           return RK_FORMAT_BGR_888;
         case pixel_format_e::nv24:
@@ -283,6 +294,14 @@ namespace platf::rga {
           return RK_FORMAT_YCbCr_420_SP;
       }
       return RK_FORMAT_YCbCr_420_SP;
+    }
+
+    /** @brief Configure librga buffer color spaces without changing transform usage bits. */
+    void configure_color_space(rga_buffer_t &source, rga_buffer_t &destination, color_space_e color_space) noexcept {
+      if (color_space == color_space_e::rgb_to_yuv_bt709_limited) {
+        imsetColorSpace(&source, IM_RGB_FULL_RANGE);
+        imsetColorSpace(&destination, IM_YUV_BT709_LIMIT_RANGE);
+      }
     }
 
     /**
@@ -355,12 +374,18 @@ namespace platf::rga {
         return native_status(imfill(native_buffer(destination, destination_layout), native_rectangle(rectangle), color, IM_SYNC), IM_STATUS_SUCCESS);
       }
 
-      status_t check_process(std::uintptr_t source, const image_layout_t &source_layout, const rectangle_t &source_rect, std::uintptr_t destination, const image_layout_t &destination_layout, const rectangle_t &destination_rect) override {
-        return native_status(imcheck(native_buffer(source, source_layout), native_buffer(destination, destination_layout), native_rectangle(source_rect), native_rectangle(destination_rect)), IM_STATUS_NOERROR);
+      status_t check_process(std::uintptr_t source, const image_layout_t &source_layout, const rectangle_t &source_rect, std::uintptr_t destination, const image_layout_t &destination_layout, const rectangle_t &destination_rect, color_space_e color_space) override {
+        auto native_source = native_buffer(source, source_layout);
+        auto native_destination = native_buffer(destination, destination_layout);
+        configure_color_space(native_source, native_destination, color_space);
+        return native_status(imcheck(native_source, native_destination, native_rectangle(source_rect), native_rectangle(destination_rect)), IM_STATUS_NOERROR);
       }
 
-      status_t process(std::uintptr_t source, const image_layout_t &source_layout, const rectangle_t &source_rect, std::uintptr_t destination, const image_layout_t &destination_layout, const rectangle_t &destination_rect) override {
-        return native_status(improcess(native_buffer(source, source_layout), native_buffer(destination, destination_layout), {}, native_rectangle(source_rect), native_rectangle(destination_rect), {}, IM_SYNC), IM_STATUS_SUCCESS);
+      status_t process(std::uintptr_t source, const image_layout_t &source_layout, const rectangle_t &source_rect, std::uintptr_t destination, const image_layout_t &destination_layout, const rectangle_t &destination_rect, color_space_e color_space) override {
+        auto native_source = native_buffer(source, source_layout);
+        auto native_destination = native_buffer(destination, destination_layout);
+        configure_color_space(native_source, native_destination, color_space);
+        return native_status(improcess(native_source, native_destination, {}, native_rectangle(source_rect), native_rectangle(destination_rect), {}, IM_SYNC), IM_STATUS_SUCCESS);
       }
 
       status_t check_resize(std::uintptr_t source, const image_layout_t &source_layout, std::uintptr_t destination, const image_layout_t &destination_layout) override {
@@ -495,6 +520,40 @@ namespace platf::rga {
     }
   }
 
+  target_buffer_t target_buffer_t::allocate_rgba8888(backend_t &backend, dma_allocator_t &allocator, std::uint32_t width, std::uint32_t height, std::uint32_t stride) {
+    if (width == 0 || height == 0 || width > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) || height > static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+      throw error_t("RGBA8888 target allocation", invalid_status("RGBA8888 target dimensions must be positive and fit librga int parameters"));
+    }
+    const auto minimum_stride = static_cast<std::uint64_t>(width) * 4U;
+    if (minimum_stride > std::numeric_limits<std::uint32_t>::max()) {
+      throw error_t("RGBA8888 target allocation", invalid_status("RGBA8888 target stride exceeds uint32 capacity"));
+    }
+    if (stride == 0) {
+      stride = static_cast<std::uint32_t>(minimum_stride);
+    }
+    if (stride < minimum_stride || stride % 4U != 0 || stride > static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+      throw error_t("RGBA8888 target allocation", invalid_status("RGBA8888 target stride must hold complete four-byte pixels and fit librga int parameters"));
+    }
+    if (static_cast<std::uint64_t>(stride) > std::numeric_limits<std::uint64_t>::max() / height) {
+      throw error_t("RGBA8888 target allocation", invalid_status("RGBA8888 target allocation arithmetic overflow"));
+    }
+    const auto allocation_size = static_cast<std::uint64_t>(stride) * height;
+    if (allocation_size > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+      throw error_t("RGBA8888 target allocation", invalid_status("RGBA8888 target allocation exceeds librga importbuffer_fd(int size) capacity"));
+    }
+    const auto dma_buf_fd = allocator.allocate(allocation_size);
+    if (dma_buf_fd < 0) {
+      throw error_t("RGBA8888 target allocation", invalid_status("allocator returned an invalid DMA-BUF descriptor"));
+    }
+    try {
+      auto buffer = imported_buffer_t::import(backend, {dma_buf_fd, width, height, stride, allocation_size, pixel_format_e::rgba8888});
+      return target_buffer_t(&allocator, dma_buf_fd, std::move(buffer));
+    } catch (...) {
+      allocator.close(dma_buf_fd);
+      throw;
+    }
+  }
+
   imported_buffer_t &target_buffer_t::rga_buffer() noexcept {
     return buffer_;
   }
@@ -556,15 +615,17 @@ namespace platf::rga {
     require_success("imfill", destination.backend_->fill(destination.handle_, destination.layout_, rectangle, color));
   }
 
-  void process(const imported_buffer_t &source, const rectangle_t &source_rect, imported_buffer_t &destination, const rectangle_t &destination_rect) {
+  void process(const imported_buffer_t &source, const rectangle_t &source_rect, imported_buffer_t &destination, const rectangle_t &destination_rect, color_space_e color_space) {
     if (!source || !destination) {
       throw error_t("improcess", invalid_status("source or destination RGA handle is empty"));
     }
     if (source.backend_ != destination.backend_) {
       throw error_t("improcess", invalid_status("source and destination RGA handles belong to different backends"));
     }
-    require_success("imcheck(process)", source.backend_->check_process(source.handle_, source.layout_, source_rect, destination.handle_, destination.layout_, destination_rect));
-    require_success("improcess", source.backend_->process(source.handle_, source.layout_, source_rect, destination.handle_, destination.layout_, destination_rect));
+    require_success("improcess source rectangle validation", validate_rectangle(source.layout_, source_rect));
+    require_success("improcess destination rectangle validation", validate_rectangle(destination.layout_, destination_rect));
+    require_success("imcheck(process)", source.backend_->check_process(source.handle_, source.layout_, source_rect, destination.handle_, destination.layout_, destination_rect, color_space));
+    require_success("improcess", source.backend_->process(source.handle_, source.layout_, source_rect, destination.handle_, destination.layout_, destination_rect, color_space));
   }
 
   void resize(const imported_buffer_t &source, imported_buffer_t &destination) {

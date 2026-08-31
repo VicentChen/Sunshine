@@ -82,6 +82,20 @@ HDMI RX VIDIOC_DQBUF
 
 Gate 4 只验证真实 capture buffer，不引入正式 UI。
 
+### 当前实施状态（2026-08-31）
+
+- 已加入唯一的 `vulkan_ui` 总控开关，默认启用；关闭后跳过全部 Vulkan UI 路径。
+- 已支持外部分配并导入 RGA 的 RGBA8888 DMA-BUF，以及显式 BT.709 limited
+  `RGBA -> NV12 ROI` 同步处理。
+- 直通编码会在 MPP 提交前覆盖仍由 `captured_frame_t` lease 持有的同一 HDMI RX FD；
+  capture generation 变化时清空旧 RGA import cache。
+- 初始化、布局校验或 RGA 失败会关闭本会话的 overlay，并继续基本编码路径。
+- Moonlight 4K 实机画面已确认底部居中的不透明测试区域位置正确，区域外画面正常。
+- 运行日志确认同一 capture generation 的 4 个 slot 全部轮转导入；一次连续会话同步合成
+  2,462 帧并正常释放，未出现 RGA import、MPP timeout 或 V4L2 queue starvation。
+- Gate 4 状态为 **PASS**。该结论只覆盖真实 HDMI RX DMA-BUF 原位合成，不替代后续
+  Vulkan 页面、输入截获和 action 的独立验收。
+
 ### 工作
 
 1. 从已 `DQBUF` 的 `captured_frame_t` 取得当前 plane 的 DMA-BUF FD、stride、
@@ -104,6 +118,27 @@ Gate 4 只验证真实 capture buffer，不引入正式 UI。
 - Gate 4 未通过前，不宣称真实 HDMI RX 原位合成可用于正式 UI。
 
 ## 阶段 5：Vulkan UI 渲染后端
+
+### 当前实施状态（2026-08-31）
+
+- 已加入独立的 `vulkan_ui` render model 与长生命周期 Vulkan renderer；renderer 持有
+  instance、所选硬件 device、queue、command pool、command buffer 和 fence。
+- 960x180 RGBA DMA-BUF 由 CMA allocator 外部分配，Vulkan 只导入重复的 FD；绘制先在
+  optimal-tiled image 中完成，再由 GPU copy 到共享线性 buffer，原 FD 同时由 RGA 持有。
+- 首个静态诊断页面是底部横向栏，包含不透明背景、标题、三个从左到右排列的项目、
+  焦点高亮、开关/状态和值，以及 5x7 位图文字；相同 revision 直接复用缓存，不提交
+  Vulkan 工作。它只用于打通后端，
+  不再扩展为正式 UI；后续交互层计划接入 ImGui。
+- Vulkan fence 完成并将 buffer ownership 释放给 external queue family 后，RGA 才能读取；
+  生产路径不 mmap 或读取 UI 像素。
+- 首轮实机发现两个问题：RGBA -> NV12 的 BT.709 mode 被错误并入 `improcess()` usage，
+  其数值与 rotate/flip 位重叠，导致面板旋转压缩；首个会话走 RGA 转换路径时也未执行
+  UI 覆盖。现已改为在 librga source/destination buffer 上配置色域，并让直通与 RGA
+  回退复用同一个 Vulkan 缓存和 RGA backend/allocator；Vulkan 保持正常的 top-origin 坐标。
+- 新增 model 边界、opacity 和横向静态布局测试；一次性硬件诊断确认 Vulkan RGBA 原图与
+  RGA `RGBA -> NV12 -> RGBA` 回读方向一致，文字保持正向；RKMPP 专用测试 188/188 通过。
+- 修复二进制已部署并通过真实 Moonlight 画面复验：首个会话即显示，页面方向、文字与
+  横向布局正常；运行日志确认走 RGA fallback target 后完成同步合成。阶段 5 状态为 **PASS**。
 
 ### 资源模型
 
@@ -220,7 +255,7 @@ Sunshine controller event
 ## 失败处理与回滚
 
 - Gate 4、Vulkan 初始化或 UI renderer 失败时，关闭新 UI 合成并继续现有 HDMI RX -> MPP 路径。
-- 新 UI 使用独立运行时开关，首个版本默认关闭。
+- 新 UI 只使用唯一的 `vulkan_ui` 总控开关，默认启用；关闭后跳过全部 Vulkan UI 路径。
 - 保留现有 MPP OSD/Profile HUD 作为迁移期间回退，不在同一变更中删除。
 - 任何异常路径都必须释放 RGA/Vulkan 引用，并保证已 `DQBUF` 的 slot 最终能够安全 `QBUF`。
 - 不修改 HDMI RX 驱动配置、GPU 驱动或系统 Vulkan ICD 作为功能运行时的一部分。

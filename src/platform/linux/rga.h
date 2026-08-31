@@ -16,10 +16,19 @@ namespace platf::rga {
    * @brief Pixel layouts accepted by the RGA wrapper.
    */
   enum class pixel_format_e {
+    rgba8888,  ///< Packed RGBA, eight bits per component.
     bgr888,  ///< Packed BGR, eight bits per component.
     nv24,  ///< Semi-planar YUV 4:4:4.
     nv16,  ///< Semi-planar YUV 4:2:2.
     nv12,  ///< Semi-planar YUV 4:2:0.
+  };
+
+  /**
+   * @brief Explicit color conversion requested for a process operation.
+   */
+  enum class color_space_e {
+    default_,  ///< Let librga select its default conversion.
+    rgb_to_yuv_bt709_limited,  ///< Convert RGB to Rec.709 limited-range YUV.
   };
 
   /**
@@ -138,9 +147,9 @@ namespace platf::rga {
      * @param destination_layout Destination image metadata.
      * @return Native status and error text.
      */
-    virtual status_t check_process(std::uintptr_t source, const image_layout_t &source_layout, const rectangle_t &source_rect, std::uintptr_t destination, const image_layout_t &destination_layout, const rectangle_t &destination_rect) = 0;
+    virtual status_t check_process(std::uintptr_t source, const image_layout_t &source_layout, const rectangle_t &source_rect, std::uintptr_t destination, const image_layout_t &destination_layout, const rectangle_t &destination_rect, color_space_e color_space) = 0;
 
-    virtual status_t process(std::uintptr_t source, const image_layout_t &source_layout, const rectangle_t &source_rect, std::uintptr_t destination, const image_layout_t &destination_layout, const rectangle_t &destination_rect) = 0;
+    virtual status_t process(std::uintptr_t source, const image_layout_t &source_layout, const rectangle_t &source_rect, std::uintptr_t destination, const image_layout_t &destination_layout, const rectangle_t &destination_rect, color_space_e color_space) = 0;
 
     virtual status_t check_resize(std::uintptr_t source, const image_layout_t &source_layout, std::uintptr_t destination, const image_layout_t &destination_layout) = 0;
 
@@ -269,8 +278,7 @@ namespace platf::rga {
     friend void fill(imported_buffer_t &, const rectangle_t &, std::uint32_t);
     friend void resize(const imported_buffer_t &, imported_buffer_t &);
     friend void color_convert(const imported_buffer_t &, imported_buffer_t &);
-    friend void process(const imported_buffer_t &, const rectangle_t &, imported_buffer_t &, const rectangle_t &);
-
+    friend void process(const imported_buffer_t &, const rectangle_t &, imported_buffer_t &, const rectangle_t &, color_space_e);
   };
 
   /**
@@ -310,6 +318,22 @@ namespace platf::rga {
      * @throws error_t When allocation, validation, or RGA import fails.
      */
     static target_buffer_t allocate_nv12(backend_t &backend, dma_allocator_t &allocator, std::uint32_t width, std::uint32_t height, std::uint32_t stride = 0);
+
+    /**
+     * @brief Allocate and import a packed RGBA8888 DMA-BUF.
+     *
+     * This is the external-allocation direction required by the Mali Vulkan
+     * driver: a later Vulkan backend may import and write the same DMA-BUF,
+     * while Gate 4 can populate it once with RGA.
+     *
+     * @param backend Backend that will import the DMA-BUF.
+     * @param allocator DMA-BUF allocator that retains descriptor ownership.
+     * @param width Visible width in pixels.
+     * @param height Visible height in pixels.
+     * @param stride Byte stride, or zero for tightly packed RGBA rows.
+     * @return An owning RGBA target buffer.
+     */
+    static target_buffer_t allocate_rgba8888(backend_t &backend, dma_allocator_t &allocator, std::uint32_t width, std::uint32_t height, std::uint32_t stride = 0);
 
     /**
      * @brief Access the imported target buffer.
@@ -392,7 +416,7 @@ namespace platf::rga {
    * @param destination Imported destination buffer.
    * @throws error_t When validation, `imcheck()`, or `imresize()` fails.
    */
-  void process(const imported_buffer_t &source, const rectangle_t &source_rect, imported_buffer_t &destination, const rectangle_t &destination_rect);
+  void process(const imported_buffer_t &source, const rectangle_t &source_rect, imported_buffer_t &destination, const rectangle_t &destination_rect, color_space_e color_space = color_space_e::default_);
 
   void resize(const imported_buffer_t &source, imported_buffer_t &destination);
 

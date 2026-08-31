@@ -13,6 +13,13 @@ const config = ref(props.config)
 <template>
   <div id="rockchip-mpp-encoder" class="config-page">
     <Checkbox class="mb-3"
+              id="vulkan_ui"
+              locale-prefix="config"
+              v-model="config.vulkan_ui"
+              default="true"
+    ></Checkbox>
+
+    <Checkbox class="mb-3"
               id="rkmpp_profile"
               locale-prefix="config"
               v-model="config.rkmpp_profile"

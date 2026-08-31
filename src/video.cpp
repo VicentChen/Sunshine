@@ -10,6 +10,7 @@
 #include <limits>
 #include <list>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 
 // lib includes
@@ -41,6 +42,9 @@ extern "C" {
   #include "platform/linux/hdmirx.h"
   #include "platform/linux/rga.h"
   #include "platform/linux/rkmpp.h"
+  #ifdef SUNSHINE_BUILD_VULKAN
+    #include "platform/linux/vulkan_ui.h"
+  #endif
 #endif
 
 #ifdef _WIN32
@@ -1978,15 +1982,187 @@ namespace video {
     return {config.videoFormat == 0 ? platf::rkmpp::codec_e::h264 : platf::rkmpp::codec_e::h265, input_layout, static_cast<std::uint32_t>(config.width), static_cast<std::uint32_t>(config.height), static_cast<std::uint32_t>(fps.num), static_cast<std::uint32_t>(fps.den), static_cast<std::uint32_t>(config.bitrate) * 1000U, static_cast<std::uint32_t>(gop), ::config::video.rkmpp_low_delay, ::config::video.rkmpp_disable_reencode};
   }
 
+  /**
+   * @brief Cache a Vulkan-rendered UI and cover each live HDMI RX DMA-BUF ROI.
+   *
+   * The externally allocated RGBA DMA-BUF is imported by both the long-lived
+   * Vulkan renderer and RGA. Vulkan updates it only when the model revision
+   * changes; RGA synchronously covers the cached panel into each leased frame.
+   */
+  class rkmpp_vulkan_ui_session_t {
+  public:
+    rkmpp_vulkan_ui_session_t():
+        backend_(platf::rga::make_backend()),
+        allocator_(platf::rga::make_cma_dma_allocator()) {
+      if (!backend_ || !allocator_) {
+        throw std::runtime_error("Vulkan UI failed to initialize RGA resources");
+      }
+      source_ = platf::rga::target_buffer_t::allocate_rgba8888(*backend_, *allocator_, panel_width, panel_height);
+#ifdef SUNSHINE_BUILD_VULKAN
+      const auto &layout = source_.layout();
+      renderer_ = platf::vulkan_ui::renderer_t::create(layout.dma_buf_fd, layout.allocation_size, layout.width, layout.height, layout.stride);
+      const auto model = platf::vulkan_ui::make_gate5_static_model(panel_width, panel_height);
+      if (!renderer_->render(model)) {
+        throw std::runtime_error("Vulkan UI initial model was unexpectedly cached");
+      }
+      BOOST_LOG(info) << "RKMPP Vulkan UI stage 5 enabled on " << renderer_->device_name()
+                      << ": rendered revision=" << renderer_->rendered_revision() << " into cached "
+                      << panel_width << 'x' << panel_height
+                      << " RGBA DMA-BUF, ROI=bottom-center margin=" << panel_margin;
+#else
+      throw std::runtime_error("Sunshine was built without Vulkan UI support");
+#endif
+    }
+
+    /** @brief Report the successfully exercised live-buffer path at teardown. */
+    ~rkmpp_vulkan_ui_session_t() {
+      if (frames_composed_ != 0) {
+        BOOST_LOG(info) << "RKMPP Vulkan UI stopped: composed=" << frames_composed_
+                        << " capture_generations=" << capture_generations_
+                        << " imported_slots=" << imported_slots_;
+      }
+    }
+
+    /** @brief Return the shared native RGA backend used by UI source imports. */
+    platf::rga::backend_t &rga_backend() noexcept {
+      return *backend_;
+    }
+
+    /** @brief Return the allocator that must outlive UI and converted targets. */
+    platf::rga::dma_allocator_t &rga_allocator() noexcept {
+      return *allocator_;
+    }
+
+    /** @brief Cover the cached panel into an imported NV12 destination. */
+    void compose_into(platf::rga::imported_buffer_t &destination) {
+      const auto &layout = destination.layout();
+      if (layout.format != platf::rga::pixel_format_e::nv12 || (layout.width & 1U) != 0 || (layout.height & 1U) != 0) {
+        throw std::runtime_error("Vulkan UI requires an even-sized NV12 destination");
+      }
+      if (layout.width < panel_width || layout.height < panel_height + panel_margin) {
+        throw std::runtime_error("Vulkan UI ROI exceeds the destination frame");
+      }
+      const auto allocation_rows = static_cast<std::uint64_t>(layout.height) + layout.height / 2U;
+      if (layout.stride < layout.width || allocation_rows > std::numeric_limits<std::uint64_t>::max() / layout.stride || layout.allocation_size < allocation_rows * layout.stride) {
+        throw std::runtime_error("Vulkan UI destination layout is invalid");
+      }
+      const auto panel_left = ((layout.width - panel_width) / 2U) & ~1U;
+      const auto panel_top = layout.height - panel_height - panel_margin;
+      platf::rga::process(
+        source_.rga_buffer(),
+        {0, 0, panel_width, panel_height},
+        destination,
+        {panel_left, panel_top, panel_width, panel_height},
+        platf::rga::color_space_e::rgb_to_yuv_bt709_limited
+      );
+      ++frames_composed_;
+      if (frames_composed_ == 1) {
+        BOOST_LOG(info) << "RKMPP Vulkan UI first DMA-BUF composition completed synchronously"sv;
+      }
+    }
+
+    /** @brief Synchronously compose into a dequeued, exclusively leased frame. */
+    void compose(platf::hdmirx::hdmirx_img_t &image) {
+      if (!image.frame || !image.capture_format || image.frame->planes().size() != 1 || image.capture_format->planes.size() != 1) {
+        throw std::runtime_error("Vulkan UI requires one live HDMI RX plane");
+      }
+      const auto &format = *image.capture_format;
+      const auto &plane = image.frame->planes().front();
+      if (format.mpp_format != MPP_FMT_YUV420SP || (format.width & 1U) != 0 || (format.height & 1U) != 0) {
+        throw std::runtime_error("Vulkan UI requires an even-sized NV12 HDMI RX frame");
+      }
+      if (plane.data_offset != 0) {
+        throw std::runtime_error("Vulkan UI does not support a nonzero HDMI RX DMA-BUF data offset");
+      }
+      const auto allocation_rows = static_cast<std::uint64_t>(format.height) + format.height / 2U;
+      if (plane.bytesperline < format.width || allocation_rows > std::numeric_limits<std::uint64_t>::max() / plane.bytesperline) {
+        throw std::runtime_error("Vulkan UI HDMI RX stride is invalid");
+      }
+      const auto required_size = allocation_rows * plane.bytesperline;
+      if (plane.payload_bytes < required_size || plane.sizeimage < required_size || plane.allocation_size < required_size) {
+        throw std::runtime_error("Vulkan UI HDMI RX DMA-BUF is smaller than its NV12 layout");
+      }
+
+      const auto generation = image.frame->generation();
+      if (!capture_generation_ || *capture_generation_ != generation) {
+        destinations_.clear();
+        capture_generation_ = generation;
+        ++capture_generations_;
+        BOOST_LOG(info) << "RKMPP Vulkan UI capture generation=" << generation
+                        << " dimensions=" << format.width << 'x' << format.height
+                        << " stride=" << plane.bytesperline
+                        << " allocation=" << plane.allocation_size;
+      }
+      const auto index = image.frame->buffer_index();
+      auto destination = destinations_.find(index);
+      if (destination == destinations_.end()) {
+        platf::rga::image_layout_t layout {
+          .dma_buf_fd = plane.dma_buf_fd,
+          .width = format.width,
+          .height = format.height,
+          .stride = plane.bytesperline,
+          .allocation_size = plane.allocation_size,
+          .format = platf::rga::pixel_format_e::nv12
+        };
+        destination = destinations_.emplace(index, platf::rga::imported_buffer_t::import(*backend_, layout)).first;
+        ++imported_slots_;
+        BOOST_LOG(info) << "RKMPP Vulkan UI imported capture slot=" << index
+                        << " fd=" << plane.dma_buf_fd
+                        << " generation=" << generation;
+      }
+
+      if (image.frame_profile) {
+        image.frame_profile->rga_used = true;
+        image.frame_profile->rga_begin = std::chrono::steady_clock::now();
+      }
+      compose_into(destination->second);
+      if (image.frame_profile) {
+        image.frame_profile->rga_end = std::chrono::steady_clock::now();
+      }
+    }
+
+  private:
+    static constexpr std::uint32_t panel_margin = 32;
+    static constexpr std::uint32_t panel_width = 960;
+    static constexpr std::uint32_t panel_height = 180;
+
+    std::unique_ptr<platf::rga::backend_t> backend_;
+    std::unique_ptr<platf::rga::dma_allocator_t> allocator_;
+    platf::rga::target_buffer_t source_;
+#ifdef SUNSHINE_BUILD_VULKAN
+    std::unique_ptr<platf::vulkan_ui::renderer_t> renderer_;
+#endif
+    std::unordered_map<std::uint32_t, platf::rga::imported_buffer_t> destinations_;
+    std::optional<std::uint64_t> capture_generation_;
+    std::uint64_t frames_composed_ {};
+    std::uint64_t capture_generations_ {};
+    std::uint64_t imported_slots_ {};
+  };
+
   class rkmpp_rga_encode_session_t final: public encode_session_t {
   public:
     platf::rkmpp::input_layout_t source_input_layout_;
 
-    rkmpp_rga_encode_session_t(const config_t &config, const platf::rkmpp::input_layout_t &input_layout, std::uint32_t coded_width, std::uint32_t coded_height):
+    rkmpp_rga_encode_session_t(const config_t &config, const platf::rkmpp::input_layout_t &input_layout, std::uint32_t coded_width, std::uint32_t coded_height, std::shared_ptr<rkmpp_vulkan_ui_session_t> vulkan_ui = {}):
         source_input_layout_(input_layout),
-        rga_backend_(platf::rga::make_backend()),
-        rga_allocator_(platf::rga::make_cma_dma_allocator()),
+        vulkan_ui_(std::move(vulkan_ui)),
         video_format_(config.videoFormat) {
+      if (!vulkan_ui_ && ::config::video.vulkan_ui) {
+        try {
+          vulkan_ui_ = std::make_shared<rkmpp_vulkan_ui_session_t>();
+        } catch (const std::exception &e) {
+          BOOST_LOG(error) << "RKMPP Vulkan UI initialization failed in RGA path; continuing without overlay: " << e.what();
+        }
+      }
+      if (vulkan_ui_) {
+        rga_backend_ = &vulkan_ui_->rga_backend();
+        rga_allocator_ = &vulkan_ui_->rga_allocator();
+      } else {
+        owned_rga_backend_ = platf::rga::make_backend();
+        owned_rga_allocator_ = platf::rga::make_cma_dma_allocator();
+        rga_backend_ = owned_rga_backend_.get();
+        rga_allocator_ = owned_rga_allocator_.get();
+      }
       if (!rga_backend_ || !rga_allocator_) {
         throw std::runtime_error("Failed to initialize RGA backend or allocator");
       }
@@ -2091,6 +2267,19 @@ namespace video {
         platf::rga::rectangle_t rga_src {viewport->source.left, viewport->source.top, viewport->source.width, viewport->source.height};
         platf::rga::rectangle_t rga_dst {viewport->destination.left, viewport->destination.top, viewport->destination.width, viewport->destination.height};
         platf::rga::process(src_rga, rga_src, target_buf->rga_buffer(), rga_dst);
+        if (vulkan_ui_ && vulkan_ui_enabled_) {
+          try {
+            vulkan_ui_->compose_into(target_buf->rga_buffer());
+            if (!vulkan_ui_rga_logged_) {
+              vulkan_ui_rga_logged_ = true;
+              BOOST_LOG(info) << "RKMPP Vulkan UI active on RGA fallback target "
+                              << target_resolution_.width << 'x' << target_resolution_.height;
+            }
+          } catch (const std::exception &e) {
+            vulkan_ui_enabled_ = false;
+            BOOST_LOG(error) << "RKMPP Vulkan UI RGA-path composition failed; disabling overlay for this session: " << e.what();
+          }
+        }
         if (image->frame_profile) {
           image->frame_profile->rga_end = std::chrono::steady_clock::now();
         }
@@ -2228,8 +2417,11 @@ namespace video {
               }};
     }
 
-    std::unique_ptr<platf::rga::backend_t> rga_backend_;
-    std::unique_ptr<platf::rga::dma_allocator_t> rga_allocator_;
+    std::shared_ptr<rkmpp_vulkan_ui_session_t> vulkan_ui_;
+    std::unique_ptr<platf::rga::backend_t> owned_rga_backend_;
+    std::unique_ptr<platf::rga::dma_allocator_t> owned_rga_allocator_;
+    platf::rga::backend_t *rga_backend_ {};
+    platf::rga::dma_allocator_t *rga_allocator_ {};
     std::mutex pool_mutex_;
     std::queue<rga_target_slot_t> free_buffers_;
 
@@ -2244,6 +2436,8 @@ namespace video {
     std::uint64_t rga_input_generation_ {1};  ///< Fixed pool generation; a session recreation destroys its cache.
     bool ready_ {false};
     bool force_idr_ {false};
+    bool vulkan_ui_enabled_ {true};
+    bool vulkan_ui_rga_logged_ {false};
     int video_format_;
   };
 
@@ -2255,7 +2449,15 @@ namespace video {
         input_layout_(input_layout),
         config_(config),
         encoder_(platf::rkmpp::encoder_t::create(make_rkmpp_encoder_config(config, input_layout))),
-        video_format_(config.videoFormat) {}
+        video_format_(config.videoFormat) {
+      if (config::video.vulkan_ui) {
+        try {
+          vulkan_ui_ = std::make_shared<rkmpp_vulkan_ui_session_t>();
+        } catch (const std::exception &e) {
+          BOOST_LOG(error) << "RKMPP Vulkan UI initialization failed; continuing without overlay: " << e.what();
+        }
+      }
+    }
 
     int convert(platf::img_t &img) override {
       image_ = dynamic_cast<platf::hdmirx::hdmirx_img_t *>(&img);
@@ -2332,6 +2534,14 @@ namespace video {
       }
       if (!image_ || !image_->frame) {
         throw std::runtime_error("RKMPP encode called without an HDMI RX frame");
+      }
+      if (vulkan_ui_) {
+        try {
+          vulkan_ui_->compose(*image_);
+        } catch (const std::exception &e) {
+          BOOST_LOG(error) << "RKMPP Vulkan UI composition failed; disabling overlay for this session: " << e.what();
+          vulkan_ui_.reset();
+        }
       }
       profile_overlay_.refresh(encoder_);
       if (force_idr_) {
@@ -2412,7 +2622,8 @@ namespace video {
             config_,
             input_layout_,
             static_cast<std::uint32_t>(config_.width),
-            static_cast<std::uint32_t>(config_.height)
+            static_cast<std::uint32_t>(config_.height),
+            vulkan_ui_
           );
         }
         if (force_idr_) {
@@ -2430,6 +2641,7 @@ namespace video {
     config_t config_;
     platf::rkmpp::encoder_t encoder_;
     platf::hdmirx::hdmirx_img_t *image_ {};
+    std::shared_ptr<rkmpp_vulkan_ui_session_t> vulkan_ui_;
     std::unique_ptr<rkmpp_rga_encode_session_t> rga_fallback_;
     std::optional<frame_profile_t> current_profile_;
     std::optional<frame_profile_t> encoded_profile_;
