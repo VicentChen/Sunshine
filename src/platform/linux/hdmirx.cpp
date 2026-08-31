@@ -818,7 +818,7 @@ namespace platf {
         if (orig_edid) {
           modes = platf::edid::parse_edid_modes(*orig_edid);
         }
-        negotiator_.start_negotiation(moonlight_resolution_, modes);
+        negotiator_.start_negotiation(moonlight_resolution_, modes, actual_input_resolution());
       }
 
       ~hdmirx_display_t() {

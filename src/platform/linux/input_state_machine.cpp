@@ -160,106 +160,137 @@ namespace platf::input_sm {
   }
 
 }  // namespace platf::input_sm
+
 #include <iostream>
 
 namespace platf::hdmirx {
 
-session_negotiator_t::session_negotiator_t(edid::ioctl_backend_t &backend, input_sm::state_machine_t &sm, std::uint32_t pad)
-  : backend_(backend), sm_(sm), pad_(pad) {}
+  session_negotiator_t::session_negotiator_t(edid::ioctl_backend_t &backend, input_sm::state_machine_t &sm, std::uint32_t pad):
+      backend_(backend),
+      sm_(sm),
+      pad_(pad) {}
 
-void session_negotiator_t::start_negotiation(const resolution_t &target, const std::vector<hdmi_mode_t>& candidates) {
-  target_ = target;
-  last_input_.reset();
-  auto selected = select_hdmi_mode(candidates, target);
-  auto caps = edid::probe_capabilities(backend_, pad_);
+  void session_negotiator_t::start_negotiation(
+    const resolution_t &target,
+    const std::vector<hdmi_mode_t> &candidates,
+    std::optional<resolution_t> current_input
+  ) {
+    target_ = target;
+    last_input_.reset();
 
-  // The capability probe is intentionally read-only.  Do not write anything
-  // until the guard has independently saved the complete original EDID.
-  if (!selected || !caps.readable) {
+    // The capture device has already queried a live timing before negotiation.
+    // If it is exactly what Moonlight requested, rewriting EDID and resetting the
+    // HDMI link only creates a needless no-signal interval and placeholder/RGA
+    // allocation. Treat the already-locked timing as stable and keep the link up.
+    if (current_input && *current_input == target) {
+      sm_.enter_negotiating("current HDMI timing already matches target; skipped EDID reset");
+      for (std::uint32_t sample = 0; sample < input_sm::k_stable_timing_count; ++sample) {
+        if (check_lock(current_input)) {
+          break;
+        }
+      }
+      return;
+    }
+    auto selected = select_hdmi_mode(candidates, target);
+    auto caps = edid::probe_capabilities(backend_, pad_);
+
+    // The capability probe is intentionally read-only.  Do not write anything
+    // until the guard has independently saved the complete original EDID.
+    if (!selected || !caps.readable) {
       // skip negotiation
       sm_.enter_negotiating("skipped edid");
       return;
-  }
+    }
 
-  // EDID can be safely written.
-  guard_ = std::make_unique<edid::edid_restore_guard_t>(backend_, pad_);
-  if (!guard_->is_armed()) {
+    // EDID can be safely written.
+    guard_ = std::make_unique<edid::edid_restore_guard_t>(backend_, pad_);
+    if (!guard_->is_armed()) {
       guard_.reset();
       sm_.enter_negotiating("EDID original could not be saved; skipping write");
       return;
-  }
+    }
 
-  // Write the test EDID (we just use make_1080p_edid or matching size since we don't have full CVT generator in stage 6)
-  // According to stage 6, we have make_720p_edid, make_1080p_edid, make_1440p_edid, make_2160p_edid.
-  std::vector<std::uint8_t> new_edid;
-  if (selected->resolution.width == 1280) new_edid = edid::make_720p_edid();
-  else if (selected->resolution.width == 1920) new_edid = edid::make_1080p_edid();
-  else if (selected->resolution.width == 2560) new_edid = edid::make_1440p_edid();
-  else if (selected->resolution.width == 3840) new_edid = edid::make_2160p_edid();
-  else new_edid = edid::make_1080p_edid(); // fallback
+    // Write the test EDID (we just use make_1080p_edid or matching size since we don't have full CVT generator in stage 6)
+    // According to stage 6, we have make_720p_edid, make_1080p_edid, make_1440p_edid, make_2160p_edid.
+    std::vector<std::uint8_t> new_edid;
+    if (selected->resolution.width == 1280) {
+      new_edid = edid::make_720p_edid();
+    } else if (selected->resolution.width == 1920) {
+      new_edid = edid::make_1080p_edid();
+    } else if (selected->resolution.width == 2560) {
+      new_edid = edid::make_1440p_edid();
+    } else if (selected->resolution.width == 3840) {
+      new_edid = edid::make_2160p_edid();
+    } else {
+      new_edid = edid::make_1080p_edid();  // fallback
+    }
 
-  std::uint8_t native_cta_vic = 0;
-  if (selected->resolution.width == 1280 && selected->resolution.height == 720) native_cta_vic = 4;
-  else if (selected->resolution.width == 1920 && selected->resolution.height == 1080) native_cta_vic = 16;
-  else if (selected->resolution.width == 3840 && selected->resolution.height == 2160) native_cta_vic = 97;
-  new_edid = edid::with_cta_lpcm_audio_extension(new_edid, native_cta_vic);
+    std::uint8_t native_cta_vic = 0;
+    if (selected->resolution.width == 1280 && selected->resolution.height == 720) {
+      native_cta_vic = 4;
+    } else if (selected->resolution.width == 1920 && selected->resolution.height == 1080) {
+      native_cta_vic = 16;
+    } else if (selected->resolution.width == 3840 && selected->resolution.height == 2160) {
+      native_cta_vic = 97;
+    }
+    new_edid = edid::with_cta_lpcm_audio_extension(new_edid, native_cta_vic);
 
-  auto res = edid::write_edid(backend_, pad_, new_edid);
-  if (!res.has_value()) {
+    auto res = edid::write_edid(backend_, pad_, new_edid);
+    if (!res.has_value()) {
       // A failed write can be partial.  Restore immediately while the guard
       // still owns the complete original and make the fallback observable.
       const bool restored = guard_->restore();
       guard_.reset();
-      sm_.enter_negotiating(restored
-        ? "EDID write failed; original restored"
-        : "EDID write failed; original restore pending");
+      sm_.enter_negotiating(restored ? "EDID write failed; original restored" : "EDID write failed; original restore pending");
       return;
+    }
+
+    // Rockchip HDMI RX requires a link reset to apply a changed EDID.  Its
+    // internal delayed reset sequence restores a valid upstream video lock.
+    (void) backend_.reset_hdmi_link();
+    sm_.enter_negotiating("EDID written with restore guard armed");
   }
 
-  // Rockchip HDMI RX requires a link reset to apply a changed EDID.  Its
-  // internal delayed reset sequence restores a valid upstream video lock.
-  (void) backend_.reset_hdmi_link();
-  sm_.enter_negotiating("EDID written with restore guard armed");
-}
+  bool session_negotiator_t::check_lock(const std::optional<resolution_t> &actual_input) {
+    if (sm_.state() != input_sm::state_e::negotiating) {
+      return false;
+    }
 
-bool session_negotiator_t::check_lock(const std::optional<resolution_t>& actual_input) {
-  if (sm_.state() != input_sm::state_e::negotiating) return false;
-
-  if (!actual_input) {
+    if (!actual_input) {
       last_input_.reset();
       sm_.enter_no_signal("no signal");
       return false;
-  }
+    }
 
-  if (actual_input->width == 0 || actual_input->height == 0) {
+    if (actual_input->width == 0 || actual_input->height == 0) {
       last_input_.reset();
       sm_.enter_no_signal("invalid HDMI timings");
       return false;
-  }
+    }
 
-  if (last_input_ && *last_input_ != *actual_input) {
+    if (last_input_ && *last_input_ != *actual_input) {
       sm_.reset_stable_timing();
-  }
-  last_input_ = actual_input;
+    }
+    last_input_ = actual_input;
 
-  sm_.record_stable_timing();
-  if (sm_.timing_is_stable()) {
+    sm_.record_stable_timing();
+    if (sm_.timing_is_stable()) {
       // Rockchip HDMI RX disables its audio domain during link setup.  Start
       // its optional audio state machine after input timing has stabilized.
       (void) backend_.set_audio_enabled(true);
       if (target_ && actual_input->width == target_->width && actual_input->height == target_->height) {
-          sm_.enter_streaming_direct("timing matches");
+        sm_.enter_streaming_direct("timing matches");
       } else {
-          sm_.enter_streaming_rga("timing mismatch");
+        sm_.enter_streaming_rga("timing mismatch");
       }
       return true;
+    }
+    return false;
   }
-  return false;
-}
 
-void session_negotiator_t::end_session() {
-  guard_.reset();
-  sm_.enter_shutdown();
-}
+  void session_negotiator_t::end_session() {
+    guard_.reset();
+    sm_.enter_shutdown();
+  }
 
-} // namespace platf::hdmirx
+}  // namespace platf::hdmirx

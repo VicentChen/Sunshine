@@ -223,6 +223,10 @@ namespace {
     EXPECT_GT(std::count(bitmap.pixels().begin(), bitmap.pixels().end(), std::uint8_t {0}), 100);
     EXPECT_GT(std::count(bitmap.pixels().begin(), bitmap.pixels().end(), std::uint8_t {7}), 0);
 
+    bitmap.render_status("XBOX REMOTE PLAY", "AUTHENTICATING");
+    EXPECT_GT(std::count(bitmap.pixels().begin(), bitmap.pixels().end(), std::uint8_t {7}), 0);
+    EXPECT_GT(std::count(bitmap.pixels().begin(), bitmap.pixels().end(), std::uint8_t {5}), 0);
+
     video::frame_profile_snapshot_t snapshot;
     snapshot.captured_frames = 300;
     snapshot.hdmirx_width = 1920;
@@ -254,6 +258,30 @@ namespace {
     EXPECT_FALSE(destroyed);
     synchronous_consumer.reset();
     EXPECT_TRUE(destroyed);
+  }
+
+  /** @brief An unencoded input reset returns its sole producer lease for immediate reuse. */
+  TEST(RkmppInputFrame, ResetReleasesUnencodedProducerLeaseAndClearsMetadata) {
+    bool released = false;
+    auto holder = platf::rkmpp::input_holder_t(new int(1), [&released](void *value) {
+      delete static_cast<int *>(value);
+      released = true;
+    });
+    auto frame = input_frame(nv12_layout(), std::move(holder));
+    video::frame_profile_t profile;
+    frame.profile = &profile;
+    frame.cache_key = platf::rkmpp::input_buffer_key_t {7, 1};
+
+    frame.reset();
+
+    EXPECT_TRUE(released);
+    EXPECT_EQ(frame.layout, platf::rkmpp::input_layout_t {});
+    EXPECT_EQ(frame.dma_buf_fd, -1);
+    EXPECT_EQ(frame.allocation_size, 0U);
+    EXPECT_EQ(frame.pts, 0);
+    EXPECT_FALSE(frame.holder);
+    EXPECT_EQ(frame.profile, nullptr);
+    EXPECT_FALSE(frame.cache_key);
   }
 }  // namespace
 

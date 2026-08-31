@@ -63,4 +63,4 @@ while ((SECONDS < deadline)); do
 done
 
 echo "PASS: services and restricted socket remained stable for ${soak_seconds} seconds." | tee "${output_dir}/soak.txt"
-echo "Complete the manual control and interruption matrix in docs/rkmpp/feature/nxbt-validation/step-09.md."
+echo "Complete the manual control and interruption matrix in the NXBT section of docs/rkmpp/FUTURE.md."

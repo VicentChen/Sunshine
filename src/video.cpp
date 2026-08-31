@@ -1842,8 +1842,38 @@ namespace video {
 
   class rkmpp_profile_overlay_t {
   public:
-    /** @brief Attach the waiting HUD or a newly published profile snapshot. */
+    /** @brief Attach transient Xbox status, otherwise the optional profile HUD. */
     void refresh(platf::rkmpp::encoder_t &encoder) {
+      const auto now = std::chrono::steady_clock::now();
+      if (!last_status_poll_ || now - *last_status_poll_ >= 100ms) {
+        last_status_poll_ = now;
+        const auto status = input::xbox_remote_status();
+        const bool show_status = status.state == "starting" || status.state == "failed" || status.state == "stopping";
+        if (show_status) {
+          const auto key = status.state + ':' + status.stage + ':' + status.failure_stage;
+          if (!status_visible_ || key != status_key_) {
+            bitmap_.render_status("XBOX REMOTE PLAY", status_message(status));
+            attach(encoder);
+            configured_ = true;
+            status_visible_ = true;
+            status_key_ = key;
+          }
+          return;
+        }
+        if (status_visible_) {
+          status_visible_ = false;
+          status_key_.clear();
+          configured_ = false;
+          if (!config::video.rkmpp_profile_overlay) {
+            encoder.clear_osd();
+            return;
+          }
+          bitmap_.render_waiting();
+        }
+      } else if (status_visible_) {
+        return;
+      }
+
       if (!config::video.rkmpp_profile_overlay) {
         return;
       }
@@ -1859,6 +1889,55 @@ namespace video {
     }
 
   private:
+    /**
+     * @brief Map a sanitized Xbox lifecycle snapshot to an OSD message.
+     *
+     * @param status Current Xbox Remote Play lifecycle snapshot.
+     * @return Static display text for the current lifecycle stage.
+     */
+    static std::string_view status_message(const input::xbox_remote_status_t &status) noexcept {
+      if (status.state == "stopping") {
+        return "DISCONNECTING"sv;
+      }
+      if (status.state == "failed") {
+        if (status.failure_kind == "reauthentication_required") {
+          return "AUTHENTICATION REQUIRED"sv;
+        }
+        if (status.failure_kind == "permanent") {
+          return "CONFIGURATION ERROR"sv;
+        }
+        return "CONNECTION FAILED - RETRYING"sv;
+      }
+      if (status.stage == "authentication") {
+        return "AUTHENTICATING"sv;
+      }
+      if (status.stage == "discovery") {
+        return "FINDING XBOX"sv;
+      }
+      if (status.stage == "wake") {
+        return "WAKING XBOX"sv;
+      }
+      if (status.stage == "provisioning") {
+        return "STARTING REMOTE PLAY"sv;
+      }
+      if (status.stage == "signaling_sdp" || status.stage == "signaling_sdp_host_fallback") {
+        return "NEGOTIATING REMOTE PLAY"sv;
+      }
+      if (status.stage == "signaling_ice") {
+        return "CONNECTING DIRECT TRANSPORT"sv;
+      }
+      if (status.stage == "transport") {
+        return "OPENING REMOTE PLAY CHANNELS"sv;
+      }
+      if (status.stage == "handshake") {
+        return "FINALIZING REMOTE PLAY"sv;
+      }
+      if (status.stage == "reconnect_backoff") {
+        return "RECONNECTING"sv;
+      }
+      return "PREPARING CONNECTION"sv;
+    }
+
     /** @brief Copy the fixed bitmap into the encoder's persistent MPP OSD buffer. */
     void attach(platf::rkmpp::encoder_t &encoder) {
       encoder.set_osd_region({16, 16, platf::rkmpp::frame_profile_overlay_bitmap_t::width, platf::rkmpp::frame_profile_overlay_bitmap_t::height, bitmap_.pixels()});
@@ -1867,6 +1946,9 @@ namespace video {
     platf::rkmpp::frame_profile_overlay_bitmap_t bitmap_;  ///< Fixed palette-index text bitmap.
     std::uint64_t generation_ {};  ///< Last published profile generation rendered.
     bool configured_ {};  ///< Whether the initial waiting HUD was attached.
+    bool status_visible_ {};  ///< Whether Xbox status currently overrides the profile HUD.
+    std::string status_key_;  ///< Last sanitized lifecycle tuple rendered.
+    std::optional<std::chrono::steady_clock::time_point> last_status_poll_;  ///< Last Xbox status poll time.
   };
 
   platf::rkmpp::encoder_config_t make_rkmpp_encoder_config(const config_t &config, const platf::rkmpp::input_layout_t &input_layout) {
@@ -1924,7 +2006,10 @@ namespace video {
         .format = platf::rga::pixel_format_e::nv12
       };
 
-      for (std::uint32_t i = 0; i < 4; ++i) {
+      // MPP consumes the input synchronously before releasing its holder, so
+      // one reusable target is sufficient. At 4K this avoids retaining three
+      // extra 12 MiB DMA-BUFs.
+      for (std::uint32_t i = 0; i < 1; ++i) {
         auto buf = std::make_shared<platf::rga::target_buffer_t>(platf::rga::target_buffer_t::allocate_nv12(*rga_backend_, *rga_allocator_, target_resolution_.width, target_resolution_.height, target_layout_.stride));
         free_buffers_.push({std::move(buf), i});
       }
@@ -1942,6 +2027,7 @@ namespace video {
       if (!image) {
         return -1;
       }
+      discard_pending_input();
       if (image->request_idr) {
         request_idr_frame();
       }
@@ -2090,9 +2176,7 @@ namespace video {
       }
       auto packet = encoder_.encode_packet(current_input_);
       encoded_profile_ = std::move(current_profile_);
-      current_input_.profile = nullptr;
-      ready_ = false;
-      current_input_.holder.reset();
+      discard_pending_input();
       return packet;
     }
 
@@ -2106,6 +2190,19 @@ namespace video {
     }
 
   private:
+    /**
+     * @brief Release a converted input that has not been consumed by MPP.
+     *
+     * Synchronized session setup converts one initial image without encoding
+     * it. Releasing that pending lease before the next conversion allows the
+     * one-entry RGA target pool to be reused safely.
+     */
+    void discard_pending_input() noexcept {
+      current_input_.reset();
+      current_profile_.reset();
+      ready_ = false;
+    }
+
     /** @brief One fixed RGA target and its stable cache index. */
     struct rga_target_slot_t {
       std::shared_ptr<platf::rga::target_buffer_t> buffer;
@@ -2128,14 +2225,12 @@ namespace video {
       return {target.buffer.get(), [this, target = std::move(target)](void *) mutable {
                 std::lock_guard<std::mutex> lock(pool_mutex_);
                 free_buffers_.push(std::move(target));
-                pool_cv_.notify_one();
               }};
     }
 
     std::unique_ptr<platf::rga::backend_t> rga_backend_;
     std::unique_ptr<platf::rga::dma_allocator_t> rga_allocator_;
     std::mutex pool_mutex_;
-    std::condition_variable pool_cv_;
     std::queue<rga_target_slot_t> free_buffers_;
 
     platf::rkmpp::encoder_t encoder_;
@@ -2189,6 +2284,10 @@ namespace video {
       const platf::hdmirx::resolution_t target_resolution {static_cast<std::uint32_t>(config_.width), static_cast<std::uint32_t>(config_.height)};
       if (platf::hdmirx::needs_conversion(input_resolution, target_resolution)) {
         return convert_with_rga(img);
+      }
+      if (rga_fallback_) {
+        rga_fallback_.reset();
+        BOOST_LOG(info) << "RKMPP direct path restored; released RGA fallback resources"sv;
       }
       if (*live_layout != input_layout_) {
         try {

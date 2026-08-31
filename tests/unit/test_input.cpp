@@ -287,13 +287,21 @@ TEST_F(InputGamepadSessionTest, StartsXboxWorkerAutomaticallyForXboxApplicationA
   ASSERT_GE(input::testing::alloc_gamepad(session, 0, metadata), 0);
   EXPECT_EQ(runtime().active_device_count(), active_devices_before_gamepad);
 
-  input::select_gamepad_output({});
+  input::suspend_xbox_remote_for_disconnected_stream();
   EXPECT_EQ(input::xbox_remote_status().state, "idle");
   EXPECT_EQ(state->closed, 1);
-  std::lock_guard lock {state->mutex};
-  ASSERT_GE(state->sent.size(), 2);
-  EXPECT_EQ(state->sent[state->sent.size() - 2], xbox_remote::input::item_kind_e::neutralize);
-  EXPECT_EQ(state->sent.back(), xbox_remote::input::item_kind_e::detach);
+  {
+    std::lock_guard lock {state->mutex};
+    ASSERT_GE(state->sent.size(), 2);
+    EXPECT_EQ(state->sent[state->sent.size() - 2], xbox_remote::input::item_kind_e::neutralize);
+    EXPECT_EQ(state->sent.back(), xbox_remote::input::item_kind_e::detach);
+  }
+
+  input::select_gamepad_output("Xbox");
+  ASSERT_TRUE(wait_for_xbox_state("ready"));
+  EXPECT_EQ(state->created, 2);
+  input::select_gamepad_output({});
+  EXPECT_EQ(state->closed, 2);
 }
 
 TEST_F(InputGamepadSessionTest, ReplacesRepeatedXboxApplicationStartsDeterministically) {

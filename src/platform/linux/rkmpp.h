@@ -79,6 +79,14 @@ namespace platf::rkmpp {
     input_holder_t holder;  ///< Lifetime pin for the borrowed DMA-BUF.
     video::frame_profile_t *profile {};  ///< Borrowed profile record updated during synchronous encoding.
     std::optional<input_buffer_key_t> cache_key;  ///< Stable import-cache key, or empty to import only for this frame.
+
+    /**
+     * @brief Release the producer lease and restore an empty input frame.
+     *
+     * Use this when a prepared frame is replaced without being submitted to
+     * MPP, as can happen to the initial synchronized-capture placeholder.
+     */
+    void reset() noexcept;
   };
 
   /** @brief Result of validating a generic RKMPP input layout or frame. */
@@ -218,6 +226,13 @@ namespace platf::rkmpp {
     static constexpr std::uint32_t height = 176;  ///< OSD height, aligned to 16 pixels.
 
     frame_profile_overlay_bitmap_t() noexcept;
+    /**
+     * @brief Render a transient two-line Xbox Remote Play status message.
+     *
+     * @param title Upper status line.
+     * @param detail Lower status line.
+     */
+    void render_status(std::string_view title, std::string_view detail) noexcept;
     /** @brief Render a waiting message before the first five-second snapshot exists. */
     void render_waiting() noexcept;
     /**

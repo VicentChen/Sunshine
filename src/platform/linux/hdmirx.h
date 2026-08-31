@@ -213,7 +213,14 @@ namespace platf::hdmirx {
    */
   class hdmirx_capture_t {
   public:
-    static hdmirx_capture_t open(const std::string &device = "/dev/video0", std::uint32_t requested_buffers = 6);
+    /**
+     * @brief Open and start an RK3588 HDMI RX capture stream.
+     *
+     * @param device V4L2 multi-planar HDMI RX device path.
+     * @param requested_buffers Number of capture slots requested from the driver.
+     * @return Active HDMI RX capture object.
+     */
+    static hdmirx_capture_t open(const std::string &device = "/dev/video0", std::uint32_t requested_buffers = 4);
 
     hdmirx_capture_t() = default;
     hdmirx_capture_t(const hdmirx_capture_t &) = delete;

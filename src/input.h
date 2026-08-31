@@ -80,6 +80,14 @@ namespace input {
   void select_gamepad_output(std::string_view app_name);
 
   /**
+   * @brief Stop an application-scoped Xbox worker when the final stream ends.
+   *
+   * Other controller routes are left unchanged. A later Moonlight resume will
+   * select the application route again and create a fresh Remote Play session.
+   */
+  void suspend_xbox_remote_for_disconnected_stream();
+
+  /**
    * @brief Sanitized Xbox Remote Play lifecycle snapshot.
    */
   struct xbox_remote_status_t {

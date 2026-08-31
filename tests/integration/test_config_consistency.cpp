@@ -38,6 +38,7 @@ protected:
       {"VideoToolbox Encoder", "vt"},
       {"VA-API Encoder", "vaapi"},
       {"Vulkan Encoder", "vulkan"},
+      {"Rockchip MPP Encoder", "rkmpp"},
       {"Software Encoder", "sw"}
     };
   }

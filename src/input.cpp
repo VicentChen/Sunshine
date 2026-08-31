@@ -2453,6 +2453,21 @@ namespace input {
     BOOST_LOG(info) << "Gamepad output selected for application ["sv << app_name << ']';
   }
 
+  void suspend_xbox_remote_for_disconnected_stream() {
+#ifdef SUNSHINE_XBOX_REMOTE_PLAY
+    bool worker_active = false;
+    {
+      std::lock_guard lock {xbox_remote_lifecycle_mutex};
+      worker_active = static_cast<bool>(xbox_remote_worker);
+    }
+    if (worker_active) {
+      configure_gamepad_router(gamepad::output_mode_e::disabled);
+      stop_xbox_remote_worker();
+      BOOST_LOG(info) << "Xbox Remote Play stopped because the final Moonlight stream ended"sv;
+    }
+#endif
+  }
+
   xbox_remote_status_t xbox_remote_status() {
 #ifdef SUNSHINE_XBOX_REMOTE_PLAY
     std::shared_ptr<::xbox_remote::worker::session_t> worker;

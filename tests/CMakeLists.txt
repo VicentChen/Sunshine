@@ -216,8 +216,30 @@ add_executable(${PROJECT_NAME}
         ${TEST_SOURCES}
         ${SUNSHINE_SOURCES})
 
+# RKMPP validation must be safe to run against a developer's real user profile.
+# The upstream HTTP pairing test persists fixture clients through the production
+# state path, so exclude the source at compile time instead of relying on a
+# gtest runtime filter that can be omitted accidentally.
+set(RKMPP_TEST_TARGET test_sunshine_rkmpp)
+if(RKMPP_FOUND)
+    set(RKMPP_TEST_SOURCES ${TEST_SOURCES})
+    list(REMOVE_ITEM RKMPP_TEST_SOURCES
+            ${CMAKE_SOURCE_DIR}/tests/unit/test_http_pairing.cpp)
+    add_executable(${RKMPP_TEST_TARGET}
+            ${RKMPP_TEST_SOURCES}
+            ${SUNSHINE_SOURCES})
+    target_compile_definitions(${RKMPP_TEST_TARGET} PRIVATE SUNSHINE_RKMPP_TESTS)
+endif()
+
+set(SUNSHINE_TEST_TARGETS ${PROJECT_NAME})
+if(TARGET ${RKMPP_TEST_TARGET})
+    list(APPEND SUNSHINE_TEST_TARGETS ${RKMPP_TEST_TARGET})
+endif()
+
 if(SUNSHINE_BUILD_XBOX_REMOTE_PROBE)
-    target_link_libraries(${PROJECT_NAME} LibDataChannel::LibDataChannelStatic)
+    foreach(test_target IN LISTS SUNSHINE_TEST_TARGETS)
+        target_link_libraries(${test_target} LibDataChannel::LibDataChannelStatic)
+    endforeach()
 endif()
 
 # Copy files needed for config consistency tests to build directory
@@ -252,12 +274,14 @@ add_custom_target(sync_locale_files ALL
     VERBATIM
 )
 
-foreach(dep ${SUNSHINE_TARGET_DEPENDENCIES})
-    add_dependencies(${PROJECT_NAME} ${dep})  # compile these before sunshine
-endforeach()
+foreach(test_target IN LISTS SUNSHINE_TEST_TARGETS)
+    foreach(dep ${SUNSHINE_TARGET_DEPENDENCIES})
+        add_dependencies(${test_target} ${dep})  # compile these before tests
+    endforeach()
 
-# Ensure locale files are synchronized before building the test executable
-add_dependencies(${PROJECT_NAME} sync_locale_files)
+    # Ensure locale files are synchronized before building the test executable
+    add_dependencies(${test_target} sync_locale_files)
+endforeach()
 
 # Build the list of libraries to link
 set(TEST_LINK_LIBRARIES
@@ -318,10 +342,12 @@ if(RGA_FOUND)
     target_compile_options(rkmpp_rga_smoke PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
 endif()
 
-target_link_libraries(${PROJECT_NAME} ${TEST_LINK_LIBRARIES})
-target_compile_definitions(${PROJECT_NAME} PUBLIC ${SUNSHINE_DEFINITIONS} ${TEST_DEFINITIONS})
-target_compile_options(${PROJECT_NAME} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${SUNSHINE_COMPILE_OPTIONS}>;$<$<COMPILE_LANGUAGE:CUDA>:${SUNSHINE_COMPILE_OPTIONS_CUDA};-std=c++17>)  # cmake-lint: disable=C0301
-target_link_options(${PROJECT_NAME} PRIVATE ${SUNSHINE_LINK_OPTIONS})
+foreach(test_target IN LISTS SUNSHINE_TEST_TARGETS)
+    target_link_libraries(${test_target} ${TEST_LINK_LIBRARIES})
+    target_compile_definitions(${test_target} PUBLIC ${SUNSHINE_DEFINITIONS} ${TEST_DEFINITIONS})
+    target_compile_options(${test_target} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${SUNSHINE_COMPILE_OPTIONS}>;$<$<COMPILE_LANGUAGE:CUDA>:${SUNSHINE_COMPILE_OPTIONS_CUDA};-std=c++17>)  # cmake-lint: disable=C0301
+    target_link_options(${test_target} PRIVATE ${SUNSHINE_LINK_OPTIONS})
+endforeach()
 
 # Hardware-only RKMPP smoke.  It is intentionally independent of gtest so
 # it can be run directly on a Rockchip HDMI RX host without the full test suite.

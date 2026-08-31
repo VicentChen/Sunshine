@@ -75,9 +75,9 @@ namespace platf::input_sm {
    * Result: (V << 16) | (U << 8) | Y = 0x00223695
    */
   inline constexpr std::uint32_t k_green_nv12_packed =
-      (static_cast<std::uint32_t>(k_green_nv12_v) << 16U) |
-      (static_cast<std::uint32_t>(k_green_nv12_u) << 8U) |
-      static_cast<std::uint32_t>(k_green_nv12_y);
+    (static_cast<std::uint32_t>(k_green_nv12_v) << 16U) |
+    (static_cast<std::uint32_t>(k_green_nv12_u) << 8U) |
+    static_cast<std::uint32_t>(k_green_nv12_y);
 
   /**
    * @brief Placeholder frame rate in frames per second.
@@ -95,7 +95,7 @@ namespace platf::input_sm {
    * Derived from k_placeholder_fps. At 2 FPS this is 500ms.
    */
   inline constexpr auto k_placeholder_interval =
-      std::chrono::milliseconds(1000 / k_placeholder_fps);
+    std::chrono::milliseconds(1000 / k_placeholder_fps);
 
   /**
    * @brief Number of consecutive stable timing queries required before
@@ -128,14 +128,14 @@ namespace platf::input_sm {
    * - fatal -> (terminal)
    */
   enum class state_e {
-    starting,         ///< Initial state before first capture attempt.
-    no_signal,        ///< No HDMI signal detected; outputting green frames.
-    negotiating,      ///< Signal detected but not yet stable; outputting green frames.
-    streaming_direct, ///< Stable signal, I == T, direct encode path.
-    streaming_rga,    ///< Stable signal, I != T, RGA conversion path.
-    source_change,    ///< Source change event detected; re-entering negotiation.
-    shutdown,         ///< Clean shutdown requested.
-    fatal,            ///< Unrecoverable device error; session must end.
+    starting,  ///< Initial state before first capture attempt.
+    no_signal,  ///< No HDMI signal detected; outputting green frames.
+    negotiating,  ///< Signal detected but not yet stable; outputting green frames.
+    streaming_direct,  ///< Stable signal, I == T, direct encode path.
+    streaming_rga,  ///< Stable signal, I != T, RGA conversion path.
+    source_change,  ///< Source change event detected; re-entering negotiation.
+    shutdown,  ///< Clean shutdown requested.
+    fatal,  ///< Unrecoverable device error; session must end.
   };
 
   /**
@@ -146,14 +146,22 @@ namespace platf::input_sm {
    */
   constexpr std::string_view state_name(state_e state) noexcept {
     switch (state) {
-      case state_e::starting:         return "starting";
-      case state_e::no_signal:        return "no_signal";
-      case state_e::negotiating:      return "negotiating";
-      case state_e::streaming_direct: return "streaming_direct";
-      case state_e::streaming_rga:    return "streaming_rga";
-      case state_e::source_change:    return "source_change";
-      case state_e::shutdown:         return "shutdown";
-      case state_e::fatal:            return "fatal";
+      case state_e::starting:
+        return "starting";
+      case state_e::no_signal:
+        return "no_signal";
+      case state_e::negotiating:
+        return "negotiating";
+      case state_e::streaming_direct:
+        return "streaming_direct";
+      case state_e::streaming_rga:
+        return "streaming_rga";
+      case state_e::source_change:
+        return "source_change";
+      case state_e::shutdown:
+        return "shutdown";
+      case state_e::fatal:
+        return "fatal";
     }
     return "unknown";
   }
@@ -200,9 +208,9 @@ namespace platf::input_sm {
    * @brief Signal recovery event describing a successfully recovered input.
    */
   struct recovery_event_t {
-    std::uint32_t width {};   ///< Recovered input width.
+    std::uint32_t width {};  ///< Recovered input width.
     std::uint32_t height {};  ///< Recovered input height.
-    bool needs_rga {};        ///< Whether RGA conversion is required.
+    bool needs_rga {};  ///< Whether RGA conversion is required.
   };
 
   /**
@@ -380,44 +388,69 @@ namespace platf::input_sm {
     std::uint64_t transition_count() const noexcept;
 
   private:
-    mutable std::mutex mutex_;                     ///< Protects all mutable state.
-    std::condition_variable shutdown_cv_;           ///< Signaled on shutdown for wait interruption.
-    state_e state_ {state_e::starting};            ///< Current state.
-    std::string last_reason_ {"initial"};          ///< Reason for the last transition.
-    std::uint32_t stable_count_ {};                ///< Consecutive stable timing observations.
-    bool idr_pending_ {true};                      ///< Whether the next frame should be IDR.
-    bool shutdown_requested_ {};                   ///< Whether shutdown has been requested.
-    std::uint64_t transitions_ {};                 ///< Total transition count.
+    mutable std::mutex mutex_;  ///< Protects all mutable state.
+    std::condition_variable shutdown_cv_;  ///< Signaled on shutdown for wait interruption.
+    state_e state_ {state_e::starting};  ///< Current state.
+    std::string last_reason_ {"initial"};  ///< Reason for the last transition.
+    std::uint32_t stable_count_ {};  ///< Consecutive stable timing observations.
+    bool idr_pending_ {true};  ///< Whether the next frame should be IDR.
+    bool shutdown_requested_ {};  ///< Whether shutdown has been requested.
+    std::uint64_t transitions_ {};  ///< Total transition count.
   };
 
 }  // namespace platf::input_sm
-#include <memory>
-#include <vector>
+
+#include "src/platform/hdmirx_policy.h"
 #include "src/platform/linux/edid.h"
 #include "src/platform/linux/input_state_machine.h"
-#include "src/platform/hdmirx_policy.h"
+
+#include <memory>
+#include <vector>
 
 namespace platf::hdmirx {
 
-class session_negotiator_t {
-public:
-  session_negotiator_t(edid::ioctl_backend_t &backend, input_sm::state_machine_t &sm, std::uint32_t pad);
+  class session_negotiator_t {
+  public:
+    /**
+     * @brief Construct an HDMI session negotiator.
+     *
+     * @param backend EDID and HDMI-link control backend.
+     * @param sm Input state machine updated by negotiation results.
+     * @param pad V4L2 EDID pad index.
+     */
+    session_negotiator_t(edid::ioctl_backend_t &backend, input_sm::state_machine_t &sm, std::uint32_t pad);
 
-  // Perform the initial EDID negotiation step.
-  void start_negotiation(const resolution_t &target, const std::vector<hdmi_mode_t>& candidates);
+    /**
+     * @brief Perform the initial EDID negotiation step.
+     *
+     * @param target Moonlight-requested output resolution.
+     * @param candidates Modes advertised by the saved EDID.
+     * @param current_input Live HDMI timing, when already available.
+     */
+    void start_negotiation(
+      const resolution_t &target,
+      const std::vector<hdmi_mode_t> &candidates,
+      std::optional<resolution_t> current_input = std::nullopt
+    );
 
-  // Check if we locked, returning true if transition to streaming is done.
-  bool check_lock(const std::optional<resolution_t>& actual_input);
+    /**
+     * @brief Process one observed HDMI timing during negotiation.
+     *
+     * @param actual_input Current live input timing, or no value when unlocked.
+     * @return `true` after a stable timing transitions to a streaming state.
+     */
+    bool check_lock(const std::optional<resolution_t> &actual_input);
 
-  void end_session();
+    /** @brief Finish negotiation and restore the saved EDID when necessary. */
+    void end_session();
 
-private:
-  edid::ioctl_backend_t &backend_;
-  input_sm::state_machine_t &sm_;
-  std::uint32_t pad_;
-  std::unique_ptr<edid::edid_restore_guard_t> guard_;
-  std::optional<resolution_t> target_;
-  std::optional<resolution_t> last_input_;
-};
+  private:
+    edid::ioctl_backend_t &backend_;  ///< EDID and HDMI-link control backend.
+    input_sm::state_machine_t &sm_;  ///< State machine receiving negotiation transitions.
+    std::uint32_t pad_;  ///< V4L2 EDID pad index.
+    std::unique_ptr<edid::edid_restore_guard_t> guard_;  ///< Saved-EDID restoration guard.
+    std::optional<resolution_t> target_;  ///< Moonlight-requested output resolution.
+    std::optional<resolution_t> last_input_;  ///< Most recently observed live timing.
+  };
 
-} // namespace platf::hdmirx
+}  // namespace platf::hdmirx

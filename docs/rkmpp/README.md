@@ -104,7 +104,9 @@ SKIP_APT=1 SKIP_BREW=1 ./scripts/build-rkmpp.sh
 SKIP_SUBMODULES=1 ./scripts/build-rkmpp.sh
 ~~~
 
-SKIP_APT 和 SKIP_BREW 仅适用于已确认依赖完备的机器。默认关闭文档、测试、CUDA 和托盘；托盘依赖 Qt，未安装时不影响 RKMPP 主程序构建。
+SKIP_APT 和 SKIP_BREW 仅适用于已确认依赖完备的机器。默认关闭文档、第三方自测、
+CUDA 和托盘；Sunshine 的 RKMPP 专用测试保持启用。脚本会构建 `sunshine`、
+`test_sunshine_rkmpp` 和 `xbox-remote-probe`。
 
 ## 启动脚本
 
@@ -150,7 +152,7 @@ back_button_timeout = 1000
 | Sunshine 应用 | 手柄输出 |
 | --- | --- |
 | `Nintendo Switch` | 使用 `controller_output` 配置；本部署设为 NXBT，输入转发到 Switch。 |
-| `Xbox` | 使用 Xbox Remote Play 输入后端转发手柄，不创建主机虚拟手柄；详见 [Feature 005](feature/005_xbox_remote_play.md)。 |
+| `Xbox` | 使用 Xbox Remote Play 输入后端转发手柄，不创建主机虚拟手柄；详见 [功能总览](FEATURES.md#xbox)。 |
 | `HDMI Input`、`Desktop` 和其他应用 | 禁用，不转发到 NXBT 或主机虚拟手柄。 |
 
 应用切换或停止时，Sunshine 会先向旧输出发送中立状态并释放该手柄。应用名称来自
@@ -183,43 +185,92 @@ Bridge 会依次尝试已保存的 Switch；若它们均不可用，会回退到
 到另一台 Switch 时可能比日常重连稍慢。首版只支持一个正在串流并接收输入的 Switch，
 不能同时控制多台 Switch。
 
-## RGA 视频缩放与格式转换
-目前已接入 Rockchip 2D 图形加速器 (RGA) 支持。仅当 Moonlight 请求的分辨率与 HDMI RX 实际接收的可见分辨率不一致时，Sunshine 才会使用 RGA 对图像进行缩放与裁剪 (信箱模式或居中裁剪)，并生成 NV12 目标缓冲。对于相同尺寸的请求，HDMI RX 的原始 DMA-BUF（包括像素格式和 stride）会直接交给 RKMPP；格式或 stride 在恢复后变化时会重建直通编码器，不会回退到 RGA。在等待 EDID 协商或短暂无信号期间，屏幕将显示一个绿色的占位帧以防串流断开。
+## Web UI 与 RKMPP 配置
 
-## EDID 协商 (可选支持)
-若 HDMI 输入设备支持自动解析，系统能够在新的 Moonlight 客户端连接时，修改系统的 EDID 倾向以请求符合所需分辨率及帧率。
-- 只有成功写入 EDID 并且设备服从新的分辨率后，才使用硬件零拷贝路径。
-- 如果上游设备不服从 EDID 或不支持此能力，Sunshine 会记录日志并自动回退到 RGA 转换模式。
-- 会话结束后，原有的 EDID 将被自动恢复。
+打开 `https://<Rock-IP-or-hostname>:47990`，在配置页面中选择：
+
+- `Capture`：`HDMI RX (Rockchip)`；对应配置值 `capture = hdmirx`。
+- `Encoder`：`Rockchip MPP`；对应配置值 `encoder = rkmpp`。
+- `Rockchip MPP Encoder`：设置 RKMPP 专属选项。
+
+| 选项 | 配置键 | 默认值 | 作用 |
+| --- | --- | --- | --- |
+| Profile HDMI RX and RKMPP Latency | `rkmpp_profile` | `disabled` | 采集 HDMI RX、RGA、MPP、封包和发送阶段的有界延迟统计，并周期性写入日志。 |
+| Show RKMPP Latency Overlay | `rkmpp_profile_overlay` | `disabled` | 把最新统计通过 MPP OSD 烧录到 Moonlight 画面；同时启用统计采集。 |
+| RKMPP Low-Delay Experiment | `rkmpp_low_delay` | `disabled` | 启用 MPP low-delay 实验配置。现有 A/B 没有证明它优于默认值，因此保持关闭。 |
+| Disable RKMPP Re-encode Experiment | `rkmpp_disable_reencode` | `disabled` | 将 MPP rate-control 重编码次数设为零。现有 A/B 的尾延迟更差，因此保持关闭。 |
+
+这些选项只适用于 Linux 上的 HDMI RX + RKMPP 路径。也可以直接写入
+`runtime-home/config/sunshine/sunshine.conf`，例如：
+
+~~~text
+capture = hdmirx
+encoder = rkmpp
+rkmpp_profile = enabled
+rkmpp_profile_overlay = enabled
+rkmpp_low_delay = disabled
+rkmpp_disable_reencode = disabled
+~~~
+
+## RGA 视频缩放与格式转换
+
+仅当 Moonlight 请求的分辨率与 HDMI RX 实际可见分辨率不一致时，Sunshine 才使用
+RGA 执行硬件缩放、颜色转换以及保持宽高比的黑边或居中裁剪。尺寸一致时，原始
+HDMI RX DMA-BUF 会直接交给 RKMPP；恢复后格式或 stride 变化会重建直通编码器。
+
+RGA 转换路径使用一个可复用的 NV12 目标 DMA-BUF。同步编码在消费完成后归还该缓冲；
+初始化阶段产生但未编码的占位图像也会在下一次转换前主动释放。这样可以降低 4K CMA
+峰值，并避免唯一缓冲被占用后导致首帧断流。该生命周期修复已通过 1080p 实机连接；
+4K 新缓冲配置仍需单独做长时间实机验证。
+
+## EDID 协商
+
+若 HDMI RX 支持可恢复的 EDID 读写，Sunshine 会尝试请求 Moonlight 所需的分辨率和帧率：
+
+- 当前 HDMI 输入时序已经与目标尺寸一致时，跳过 EDID 重写和 HDMI 链路重置。
+- 写入成功且输入采用目标分辨率时使用直通 DMA-BUF 路径。
+- 上游不接受 EDID、设备不支持 EDID 或最终尺寸不一致时，自动使用实际输入加 RGA。
+- 会话结束时恢复原 EDID。
+- 等待协商、短暂无信号或 source change 恢复期间输出绿色占位帧，避免立即断开 Moonlight。
+
+## HDMI RX 音频
+
+`audio_source` 可指定 PipeWire/PulseAudio Source，非空时优先于默认的
+`audio_sink` monitor 路径。ROCK 5B+ 当前识别到的 HDMI RX Source 为：
+
+~~~text
+audio_source = alsa_input.platform-hdmiin-sound.HDMI__hw_rockchiphdmiin__source.8
+~~~
+
+具体 Source 名称由系统决定，请以 `pactl list short sources` 或 PipeWire 枚举结果为准。
+代码、构建和 Source 选择测试已经完成；真实 HDMI PCM、Moonlight 播放和 A/V 同步尚未
+完成实机验收。
+
+## 测试
+
+`scripts/build-rkmpp.sh` 会生成隔离用户配对状态的专用测试：
+
+~~~bash
+./build-rkmpp-review/tests/test_sunshine_rkmpp
+~~~
+
+RKMPP 工作不得运行通用 `test_sunshine`。专用目标不会编译或运行
+`tests/unit/test_http_pairing.cpp`，并使用独立的测试状态路径。
 
 ## 日志检查与性能耗时
-可以通过设置 Trace/Debug 级别的日志以获取每帧的详细 RGA、MPP 以及捕获发送 (capture-to-send) 延迟信息。
-- **RGA timings**: 包含 , ,  的微秒级耗时。
-- **MPP encode latency**: MPP 硬件编码的消耗时间。
-- **RKMPP capture-to-send latency**: 帧从 HDMI RX 被捕获，到完成打包准备发送之间的总体端到端延迟。
 
-## 故障排查 (Troubleshooting)
-- **卡在绿屏**: 表明未成功锁定到有效的 HDMI 视频时序或处于无信号状态。检查 HDMI 连接或尝试拔插。
-- **RGA conversion failed**: 检查是否有不支持的格式被传递给 RGA，或者申请了超大的缩放比。日志中将输出具体的 RGA I (输入) 和 T (目标) 尺寸。
-- **资源泄漏 (Fd/Handle单调增加)**: 正常情况下拔插和变更分辨率不应引发 FD 增长。如果在长时间连续测试后观察到问题，请通过  数量并带上复现步骤提交 Issue。
+启用 Trace/Debug 日志或 `rkmpp_profile` 后，可观察：
 
+- **RGA timings**：`setup`、`fill`、`process/resize` 的微秒级耗时。
+- **MPP encode latency**：MPP submit、output wait 和完整编码耗时。
+- **RKMPP capture-to-send latency**：HDMI RX dequeue、编码、封包到网络提交的主机侧分段耗时。
 
-## RGA 视频缩放与格式转换
-目前已接入 Rockchip 2D 图形加速器 (RGA) 支持。仅当 Moonlight 请求的分辨率与 HDMI RX 实际接收的可见分辨率不一致时，Sunshine 才会使用 RGA 对图像进行缩放与裁剪 (信箱模式或居中裁剪)，并生成 NV12 目标缓冲。对于相同尺寸的请求，HDMI RX 的原始 DMA-BUF（包括像素格式和 stride）会直接交给 RKMPP；格式或 stride 在恢复后变化时会重建直通编码器，不会回退到 RGA。在等待 EDID 协商或短暂无信号期间，屏幕将显示一个绿色的占位帧以防串流断开。
+HDMI RX 驱动当前提供的是单调时钟的帧结束时间戳，因此 RX 第一段表示 EOF 到 dequeue，
+不代表第一个 HDMI 像素进入到 EOF 的时间。
 
-## EDID 协商 (可选支持)
-若 HDMI 输入设备支持自动解析，系统能够在新的 Moonlight 客户端连接时，修改系统的 EDID 倾向以请求符合所需分辨率及帧率。
-- 只有成功写入 EDID 并且设备服从新的分辨率后，才使用硬件零拷贝路径。
-- 如果上游设备不服从 EDID 或不支持此能力，Sunshine 会记录日志并自动回退到 RGA 转换模式。
-- 会话结束后，原有的 EDID 将被自动恢复。
+## 故障排查
 
-## 日志检查与性能耗时
-可以通过设置 Trace/Debug 级别的日志以获取每帧的详细 RGA、MPP 以及捕获发送 (capture-to-send) 延迟信息。
-- **RGA timings**: 包含 `setup`, `fill`, `process/resize` 的微秒级耗时。
-- **MPP encode latency**: MPP 硬件编码的消耗时间。
-- **RKMPP capture-to-send latency**: 帧从 HDMI RX 被捕获，到完成打包准备发送之间的总体端到端延迟。
-
-## 故障排查 (Troubleshooting)
-- **卡在绿屏**: 表明未成功锁定到有效的 HDMI 视频时序或处于无信号状态。检查 HDMI 连接或尝试拔插。
-- **RGA conversion failed**: 检查是否有不支持的格式被传递给 RGA，或者申请了超大的缩放比。日志中将输出具体的 RGA I (输入) 和 T (目标) 尺寸。
-- **资源泄漏 (Fd/Handle单调增加)**: 正常情况下拔插和变更分辨率不应引发 FD 增长。如果在长时间连续测试后观察到问题，请通过 `/proc/<pid>/fd` 数量并带上复现步骤提交 Issue。
+- **卡在绿屏**：尚未锁定有效 HDMI 时序或输入暂时无信号。检查 HDMI 连接和信号源输出。
+- **`RGA conversion failed`**：输入格式、尺寸或缩放组合不受支持；查看日志中的输入 `I`、目标 `T` 和 RGA 错误。
+- **`RGA target DMA-BUF pool is exhausted`**：转换缓冲仍被上一帧持有。当前实现已修复初始化占位帧的已知泄漏；若再次出现，请保留断流前后的日志。
+- **FD/handle 持续增长**：拔插和分辨率变化后 FD 数不应单调增加，可通过 `/proc/<pid>/fd` 观察并保存复现步骤。

@@ -230,6 +230,12 @@ namespace nvhttp {
    * @brief Persist the current state to its backing store.
    */
   void save_state() {
+#ifdef SUNSHINE_TESTS
+    // Unit and integration tests must never modify a user's live pairing state.
+    // Tests that need persistence should exercise an isolated helper or fixture.
+    return;
+#endif
+
     pt::ptree root;
 
     if (fs::exists(config::nvhttp.file_state)) {
@@ -273,6 +279,9 @@ namespace nvhttp {
     if (!fs::exists(config::nvhttp.file_state)) {
       BOOST_LOG(info) << "File "sv << config::nvhttp.file_state << " doesn't exist"sv;
       http::unique_id = uuid_util::uuid_t::generate().string();
+      if (!config::sunshine.flags[config::flag::FRESH_STATE]) {
+        save_state();
+      }
       return;
     }
 
@@ -285,15 +294,28 @@ namespace nvhttp {
       return;
     }
 
+    bool persist_generated_unique_id = false;
     auto unique_id_p = tree.get_optional<std::string>("root.uniqueid");
-    if (!unique_id_p) {
-      // This file doesn't contain moonlight credentials
+    if (!unique_id_p || unique_id_p->empty()) {
+      BOOST_LOG(warning) << "State file "sv << config::nvhttp.file_state
+                         << " has no valid host unique ID; generating a persistent replacement"sv;
       http::unique_id = uuid_util::uuid_t::generate().string();
+      persist_generated_unique_id = true;
+    } else {
+      http::unique_id = std::move(*unique_id_p);
+    }
+
+    auto root_p = tree.get_child_optional("root");
+    if (!root_p) {
+      BOOST_LOG(warning) << "State file "sv << config::nvhttp.file_state
+                         << " has no root object; replacing it with an empty persistent state"sv;
+      client_root = {};
+      if (!config::sunshine.flags[config::flag::FRESH_STATE]) {
+        save_state();
+      }
       return;
     }
-    http::unique_id = std::move(*unique_id_p);
-
-    auto root = tree.get_child("root");
+    auto &root = *root_p;
     client_t client;
 
     // Import from old format
@@ -331,7 +353,11 @@ namespace nvhttp {
       cert_chain.add(crypto::x509(named_cert.cert));
     }
 
-    client_root = client;
+    client_root = std::move(client);
+
+    if (persist_generated_unique_id && !config::sunshine.flags[config::flag::FRESH_STATE]) {
+      save_state();
+    }
   }
 
   /**
@@ -1057,6 +1083,10 @@ namespace nvhttp {
 
         return;
       }
+
+      // The final stream disconnect deliberately tears down Xbox Remote Play.
+      // Re-select the still-running application's route for an explicit resume.
+      input::select_gamepad_output(proc::proc.get_last_run_app_name());
     }
 
     auto encryption_mode = net::encryption_mode_for_address(request->remote_endpoint().address());
@@ -1474,4 +1504,13 @@ namespace nvhttp {
     }
     return true;
   }
+
+#ifdef SUNSHINE_TESTS
+  namespace testing {
+    std::string load_state_unique_id() {
+      nvhttp::load_state();
+      return http::unique_id;
+    }
+  }  // namespace testing
+#endif
 }  // namespace nvhttp

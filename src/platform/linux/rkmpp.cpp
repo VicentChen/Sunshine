@@ -22,6 +22,10 @@
 #include <utility>
 
 namespace platf::rkmpp {
+  void input_frame_t::reset() noexcept {
+    *this = {};
+  }
+
   namespace {
     constexpr std::size_t output_buffer_size = 8U * 1024U * 1024U;
     constexpr auto packet_timeout = std::chrono::seconds(5);
@@ -385,6 +389,15 @@ namespace platf::rkmpp {
 
   frame_profile_overlay_bitmap_t::frame_profile_overlay_bitmap_t() noexcept {
     render_waiting();
+  }
+
+  void frame_profile_overlay_bitmap_t::render_status(std::string_view title, std::string_view detail) noexcept {
+    pixels_.fill(0);
+    char line[64] {};
+    std::snprintf(line, sizeof(line), "%.*s", static_cast<int>(title.size()), title.data());
+    draw_text(pixels_, 0, line, 7);
+    std::snprintf(line, sizeof(line), "%.*s", static_cast<int>(detail.size()), detail.data());
+    draw_text(pixels_, 2, line, 5);
   }
 
   void frame_profile_overlay_bitmap_t::render_waiting() noexcept {

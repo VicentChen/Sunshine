@@ -7,6 +7,7 @@ import VideotoolboxEncoder from './encoders/VideotoolboxEncoder.vue'
 import SoftwareEncoder from './encoders/SoftwareEncoder.vue'
 import VAAPIEncoder from './encoders/VAAPIEncoder.vue'
 import VulkanEncoder from './encoders/VulkanEncoder.vue'
+import RockchipMppEncoder from './encoders/RockchipMppEncoder.vue'
 
 const props = defineProps([
   'platform',
@@ -57,6 +58,13 @@ const config = ref(props.config)
   <!-- Vulkan Encoder Tab -->
   <VulkanEncoder
       v-if="currentTab === 'vulkan'"
+      :platform="platform"
+      :config="config"
+  />
+
+  <!-- Rockchip MPP Encoder Tab -->
+  <RockchipMppEncoder
+      v-if="currentTab === 'rkmpp'"
       :platform="platform"
       :config="config"
   />

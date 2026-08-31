@@ -171,7 +171,7 @@
     Volume2,
   } from '@lucide/vue'
 
-  const ENCODER_TAB_IDS = new Set(["nv", "amd", "qsv", "vaapi", "vt", "vulkan", "sw"]);
+  const ENCODER_TAB_IDS = new Set(["nv", "amd", "qsv", "vaapi", "vt", "vulkan", "rkmpp", "sw"]);
 
   const app = createApp({
     components: {
@@ -317,10 +317,6 @@
               "av1_mode": 0,
               "capture": "",
               "encoder": "",
-              "rkmpp_profile": "disabled",
-              "rkmpp_profile_overlay": "disabled",
-              "rkmpp_low_delay": "disabled",
-              "rkmpp_disable_reencode": "disabled",
             },
           },
           {
@@ -386,6 +382,16 @@
             options: {
               "vk_tune": 2,
               "vk_rc_mode": 2,
+            },
+          },
+          {
+            id: "rkmpp",
+            name: "Rockchip MPP Encoder",
+            options: {
+              "rkmpp_profile": "disabled",
+              "rkmpp_profile_overlay": "disabled",
+              "rkmpp_low_delay": "disabled",
+              "rkmpp_disable_reencode": "disabled",
             },
           },
           {

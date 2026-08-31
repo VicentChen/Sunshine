@@ -245,4 +245,15 @@ namespace nvhttp {
    * @examples_end
    */
   void erase_all_clients();
+
+#ifdef SUNSHINE_TESTS
+  namespace testing {
+    /**
+     * @brief Load the configured state file and return the resulting host ID.
+     *
+     * @return Generated or restored GameStream host identifier.
+     */
+    std::string load_state_unique_id();
+  }  // namespace testing
+#endif
 }  // namespace nvhttp
