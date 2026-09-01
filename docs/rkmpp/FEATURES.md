@@ -16,7 +16,7 @@
 - Web UI 可选择 `HDMI RX (Rockchip)` 和 `Rockchip MPP`，并配置延迟统计、统计 OSD、低延迟实验和关闭重编码实验选项。
 - Vulkan UI 使用固定版本的 Dear ImGui core 与官方 Vulkan renderer backend 离屏绘制 960x180 不透明诊断页，再由 RGA 同步覆盖到 HDMI RX DMA-BUF；不创建 GLFW/SDL 窗口或 swapchain。相同 revision 复用缓存，UI 隐藏时不提交 Vulkan 绘制或 RGA panel 覆盖。
 - 线程安全的 UI controller 支持按住 `Back/Select + Start` 3 秒开关 UI、完整释放门、owner、全局输入截获、D-pad/左摇杆焦点导航和断开/reset 清理。当前页面仍是三项只读状态页；A/Back 只产生导航事件，尚未接入 Sunshine action。
-- 可通过 `audio_source` 选择 HDMI RX 对应的 PulseAudio/PipeWire Source，并复用 Sunshine 的 float PCM → Opus 音频链路；空值保持原有 `audio_sink` monitor 回退。ROCK 5B+ 已识别 ALSA `hw:3,0` 和对应的双声道 PipeWire Source，支持的枚举格式为 S16LE、S24_32LE、S32LE、32–192 kHz。Source 优先级和 monitor 回退已有自动测试；真实 PCM、Moonlight 播放、断开恢复及 A/V 同步尚未完成实机验收。
+- 可通过 `audio_source` 选择 HDMI RX 对应的 PulseAudio/PipeWire Source，并复用 Sunshine 的 float PCM → Opus 音频链路；空值保持原有 `audio_sink` monitor 回退。PulseAudio 生命周期改由 `pa_threaded_mainloop` 和 mainloop lock 串行化，避免断流 teardown 与事件清理并发。ROCK 5B+ 已识别 ALSA `hw:3,0` 和对应的双声道 PipeWire Source，支持的枚举格式为 S16LE、S24_32LE、S32LE、32–192 kHz。Source 优先级和 monitor 回退已有自动测试；真实 PCM、Moonlight 播放、断开恢复及 A/V 同步尚未完成实机验收。
 
 # NS
 

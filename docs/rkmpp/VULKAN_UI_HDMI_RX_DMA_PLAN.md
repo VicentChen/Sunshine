@@ -209,6 +209,8 @@ Gate 4 只验证真实 capture buffer，不引入正式 UI。
 - 协商器恢复原 EDID 后由驱动同样请求链路重新协商。编码会话不再根据首个旧 timing 固定为 RGA：
   source change 后一旦观察到目标尺寸，会重建直通编码器并释放 RGA fallback。因此
   `1080p + 1080p` 与 `4K + 4K` 都不得因会话初始状态继续执行视频缩放。
+- 断流时还复现过 PulseAudio `cleanup_time_events()` 断言。普通 `pa_mainloop` 只能由一个线程
+  访问，现已改用 `pa_threaded_mainloop` 并锁住 context operation 的创建、释放和断开流程。
 - 本轮最终二进制已在 Moonlight 6.1.0 实机验证：1080p 会话锁定并编码
   `1920x1080p59.94`，4K 会话锁定并编码 `3840x2160p59.94`；两者的稳定 profile window
   均只有 `rga_bypass` 计数而没有视频 `RGA` 阶段。EDID/模式选择/协商聚焦测试

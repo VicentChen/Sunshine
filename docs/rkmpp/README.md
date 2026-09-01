@@ -283,8 +283,9 @@ audio_source = alsa_input.platform-hdmiin-sound.HDMI__hw_rockchiphdmiin__source.
 ~~~
 
 具体 Source 名称由系统决定，请以 `pactl list short sources` 或 PipeWire 枚举结果为准。
-代码、构建和 Source 选择测试已经完成；真实 HDMI PCM、Moonlight 播放和 A/V 同步尚未
-完成实机验收。
+PulseAudio 后端使用 `pa_threaded_mainloop`，并在 mainloop lock 内串行化 context operation
+的创建、释放和断开，避免断流 teardown 与事件清理并发。代码、构建和 Source 选择测试已经
+完成；真实 HDMI PCM、Moonlight 播放、断开恢复和 A/V 同步尚未完成实机验收。
 
 ## 测试
 
