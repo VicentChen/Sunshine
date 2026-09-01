@@ -221,13 +221,14 @@ rkmpp_disable_reencode = disabled
 ### Vulkan UI 总控开关
 
 `vulkan_ui` 是 Vulkan UI 的唯一总控，默认启用。UI 初始隐藏；按住
-`Back/Select + Start` 3 秒可打开或关闭，触发后需要完全释放组合键。Sunshine 缓存一个
-960x180 的不透明 RGBA DMA-BUF。Dear ImGui 通过官方 Vulkan renderer backend 在
-optimal-tiled image 中绘制当前诊断页面，再由 GPU copy 到共享 buffer；RGA 在直通 HDMI RX
-buffer 或分辨率/格式转换后的 NV12 target 底部居中、
-距下边缘 32 像素的位置同步执行一次 BT.709 limited 覆盖，然后交给 MPP。页面状态不变时
-不会重复提交 Vulkan 绘制。RGB 与 YUV 色域通过 librga 的 source/destination buffer
-属性显式指定，不能写入 `improcess()` 的 transform usage 位。
+先按住 `Start`，再点按 `Back/Select` 即可立即打开或关闭，触发后需要完全释放组合键。Start
+会先作为 UI 修饰键被截获；如果没有继续按 Select，松开 Start 时会向当前应用补发一次普通点击。
+Dear ImGui 通过官方 Vulkan renderer backend 在 960x180 的 optimal-tiled BGR image 中绘制
+当前诊断页面。BGR888 直通时，Vulkan 按 capture generation 与 slot 缓存 buffer import，并把
+面板直接 copy 到当前 HDMI RX DMA-BUF 底部居中、距下边缘 32 像素的 ROI；这条路径不经过
+RGA，也不做 CPU 像素复制。视频本身已进入 RGA fallback 时，Vulkan 才把变化后的面板发布到
+共享 BGR DMA-BUF，再由 RGA 转换并覆盖 NV12 target。页面状态不变时不会重复提交 ImGui
+绘制；UI 隐藏时两种路径都不执行 ROI 覆盖。
 
 ~~~text
 vulkan_ui = enabled
@@ -239,7 +240,7 @@ Gate 4 已通过真实 4K HDMI RX/Moonlight 画面和 4 个 capture slot 连续�
 等完整 ImGui UI 已完成。打开 UI 的手柄是 owner；UI 可见时全部手柄输入都会被截获，只有
 owner 能用 D-pad 或左摇杆移动三项焦点。A 与 Back 当前只产生控制器导航事件，尚未绑定
 Sunshine action。owner 断开或输入状态重置会关闭 UI 并执行中立状态清理。Vulkan 初始化、
-模型校验或单帧 RGA 失败时，Sunshine 会在当前会话中关闭 UI 并继续基本编码。
+模型校验、Vulkan DMA-BUF import/copy 或 fallback RGA 失败时，Sunshine 会在当前会话中关闭 UI 并继续基本编码。
 若需临时绕过所有 Vulkan UI 路径，可将唯一总控设置为 `vulkan_ui = disabled`。
 
 ## RGA 视频缩放与格式转换
@@ -247,8 +248,8 @@ Sunshine action。owner 断开或输入状态重置会关闭 UI 并执行中立�
 仅当 Moonlight 请求的分辨率与 HDMI RX 实际可见分辨率不一致时，Sunshine 才使用 RGA
 执行视频硬件缩放、颜色转换以及保持宽高比的黑边或居中裁剪。尺寸一致时不得使用 RGA
 重新缩放视频，原始 HDMI RX DMA-BUF 会直接交给 RKMPP；恢复后格式或 stride 变化会重建
-直通编码器。这里的“视频缩放”不包含可见 Vulkan UI 使用的局部 ROI 覆盖：UI 打开时仍会
-使用 RGA 把 960x180 面板合成到直通帧，UI 隐藏时不会执行这项合成。
+直通编码器。可见 Vulkan UI 的局部 ROI 覆盖不属于视频缩放：BGR888 直通时由 Vulkan
+直接写 capture DMA-BUF，只有视频转换后的 NV12 target 才使用 RGA 合成 UI；隐藏时均不执行。
 
 RGA 转换路径使用一个可复用的 NV12 目标 DMA-BUF。同步编码在消费完成后归还该缓冲；
 初始化阶段产生但未编码的占位图像也会在下一次转换前主动释放。这样可以降低 4K CMA

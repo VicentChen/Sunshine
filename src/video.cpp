@@ -1986,9 +1986,9 @@ namespace video {
   /**
    * @brief Cache a Vulkan-rendered UI and cover each live HDMI RX DMA-BUF ROI.
    *
-   * The externally allocated RGBA DMA-BUF is imported by both the long-lived
-   * Vulkan renderer and RGA. Vulkan updates it only when the model revision
-   * changes; RGA synchronously covers the cached panel into each leased frame.
+   * The externally allocated BGR DMA-BUF is shared only for the NV12 RGA
+   * fallback. On the direct BGR path Vulkan imports each capture slot as a
+   * buffer and copies the cached panel into the leased frame itself.
    */
   class rkmpp_vulkan_ui_session_t {
   public:
@@ -1998,12 +1998,12 @@ namespace video {
       if (!backend_ || !allocator_) {
         throw std::runtime_error("Vulkan UI failed to initialize RGA resources");
       }
-      source_ = platf::rga::target_buffer_t::allocate_rgba8888(*backend_, *allocator_, panel_width, panel_height);
+      source_ = platf::rga::target_buffer_t::allocate_bgr888(*backend_, *allocator_, panel_width, panel_height);
   #ifdef SUNSHINE_BUILD_VULKAN
       const auto &layout = source_.layout();
       renderer_ = platf::vulkan_ui::renderer_t::create(layout.dma_buf_fd, layout.allocation_size, layout.width, layout.height, layout.stride);
       BOOST_LOG(info) << "RKMPP Vulkan UI initialized on " << renderer_->device_name()
-                      << ": hidden until Back+Start is held for 3 seconds; panel="
+                      << ": hidden until Start is held and Select/Back is pressed; panel="
                       << panel_width << 'x' << panel_height << " ROI=bottom-center margin=" << panel_margin;
   #else
       throw std::runtime_error("Sunshine was built without Vulkan UI support");
@@ -2029,12 +2029,21 @@ namespace video {
       return *allocator_;
     }
 
-    /** @brief Render a changed visible snapshot and cover one imported NV12 destination. */
-    bool compose_into(platf::rga::imported_buffer_t &destination) {
-      if (!prepare_visible_panel()) {
+    /** @brief Render a changed visible snapshot and cover one imported NV12 fallback destination. */
+    bool compose_into(platf::rga::imported_buffer_t &destination, platf::hdmirx::hdmirx_img_t &image) {
+      if (!prepare_visible_panel(image)) {
         return false;
       }
+      if (image.frame_profile) {
+        image.frame_profile->ui_compose_begin = std::chrono::steady_clock::now();
+      }
+#ifdef SUNSHINE_BUILD_VULKAN
+      (void) renderer_->publish();
+#endif
       compose_visible_into(destination);
+      if (image.frame_profile) {
+        image.frame_profile->ui_compose_end = std::chrono::steady_clock::now();
+      }
       return true;
     }
 
@@ -2066,9 +2075,9 @@ namespace video {
       }
     }
 
-    /** @brief Synchronously compose into a dequeued, exclusively leased frame when visible. */
+    /** @brief Synchronously use Vulkan to cover a direct BGR capture DMA-BUF when visible. */
     bool compose(platf::hdmirx::hdmirx_img_t &image) {
-      if (!prepare_visible_panel()) {
+      if (!prepare_visible_panel(image)) {
         return false;
       }
       if (!image.frame || !image.capture_format || image.frame->planes().size() != 1 || image.capture_format->planes.size() != 1) {
@@ -2076,24 +2085,23 @@ namespace video {
       }
       const auto &format = *image.capture_format;
       const auto &plane = image.frame->planes().front();
-      if (format.mpp_format != MPP_FMT_YUV420SP || (format.width & 1U) != 0 || (format.height & 1U) != 0) {
-        throw std::runtime_error("Vulkan UI requires an even-sized NV12 HDMI RX frame");
+      if (format.mpp_format != MPP_FMT_BGR888) {
+        throw std::runtime_error("direct Vulkan UI requires a BGR888 HDMI RX frame");
       }
       if (plane.data_offset != 0) {
         throw std::runtime_error("Vulkan UI does not support a nonzero HDMI RX DMA-BUF data offset");
       }
-      const auto allocation_rows = static_cast<std::uint64_t>(format.height) + format.height / 2U;
-      if (plane.bytesperline < format.width || allocation_rows > std::numeric_limits<std::uint64_t>::max() / plane.bytesperline) {
+      const auto minimum_stride = static_cast<std::uint64_t>(format.width) * 3U;
+      if (minimum_stride > std::numeric_limits<std::uint32_t>::max() || plane.bytesperline < minimum_stride || plane.bytesperline % 3U != 0 || static_cast<std::uint64_t>(format.height) > std::numeric_limits<std::uint64_t>::max() / plane.bytesperline) {
         throw std::runtime_error("Vulkan UI HDMI RX stride is invalid");
       }
-      const auto required_size = allocation_rows * plane.bytesperline;
+      const auto required_size = static_cast<std::uint64_t>(format.height) * plane.bytesperline;
       if (plane.payload_bytes < required_size || plane.sizeimage < required_size || plane.allocation_size < required_size) {
-        throw std::runtime_error("Vulkan UI HDMI RX DMA-BUF is smaller than its NV12 layout");
+        throw std::runtime_error("Vulkan UI HDMI RX DMA-BUF is smaller than its BGR888 layout");
       }
 
       const auto generation = image.frame->generation();
       if (!capture_generation_ || *capture_generation_ != generation) {
-        destinations_.clear();
         capture_generation_ = generation;
         ++capture_generations_;
         BOOST_LOG(info) << "RKMPP Vulkan UI capture generation=" << generation
@@ -2102,51 +2110,141 @@ namespace video {
                         << " allocation=" << plane.allocation_size;
       }
       const auto index = image.frame->buffer_index();
-      auto destination = destinations_.find(index);
-      if (destination == destinations_.end()) {
-        platf::rga::image_layout_t layout {
-          .dma_buf_fd = plane.dma_buf_fd,
-          .width = format.width,
-          .height = format.height,
-          .stride = plane.bytesperline,
-          .allocation_size = plane.allocation_size,
-          .format = platf::rga::pixel_format_e::nv12
-        };
-        destination = destinations_.emplace(index, platf::rga::imported_buffer_t::import(*backend_, layout)).first;
+#ifdef SUNSHINE_BUILD_VULKAN
+      if (image.frame_profile) {
+        image.frame_profile->ui_compose_begin = std::chrono::steady_clock::now();
+      }
+      if (renderer_->cover_bgr888({
+            .dma_buf_fd = plane.dma_buf_fd,
+            .allocation_size = plane.allocation_size,
+            .width = format.width,
+            .height = format.height,
+            .stride = plane.bytesperline,
+            .generation = generation,
+            .slot = index
+          }, panel_margin)) {
         ++imported_slots_;
-        BOOST_LOG(info) << "RKMPP Vulkan UI imported capture slot=" << index
+        BOOST_LOG(info) << "RKMPP Vulkan UI imported BGR capture slot=" << index
                         << " fd=" << plane.dma_buf_fd
                         << " generation=" << generation;
       }
-
       if (image.frame_profile) {
-        image.frame_profile->rga_used = true;
-        image.frame_profile->rga_begin = std::chrono::steady_clock::now();
+        image.frame_profile->ui_compose_end = std::chrono::steady_clock::now();
       }
-      compose_visible_into(destination->second);
-      if (image.frame_profile) {
-        image.frame_profile->rga_end = std::chrono::steady_clock::now();
+      ++frames_composed_;
+      if (frames_composed_ == 1) {
+        BOOST_LOG(info) << "RKMPP Vulkan UI first direct BGR DMA-BUF cover completed synchronously"sv;
       }
       return true;
+#else
+      return false;
+#endif
     }
 
   private:
+    /** @brief Convert one collector metric to the renderer-independent UI form. */
+    static platf::ui::profile_metric_status_t make_profile_metric(const frame_profile_metric_snapshot_t &metric) noexcept {
+      return {
+        .count = metric.count,
+        .missing = metric.missing,
+        .invalid = metric.invalid,
+        .p50_us = metric.p50_us,
+        .p95_us = metric.p95_us,
+        .p99_us = metric.p99_us
+      };
+    }
+
+    /** @brief Select the completed-window fields retained by the Vulkan UI page. */
+    static platf::ui::profile_status_t make_profile_status(const frame_profile_snapshot_t &snapshot) noexcept {
+      constexpr std::array metrics {
+        frame_profile_metric_e::rx_driver_age,
+        frame_profile_metric_e::capture_queue,
+        frame_profile_metric_e::rga,
+        frame_profile_metric_e::mpp_encode,
+        frame_profile_metric_e::encoded_queue,
+        frame_profile_metric_e::packetize_send,
+        frame_profile_metric_e::protocol_host,
+        frame_profile_metric_e::host_send
+      };
+      platf::ui::profile_status_t status {
+        .captured_frames = snapshot.captured_frames,
+        .placeholder_frames = snapshot.placeholder_frames,
+        .repeated_frames = snapshot.repeated_frames,
+        .rga_bypass_frames = snapshot.rga_bypass_frames,
+        .freshness_drops = snapshot.freshness_drops,
+        .dropped_samples = snapshot.dropped_samples,
+        .hdmirx_width = snapshot.hdmirx_width,
+        .hdmirx_height = snapshot.hdmirx_height,
+        .moonlight_width = snapshot.moonlight_width,
+        .moonlight_height = snapshot.moonlight_height,
+        .available = true
+      };
+      for (std::size_t index = 0; index < metrics.size(); ++index) {
+        status.metrics[index] = make_profile_metric(snapshot.metrics[static_cast<std::size_t>(metrics[index])]);
+      }
+      return status;
+    }
+
     /** @brief Render the current controller snapshot once and report visibility. */
-    bool prepare_visible_panel() {
+    bool prepare_visible_panel(platf::hdmirx::hdmirx_img_t &image) {
       auto &controller = platf::ui::global_controller();
-      const auto transition = controller.tick(platf::ui::controller_t::clock_t::now());
+      const auto now = platf::ui::controller_t::clock_t::now();
+      if (!last_gamepad_poll_ || now - *last_gamepad_poll_ >= 100ms) {
+        gamepad_status_ = input::xbox_remote_status();
+        last_gamepad_poll_ = now;
+      }
+      if (!last_profile_poll_ || now - *last_profile_poll_ >= 100ms) {
+        bool profile_changed = false;
+        frame_profile_snapshot_t profile;
+        if (frame_profile_snapshot_store().read_newer(profile_generation_, profile)) {
+          auto statistics = make_profile_status(profile);
+          statistics.timeline = profile_status_.timeline;
+          profile_status_ = std::move(statistics);
+          profile_changed = true;
+        }
+        frame_profile_timeline_snapshot_t timeline;
+        if (frame_profile_timeline_store().read_newer(timeline_generation_, timeline)) {
+          profile_status_.timeline = std::move(timeline);
+          profile_changed = true;
+        }
+        if (profile_changed) {
+          controller.update_profile(profile_status_);
+        }
+        last_profile_poll_ = now;
+      }
+      const auto &gamepad = gamepad_status_;
+      const bool gamepad_required = gamepad.selected;
+      controller.update_connection({
+        .video_state = std::string {platf::input_sm::state_name(image.connection_state)},
+        .gamepad_state = gamepad_required ? gamepad.state : "not_required",
+        .gamepad_stage = gamepad.stage,
+        .failure_kind = gamepad.failure_kind,
+        .moonlight_width = image.moonlight_width,
+        .moonlight_height = image.moonlight_height,
+        .input_width = image.input_width,
+        .input_height = image.input_height,
+        .video_ready = platf::input_sm::is_streaming_state(image.connection_state),
+        .gamepad_ready = !gamepad_required || gamepad.state == "ready"
+      }, now);
+      const auto transition = controller.tick(now);
       if (transition.visibility_changed) {
         BOOST_LOG(info) << "RKMPP Vulkan UI " << (transition.visible ? "opened" : "closed")
-                        << " after continuous Back+Start hold";
+                        << " after ordered controller UI chord";
       }
       const auto snapshot = controller.snapshot();
       if (!snapshot.visible) {
         return false;
       }
   #ifdef SUNSHINE_BUILD_VULKAN
-      const auto model = platf::vulkan_ui::make_status_model(panel_width, panel_height, snapshot.focus, snapshot.revision);
+      const auto model = platf::vulkan_ui::make_render_model(panel_width, panel_height, snapshot);
+      const auto ui_render_begin = std::chrono::steady_clock::now();
       if (renderer_->render(model)) {
+        if (image.frame_profile) {
+          image.frame_profile->ui_render_begin = ui_render_begin;
+          image.frame_profile->ui_render_end = std::chrono::steady_clock::now();
+        }
         BOOST_LOG(info) << "RKMPP Vulkan UI rendered revision=" << snapshot.revision
+                        << " page=" << static_cast<unsigned int>(snapshot.page)
                         << " focus=" << static_cast<unsigned int>(snapshot.focus);
       }
       return true;
@@ -2165,8 +2263,13 @@ namespace video {
   #ifdef SUNSHINE_BUILD_VULKAN
     std::unique_ptr<platf::vulkan_ui::renderer_t> renderer_;
   #endif
-    std::unordered_map<std::uint32_t, platf::rga::imported_buffer_t> destinations_;
     std::optional<std::uint64_t> capture_generation_;
+    input::xbox_remote_status_t gamepad_status_;  ///< Last sanitized gamepad lifecycle poll.
+    std::optional<std::chrono::steady_clock::time_point> last_gamepad_poll_;  ///< Limits lifecycle polling on the frame path.
+    std::uint64_t profile_generation_ {};  ///< Last completed-window publication copied for the UI.
+    std::uint64_t timeline_generation_ {};  ///< Last completed-frame Timeline publication copied for the UI.
+    std::optional<std::chrono::steady_clock::time_point> last_profile_poll_;  ///< Limits profile-store polling on the frame path.
+    platf::ui::profile_status_t profile_status_;  ///< Locally merged statistics and Timeline snapshots.
     std::uint64_t frames_composed_ {};
     std::uint64_t capture_generations_ {};
     std::uint64_t imported_slots_ {};
@@ -2300,9 +2403,12 @@ namespace video {
         platf::rga::rectangle_t rga_src {viewport->source.left, viewport->source.top, viewport->source.width, viewport->source.height};
         platf::rga::rectangle_t rga_dst {viewport->destination.left, viewport->destination.top, viewport->destination.width, viewport->destination.height};
         platf::rga::process(src_rga, rga_src, target_buf->rga_buffer(), rga_dst);
+        if (image->frame_profile) {
+          image->frame_profile->rga_end = std::chrono::steady_clock::now();
+        }
         if (vulkan_ui_ && vulkan_ui_enabled_) {
           try {
-            const bool composed = vulkan_ui_->compose_into(target_buf->rga_buffer());
+            const bool composed = vulkan_ui_->compose_into(target_buf->rga_buffer(), *image);
             if (composed && !vulkan_ui_rga_logged_) {
               vulkan_ui_rga_logged_ = true;
               BOOST_LOG(info) << "RKMPP Vulkan UI active on RGA fallback target "
@@ -2312,9 +2418,6 @@ namespace video {
             vulkan_ui_enabled_ = false;
             BOOST_LOG(error) << "RKMPP Vulkan UI RGA-path composition failed; disabling overlay for this session: " << e.what();
           }
-        }
-        if (image->frame_profile) {
-          image->frame_profile->rga_end = std::chrono::steady_clock::now();
         }
       } catch (const std::exception &e) {
         BOOST_LOG(error) << "RGA conversion failed: " << e.what();
@@ -2355,6 +2458,19 @@ namespace video {
         }
         // Opaque ARGB green matches the official librga fill sample.
         platf::rga::fill(target_buf->rga_buffer(), {0, 0, target_resolution_.width, target_resolution_.height}, 0xff00ff00U);
+        if (vulkan_ui_ && vulkan_ui_enabled_) {
+          try {
+            const bool composed = vulkan_ui_->compose_into(target_buf->rga_buffer(), image);
+            if (composed && !vulkan_ui_rga_logged_) {
+              vulkan_ui_rga_logged_ = true;
+              BOOST_LOG(info) << "RKMPP Vulkan UI active on green placeholder target "
+                              << target_resolution_.width << 'x' << target_resolution_.height;
+            }
+          } catch (const std::exception &e) {
+            vulkan_ui_enabled_ = false;
+            BOOST_LOG(error) << "RKMPP Vulkan UI placeholder composition failed; disabling overlay for this session: " << e.what();
+          }
+        }
         if (image.frame_profile) {
           image.frame_profile->rga_end = std::chrono::steady_clock::now();
         }

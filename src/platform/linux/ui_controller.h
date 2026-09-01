@@ -7,9 +7,11 @@
 // standard includes
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <optional>
+#include <string>
 
 // local includes
 #include "../common.h"
@@ -26,6 +28,86 @@ namespace platf::ui {
     back  ///< Return to the previous page.
   };
 
+  /** @brief Modal pages rendered by the RKMPP Vulkan UI. */
+  enum class page_e {
+    main_menu,  ///< Main menu containing the three first-version entries.
+    connection_status,  ///< Read-only connection status page.
+    profile  ///< Read-only frame profile page.
+  };
+
+  /** @brief Explicit action requested by one modal UI update. */
+  enum class action_e {
+    none,  ///< No action was requested.
+    close_modal  ///< Close the modal UI and restore normal input routing.
+  };
+
+  /** @brief Sanitized video and gamepad readiness published to the UI. */
+  struct connection_status_t {
+    std::string video_state {"starting"};  ///< Fixed HDMI RX state-machine name.
+    std::string gamepad_state {"idle"};  ///< Fixed selected-output lifecycle state.
+    std::string gamepad_stage;  ///< Fixed selected-output lifecycle stage.
+    std::string failure_kind;  ///< Fixed selected-output failure policy.
+    std::uint32_t moonlight_width {};  ///< Requested Moonlight video width.
+    std::uint32_t moonlight_height {};  ///< Requested Moonlight video height.
+    std::uint32_t input_width {};  ///< Current HDMI input width, or zero when unknown.
+    std::uint32_t input_height {};  ///< Current HDMI input height, or zero when unknown.
+    bool video_ready {};  ///< HDMI RX is streaming direct or through RGA.
+    bool gamepad_ready {};  ///< Selected gamepad output accepts controller input.
+
+    /** @brief Compare complete sanitized connection snapshots. */
+    bool operator==(const connection_status_t &) const = default;
+
+    /** @brief Return whether both connection components are ready. */
+    bool complete() const noexcept;
+  };
+
+  /** @brief Stable subset and ordering of completed-window metrics shown by the UI. */
+  enum class profile_metric_e : std::uint8_t {
+    rx_driver_age,  ///< HDMI RX timestamp to dequeue.
+    capture_queue,  ///< Dequeue to encoder-thread processing.
+    rga,  ///< RGA conversion or placeholder fill.
+    mpp_encode,  ///< MPP submit to complete encoded packet.
+    encoded_queue,  ///< Encoded packet to network-thread processing.
+    packetize_send,  ///< Network-thread processing to final send.
+    protocol_host,  ///< HDMI RX timestamp to packetization.
+    host_send,  ///< HDMI RX timestamp to final send.
+    count  ///< Number of displayed profile metrics.
+  };
+
+  /** @brief Sanitized percentiles and sample health for one profile metric. */
+  struct profile_metric_status_t {
+    std::uint32_t count {};  ///< Valid samples in the completed window.
+    std::uint32_t missing {};  ///< Frames missing the required timestamps.
+    std::uint32_t invalid {};  ///< Frames whose end timestamp preceded the start.
+    std::int64_t p50_us {};  ///< Nearest-rank 50th percentile in microseconds.
+    std::int64_t p95_us {};  ///< Nearest-rank 95th percentile in microseconds.
+    std::int64_t p99_us {};  ///< Nearest-rank 99th percentile in microseconds.
+
+    /** @brief Compare complete metric snapshots. */
+    bool operator==(const profile_metric_status_t &) const = default;
+  };
+
+  /** @brief Renderer-independent view of the latest completed profile window. */
+  struct profile_status_t {
+    static constexpr auto metric_count = static_cast<std::size_t>(profile_metric_e::count);  ///< Displayed metric count.
+    std::array<profile_metric_status_t, metric_count> metrics;  ///< Metrics in profile_metric_e order.
+    std::uint32_t captured_frames {};  ///< Real HDMI RX frames in the window.
+    std::uint32_t placeholder_frames {};  ///< Synthetic placeholder frames in the window.
+    std::uint32_t repeated_frames {};  ///< Repeated frames in the window.
+    std::uint32_t rga_bypass_frames {};  ///< Real frames that bypassed RGA.
+    std::uint64_t freshness_drops {};  ///< Older HDMI frames discarded for freshness.
+    std::uint32_t dropped_samples {};  ///< Samples lost after bounded buffers filled.
+    std::uint32_t hdmirx_width {};  ///< Latest HDMI RX width in the window.
+    std::uint32_t hdmirx_height {};  ///< Latest HDMI RX height in the window.
+    std::uint32_t moonlight_width {};  ///< Latest Moonlight target width in the window.
+    std::uint32_t moonlight_height {};  ///< Latest Moonlight target height in the window.
+    video::frame_profile_timeline_snapshot_t timeline;  ///< Recent completed frames for the real-time Timeline view.
+    bool available {};  ///< Whether a completed window has been published.
+
+    /** @brief Compare complete profile snapshots. */
+    bool operator==(const profile_status_t &) const = default;
+  };
+
   /** @brief Complete controller state needed by the UI input policy. */
   struct controller_input_t {
     std::uint32_t buttons {};  ///< Moonlight gamepad button mask.
@@ -37,15 +119,21 @@ namespace platf::ui {
   struct decision_t {
     bool consume {};  ///< Prevent this packet from reaching the configured gamepad output.
     bool neutralize {};  ///< Send one neutral state to the configured gamepad output.
+    bool replay_start_tap {};  ///< Recreate a deferred standalone Start tap on the configured output.
     bool visibility_changed {};  ///< The packet opened or closed the UI.
     bool visible {};  ///< UI visibility after processing the packet.
     navigation_e navigation {navigation_e::none};  ///< Navigation edge emitted by the owner.
+    action_e action {action_e::none};  ///< Explicit action emitted by the focused item.
   };
 
   /** @brief Immutable renderer-facing state published by the controller policy. */
   struct snapshot_t {
-    bool visible {};  ///< Whether the panel should be composed into video frames.
-    std::uint8_t focus {};  ///< Focused item in the three-column status page.
+    bool visible {};  ///< Whether either automatic or modal UI should be composed.
+    bool modal {};  ///< Whether a controller-owned modal page is open.
+    page_e page {page_e::main_menu};  ///< Page currently presented by the modal UI.
+    std::uint8_t focus {};  ///< Focused item in the three-entry main menu.
+    connection_status_t connection;  ///< Sanitized readiness data for the connection page.
+    profile_status_t profile;  ///< Latest completed-window metrics for the Profile page.
     std::uint64_t revision {1};  ///< Monotonic render revision.
   };
 
@@ -64,15 +152,7 @@ namespace platf::ui {
      */
     decision_t update(std::uint8_t controller, const controller_input_t &input, clock_t::time_point now);
 
-    /**
-     * @brief Advance a held chord without requiring repeated input packets.
-     *
-     * Moonlight sends state changes rather than periodic repeats, so the video
-     * path calls this once per frame while a stream is active.
-     *
-     * @param now Monotonic time used by the hold detector.
-     * @return A visibility transition when a continuously held chord expires.
-     */
+    /** @brief Return current visibility for the video-frame polling path. */
     decision_t tick(clock_t::time_point now);
 
     /**
@@ -89,6 +169,23 @@ namespace platf::ui {
     /** @brief Return one consistent renderer-facing state snapshot. */
     snapshot_t snapshot() const;
 
+    /**
+     * @brief Publish changed video and gamepad readiness for automatic display.
+     *
+     * @param status Complete sanitized connection snapshot.
+     */
+    void update_connection(connection_status_t status, clock_t::time_point now = clock_t::now());
+
+    /**
+     * @brief Publish a changed completed-window snapshot for the Profile page.
+     *
+     * Profile changes only invalidate the renderer while the modal Profile
+     * page is visible; entering that page already increments the revision.
+     *
+     * @param status Complete renderer-independent profile snapshot.
+     */
+    void update_profile(profile_status_t status);
+
     /** @brief Return whether the modal UI is currently visible. */
     bool visible() const;
 
@@ -98,17 +195,18 @@ namespace platf::ui {
   private:
     /** @brief Per-controller edge, axis, and chord state. */
     struct input_state_t {
-      std::optional<clock_t::time_point> chord_since;  ///< Start of the uninterrupted full chord.
+      bool start_deferred {};  ///< Start is reserved as the ordered UI modifier until released or cancelled.
+      bool start_passthrough {};  ///< Start joined another non-UI input and passes through until release.
       std::uint32_t previous_navigation {};  ///< Previous digitalized navigation mask.
       std::int8_t axis_x {};  ///< Hysteretic horizontal axis direction.
       std::int8_t axis_y {};  ///< Hysteretic vertical axis direction.
     };
 
-    static constexpr std::uint32_t chord_ = platf::START | platf::BACK;  ///< Three-second visibility chord.
-    static constexpr std::chrono::seconds hold_time_ {3};  ///< Required uninterrupted hold duration.
+    static constexpr std::uint32_t start_back_chord_ = platf::START | platf::BACK;  ///< Ordered visibility chord.
+    static constexpr std::chrono::seconds ready_hold_time_ {3};  ///< Stable full-link interval before automatic UI dismissal.
     static constexpr std::int16_t axis_press_ = 16000;  ///< Analog navigation press threshold.
     static constexpr std::int16_t axis_release_ = 8000;  ///< Analog navigation release threshold.
-    static constexpr std::uint8_t item_count_ = 3;  ///< Items in the initial status page.
+    static constexpr std::uint8_t item_count_ = 3;  ///< Items in the first-version main menu.
 
     /** @brief Convert one analog axis into a stable negative, neutral, or positive direction. */
     static std::int8_t axis_direction(std::int16_t value, std::int8_t previous) noexcept;
@@ -120,8 +218,15 @@ namespace platf::ui {
     std::array<input_state_t, platf::MAX_GAMEPADS> inputs_;  ///< State indexed by process-wide gamepad slot.
     std::optional<std::uint8_t> owner_;  ///< Controller that opened and may navigate the UI.
     std::optional<std::uint8_t> release_controller_;  ///< Controller held behind the full-release gate.
+    std::uint32_t release_chord_ {};  ///< Triggering chord that must be fully released.
     bool visible_ {};  ///< Current modal visibility.
-    std::uint8_t focus_ {};  ///< Focused item in the initial status page.
+    page_e page_ {page_e::main_menu};  ///< Current modal page.
+    std::uint8_t focus_ {};  ///< Focused item in the first-version main menu.
+    connection_status_t connection_;  ///< Latest sanitized connection state.
+    profile_status_t profile_;  ///< Latest completed profile window.
+    bool connection_initialized_ {};  ///< Whether a video frame has published connection state.
+    std::optional<clock_t::time_point> connection_ready_since_;  ///< Start of uninterrupted video and gamepad readiness.
+    bool connection_settled_ {};  ///< Whether full readiness has remained stable for ready_hold_time_.
     std::uint64_t revision_ {1};  ///< Monotonic renderer revision.
   };
 

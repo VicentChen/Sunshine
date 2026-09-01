@@ -20,6 +20,7 @@
 #include "src/config.h"
 #include "src/globals.h"
 #include "src/input.h"
+#include "src/platform/linux/ui_controller.h"
 #include "src/platform/virtualhid_input.h"
 #include "tests/tests_common.h"
 
@@ -147,6 +148,7 @@ namespace {
         const auto connection_id = ++state->created;
         return std::make_unique<connection_t>(state, connection_id);
       });
+      platf::ui::global_controller().reset();
     }
 
     /**
@@ -158,6 +160,7 @@ namespace {
       flush_input_tasks();
       input::testing::set_xbox_remote_connection_factory({});
       input::testing::set_platform_input({});
+      platf::ui::global_controller().reset();
       config::input = std::move(original_input_);
       if (owns_task_pool_) {
         task_pool.stop();
@@ -204,6 +207,12 @@ namespace {
       });
     }
 
+    /** @brief Remove earlier fake-connection observations before an input assertion. */
+    void clear_sent() {
+      std::lock_guard lock {state_->mutex};
+      state_->sent.clear();
+    }
+
     std::shared_ptr<connection_state_t> state_;  ///< Shared fake connection observations.
 
   private:
@@ -218,6 +227,7 @@ TEST_F(XboxRemoteInputLifecycleTest, ReusesWorkerWithinGraceAndMigratesRetainedG
     return input::xbox_remote_status().state == "ready";
   }));
   ASSERT_EQ(state_->created, 1);
+  EXPECT_TRUE(input::xbox_remote_status().selected);
 
   auto first = input::alloc(std::make_shared<safe::mail_raw_t>(), "moonlight-client");
   ASSERT_GE(input::testing::alloc_gamepad(first, 0, {}), 0);
@@ -233,6 +243,7 @@ TEST_F(XboxRemoteInputLifecycleTest, ReusesWorkerWithinGraceAndMigratesRetainedG
   input::suspend_xbox_remote_for_disconnected_stream();
   std::this_thread::sleep_for(20ms);
   EXPECT_EQ(input::xbox_remote_status().state, "ready");
+  EXPECT_TRUE(input::xbox_remote_status().selected);
   EXPECT_EQ(state_->closed, 0);
 
   input::resume_xbox_remote_for_stream("Xbox");
@@ -250,6 +261,7 @@ TEST_F(XboxRemoteInputLifecycleTest, ReusesWorkerWithinGraceAndMigratesRetainedG
   ASSERT_TRUE(wait_until([this]() {
     return state_->closed == 1 && input::xbox_remote_status().state == "idle";
   }));
+  EXPECT_FALSE(input::xbox_remote_status().selected);
 
   input::resume_xbox_remote_for_stream("Xbox");
   ASSERT_TRUE(wait_until([this]() {
@@ -272,8 +284,59 @@ TEST_F(XboxRemoteInputLifecycleTest, ReusesWorkerWithinGraceAndMigratesRetainedG
   input::suspend_xbox_remote_for_disconnected_stream();
   input::select_gamepad_output({});
   EXPECT_EQ(state_->closed, 2);
+  EXPECT_FALSE(input::xbox_remote_status().selected);
   std::this_thread::sleep_for(100ms);
   EXPECT_EQ(state_->closed, 2);
+}
+
+TEST_F(XboxRemoteInputLifecycleTest, OrderedUiChordNeverLeaksStartOrBackToXbox) {
+  input::select_gamepad_output("Xbox");
+  ASSERT_TRUE(wait_until([]() {
+    return input::xbox_remote_status().state == "ready";
+  }));
+
+  auto client = input::alloc(std::make_shared<safe::mail_raw_t>(), "ui-chord-client");
+  ASSERT_GE(input::testing::alloc_gamepad(client, 0, {}), 0);
+  ASSERT_TRUE(wait_until([this]() {
+    return received_attach(1);
+  }));
+  clear_sent();
+
+  input::testing::passthrough_gamepad(client, 0, {platf::START, 0, 0, 0, 0, 0, 0});
+  std::this_thread::sleep_for(20ms);
+  EXPECT_FALSE(received_button(1, xbox_remote::protocol::gamepad_button_e::menu));
+  EXPECT_FALSE(platf::ui::global_controller().visible());
+
+  input::testing::passthrough_gamepad(client, 0, {platf::START | platf::BACK, 0, 0, 0, 0, 0, 0});
+  EXPECT_TRUE(platf::ui::global_controller().visible());
+  std::this_thread::sleep_for(20ms);
+  EXPECT_FALSE(received_button(1, xbox_remote::protocol::gamepad_button_e::menu));
+  EXPECT_FALSE(received_button(1, xbox_remote::protocol::gamepad_button_e::view));
+
+  input::testing::passthrough_gamepad(client, 0, {});
+}
+
+TEST_F(XboxRemoteInputLifecycleTest, StandaloneStartIsReplayedAfterRelease) {
+  input::select_gamepad_output("Xbox");
+  ASSERT_TRUE(wait_until([]() {
+    return input::xbox_remote_status().state == "ready";
+  }));
+
+  auto client = input::alloc(std::make_shared<safe::mail_raw_t>(), "start-replay-client");
+  ASSERT_GE(input::testing::alloc_gamepad(client, 0, {}), 0);
+  ASSERT_TRUE(wait_until([this]() {
+    return received_attach(1);
+  }));
+  clear_sent();
+
+  input::testing::passthrough_gamepad(client, 0, {platf::START, 0, 0, 0, 0, 0, 0});
+  std::this_thread::sleep_for(20ms);
+  EXPECT_FALSE(received_button(1, xbox_remote::protocol::gamepad_button_e::menu));
+
+  input::testing::passthrough_gamepad(client, 0, {});
+  EXPECT_TRUE(wait_until([this]() {
+    return received_button(1, xbox_remote::protocol::gamepad_button_e::menu);
+  }));
 }
 
 TEST_F(XboxRemoteInputLifecycleTest, ZeroGraceStopsImmediatelyAndOnlyXboxResumeRecreatesWorker) {
@@ -285,6 +348,7 @@ TEST_F(XboxRemoteInputLifecycleTest, ZeroGraceStopsImmediatelyAndOnlyXboxResumeR
 
   input::suspend_xbox_remote_for_disconnected_stream();
   EXPECT_EQ(input::xbox_remote_status().state, "idle");
+  EXPECT_FALSE(input::xbox_remote_status().selected);
   EXPECT_EQ(state_->closed, 1);
 
   input::resume_xbox_remote_for_stream("HDMI Input");
@@ -293,4 +357,5 @@ TEST_F(XboxRemoteInputLifecycleTest, ZeroGraceStopsImmediatelyAndOnlyXboxResumeR
   ASSERT_TRUE(wait_until([this]() {
     return state_->created == 2 && input::xbox_remote_status().state == "ready";
   }));
+  EXPECT_TRUE(input::xbox_remote_status().selected);
 }

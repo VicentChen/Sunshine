@@ -336,6 +336,18 @@ namespace platf::rga {
     static target_buffer_t allocate_rgba8888(backend_t &backend, dma_allocator_t &allocator, std::uint32_t width, std::uint32_t height, std::uint32_t stride = 0);
 
     /**
+     * @brief Allocate and import a packed BGR888 DMA-BUF.
+     *
+     * @param backend Backend that will import the DMA-BUF.
+     * @param allocator DMA-BUF allocator that retains descriptor ownership.
+     * @param width Visible width in pixels.
+     * @param height Visible height in pixels.
+     * @param stride Byte stride, or zero for tightly packed BGR rows.
+     * @return An owning BGR target buffer.
+     */
+    static target_buffer_t allocate_bgr888(backend_t &backend, dma_allocator_t &allocator, std::uint32_t width, std::uint32_t height, std::uint32_t stride = 0);
+
+    /**
      * @brief Access the imported target buffer.
      *
      * @return Imported RGA buffer whose DMA-BUF remains owned by this object.

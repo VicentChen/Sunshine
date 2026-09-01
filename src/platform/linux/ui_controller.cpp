@@ -6,6 +6,9 @@
 // local includes
 #include "ui_controller.h"
 
+// standard includes
+#include <utility>
+
 namespace platf::ui {
   namespace {
     constexpr std::uint32_t navigation_up = 1U << 0U;
@@ -15,6 +18,10 @@ namespace platf::ui {
     constexpr std::uint32_t navigation_confirm = 1U << 4U;
     constexpr std::uint32_t navigation_back = 1U << 5U;
   }  // namespace
+
+  bool connection_status_t::complete() const noexcept {
+    return video_ready && gamepad_ready;
+  }
 
   std::int8_t controller_t::axis_direction(std::int16_t value, std::int8_t previous) noexcept {
     if (previous < 0 && value < -axis_release_) {
@@ -58,6 +65,7 @@ namespace platf::ui {
   }
 
   decision_t controller_t::update(std::uint8_t controller, const controller_input_t &input, clock_t::time_point now) {
+    static_cast<void>(now);
     std::lock_guard lock {mutex_};
     decision_t result {.visible = visible_};
     if (controller >= inputs_.size()) {
@@ -66,13 +74,15 @@ namespace platf::ui {
     }
 
     auto &state = inputs_[controller];
-    const auto chord_buttons = input.buttons & chord_;
-    const bool chord_down = chord_buttons == chord_;
+    const auto chord_buttons = input.buttons & start_back_chord_;
+    const auto other_buttons = input.buttons & ~start_back_chord_;
+    const bool chord_down = chord_buttons == start_back_chord_;
 
     if (release_controller_ && *release_controller_ == controller) {
       result.consume = true;
-      if (chord_buttons == 0) {
+      if ((input.buttons & release_chord_) == 0) {
         release_controller_.reset();
+        release_chord_ = 0;
         state = {};
         if (!visible_) {
           owner_.reset();
@@ -82,119 +92,157 @@ namespace platf::ui {
     }
 
     if (!visible_) {
-      if (!chord_down) {
-        state.chord_since.reset();
+      if (state.start_passthrough) {
+        if ((input.buttons & platf::START) == 0) {
+          state.start_passthrough = false;
+        }
         state.previous_navigation = navigation_mask(input, state);
         return result;
       }
 
-      result.consume = true;
-      if (!state.chord_since) {
-        state.chord_since = now;
-        result.neutralize = true;
+      if (state.start_deferred) {
+        if (chord_down) {
+          visible_ = true;
+          owner_ = controller;
+          release_controller_ = controller;
+          release_chord_ = start_back_chord_;
+          page_ = page_e::main_menu;
+          ++revision_;
+          result.consume = true;
+          result.neutralize = true;
+          result.visibility_changed = true;
+          result.visible = true;
+          return result;
+        }
+        if ((input.buttons & platf::START) == 0) {
+          state.start_deferred = false;
+          result.consume = true;
+          result.replay_start_tap = true;
+          return result;
+        }
+        if (other_buttons != 0) {
+          state.start_deferred = false;
+          state.start_passthrough = true;
+          state.previous_navigation = navigation_mask(input, state);
+          return result;
+        }
+        result.consume = true;
+        return result;
       }
-      if (now - *state.chord_since >= hold_time_) {
+
+      if (chord_buttons == platf::START && other_buttons == 0) {
+        state.start_deferred = true;
+        result.consume = true;
+        result.neutralize = true;
+        return result;
+      }
+
+      if (chord_down) {
         visible_ = true;
         owner_ = controller;
         release_controller_ = controller;
+        release_chord_ = start_back_chord_;
+        page_ = page_e::main_menu;
         ++revision_;
+        result.consume = true;
         result.neutralize = true;
         result.visibility_changed = true;
         result.visible = true;
+        return result;
       }
+
+      state.previous_navigation = navigation_mask(input, state);
       return result;
     }
 
     result.consume = true;
     if (!owner_ || *owner_ != controller) {
-      state.chord_since.reset();
+      state.start_deferred = false;
       state.previous_navigation = navigation_mask(input, state);
       return result;
     }
 
     if (chord_down) {
-      if (!state.chord_since) {
-        state.chord_since = now;
-      }
-      if (now - *state.chord_since >= hold_time_) {
-        visible_ = false;
-        release_controller_ = controller;
-        ++revision_;
-        result.neutralize = true;
-        result.visibility_changed = true;
-        result.visible = false;
-      }
+      visible_ = false;
+      page_ = page_e::main_menu;
+      release_controller_ = controller;
+      release_chord_ = start_back_chord_;
+      ++revision_;
+      result.neutralize = true;
+      result.visibility_changed = true;
+      result.visible = false;
       return result;
     }
-    state.chord_since.reset();
 
     const auto current_navigation = navigation_mask(input, state);
     const auto pressed = current_navigation & ~state.previous_navigation;
     state.previous_navigation = current_navigation;
     if ((pressed & navigation_up) != 0) {
       result.navigation = navigation_e::up;
-      focus_ = static_cast<std::uint8_t>((focus_ + item_count_ - 1U) % item_count_);
-      ++revision_;
+      if (page_ == page_e::main_menu) {
+        focus_ = static_cast<std::uint8_t>((focus_ + item_count_ - 1U) % item_count_);
+        ++revision_;
+      }
     } else if ((pressed & navigation_down) != 0) {
       result.navigation = navigation_e::down;
-      focus_ = static_cast<std::uint8_t>((focus_ + 1U) % item_count_);
-      ++revision_;
+      if (page_ == page_e::main_menu) {
+        focus_ = static_cast<std::uint8_t>((focus_ + 1U) % item_count_);
+        ++revision_;
+      }
     } else if ((pressed & navigation_left) != 0) {
       result.navigation = navigation_e::left;
-      focus_ = static_cast<std::uint8_t>((focus_ + item_count_ - 1U) % item_count_);
-      ++revision_;
+      if (page_ == page_e::main_menu) {
+        focus_ = static_cast<std::uint8_t>((focus_ + item_count_ - 1U) % item_count_);
+        ++revision_;
+      }
     } else if ((pressed & navigation_right) != 0) {
       result.navigation = navigation_e::right;
-      focus_ = static_cast<std::uint8_t>((focus_ + 1U) % item_count_);
-      ++revision_;
+      if (page_ == page_e::main_menu) {
+        focus_ = static_cast<std::uint8_t>((focus_ + 1U) % item_count_);
+        ++revision_;
+      }
     } else if ((pressed & navigation_confirm) != 0) {
       result.navigation = navigation_e::confirm;
+      if (page_ == page_e::main_menu) {
+        if (focus_ == 0) {
+          page_ = page_e::connection_status;
+          ++revision_;
+        } else if (focus_ == 1) {
+          page_ = page_e::profile;
+          ++revision_;
+        } else {
+          visible_ = false;
+          owner_.reset();
+          page_ = page_e::main_menu;
+          ++revision_;
+          result.neutralize = true;
+          result.visibility_changed = true;
+          result.visible = false;
+          result.action = action_e::close_modal;
+        }
+      }
     } else if ((pressed & navigation_back) != 0) {
       result.navigation = navigation_e::back;
+      if (page_ != page_e::main_menu) {
+        page_ = page_e::main_menu;
+        ++revision_;
+      } else {
+        visible_ = false;
+        owner_.reset();
+        ++revision_;
+        result.neutralize = true;
+        result.visibility_changed = true;
+        result.visible = false;
+        result.action = action_e::close_modal;
+      }
     }
     return result;
   }
 
   decision_t controller_t::tick(clock_t::time_point now) {
+    static_cast<void>(now);
     std::lock_guard lock {mutex_};
-    decision_t result {.visible = visible_};
-
-    // A completed toggle stays behind the full-release gate. Without this
-    // check, the still-held chord could toggle again on the next video frame.
-    if (release_controller_) {
-      return result;
-    }
-
-    if (!visible_) {
-      for (std::uint8_t controller = 0; controller < inputs_.size(); ++controller) {
-        const auto &state = inputs_[controller];
-        if (!state.chord_since || now - *state.chord_since < hold_time_) {
-          continue;
-        }
-        visible_ = true;
-        owner_ = controller;
-        release_controller_ = controller;
-        ++revision_;
-        result.visibility_changed = true;
-        result.visible = true;
-        return result;
-      }
-      return result;
-    }
-
-    if (!owner_) {
-      return result;
-    }
-    const auto &state = inputs_[*owner_];
-    if (!state.chord_since || now - *state.chord_since < hold_time_) {
-      return result;
-    }
-    visible_ = false;
-    release_controller_ = *owner_;
-    ++revision_;
-    result.visibility_changed = true;
-    result.visible = false;
-    return result;
+    return {.visible = visible_};
   }
 
   decision_t controller_t::disconnect(std::uint8_t controller) {
@@ -206,6 +254,7 @@ namespace platf::ui {
     inputs_[controller] = {};
     if (release_controller_ == controller) {
       release_controller_.reset();
+      release_chord_ = 0;
     }
     if (!owner_ || *owner_ != controller) {
       return result;
@@ -214,6 +263,7 @@ namespace platf::ui {
     owner_.reset();
     const bool changed = visible_;
     visible_ = false;
+    page_ = page_e::main_menu;
     if (changed) {
       ++revision_;
     }
@@ -229,6 +279,8 @@ namespace platf::ui {
     inputs_ = {};
     owner_.reset();
     release_controller_.reset();
+    release_chord_ = 0;
+    page_ = page_e::main_menu;
     if (visible_) {
       visible_ = false;
       ++revision_;
@@ -237,11 +289,48 @@ namespace platf::ui {
 
   snapshot_t controller_t::snapshot() const {
     std::lock_guard lock {mutex_};
-    return {visible_, focus_, revision_};
+    const bool automatic = connection_initialized_ && !connection_settled_;
+    const auto page = visible_ || !automatic ? page_ : page_e::connection_status;
+    return {visible_ || automatic, visible_, page, focus_, connection_, profile_, revision_};
+  }
+
+  void controller_t::update_connection(connection_status_t status, const clock_t::time_point now) {
+    std::lock_guard lock {mutex_};
+    bool state_changed = !connection_initialized_ || connection_ != status;
+    const bool was_settled = connection_settled_;
+
+    if (!status.complete()) {
+      connection_ready_since_.reset();
+      connection_settled_ = false;
+    } else if (!connection_initialized_ || !connection_.complete() || !connection_ready_since_) {
+      connection_ready_since_ = now;
+      connection_settled_ = false;
+    } else if (!connection_settled_ && now - *connection_ready_since_ >= ready_hold_time_) {
+      connection_settled_ = true;
+    }
+
+    connection_ = std::move(status);
+    connection_initialized_ = true;
+    state_changed = state_changed || was_settled != connection_settled_;
+    if (state_changed) {
+      ++revision_;
+    }
+  }
+
+  void controller_t::update_profile(profile_status_t status) {
+    std::lock_guard lock {mutex_};
+    if (profile_ == status) {
+      return;
+    }
+    profile_ = std::move(status);
+    if (visible_ && page_ == page_e::profile) {
+      ++revision_;
+    }
   }
 
   bool controller_t::visible() const {
-    return snapshot().visible;
+    std::lock_guard lock {mutex_};
+    return visible_;
   }
 
   std::optional<std::uint8_t> controller_t::owner() const {

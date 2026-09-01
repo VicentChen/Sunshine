@@ -304,6 +304,20 @@ namespace {
     EXPECT_EQ(backend.events, (std::vector<std::string> {"release:1", "close:100"}));
   }
 
+  TEST(RgaTarget, AllocatesPackedBgrForVulkanAndRgaSharing) {
+    fake_backend_t backend;
+    fake_allocator_t allocator;
+    allocator.events = &backend.events;
+    {
+      auto target = platf::rga::target_buffer_t::allocate_bgr888(backend, allocator, 320, 180);
+      EXPECT_EQ(target.layout().format, platf::rga::pixel_format_e::bgr888);
+      EXPECT_EQ(target.layout().stride, 960U);
+      EXPECT_EQ(target.layout().allocation_size, 172'800U);
+      EXPECT_TRUE(target.rga_buffer());
+    }
+    EXPECT_EQ(backend.events, (std::vector<std::string> {"release:1", "close:100"}));
+  }
+
   TEST(RgaTarget, RejectsOddDimensionsAndInvalidStrideBeforeAllocation) {
     fake_backend_t backend;
     fake_allocator_t allocator;

@@ -14,8 +14,8 @@
 - 直通、RGA 创建和运行时 reconfigure 共用同一套 MPP 配置构造，Moonlight 请求的帧率、分数帧率、码率和 GOP 不再在直通路径静默回落到默认值。
 - 编码输出使用调用方提供的 8 MiB MPP packet buffer，并由 `encoded_packet_t` 持有到网络消费者释放，不额外复制到 `std::vector`。普通 P 帧会跳过不必要的 Annex-B IDR 扫描。
 - Web UI 可选择 `HDMI RX (Rockchip)` 和 `Rockchip MPP`，并配置延迟统计、统计 OSD、低延迟实验和关闭重编码实验选项。
-- Vulkan UI 使用固定版本的 Dear ImGui core 与官方 Vulkan renderer backend 离屏绘制 960x180 不透明诊断页，再由 RGA 同步覆盖到 HDMI RX DMA-BUF；不创建 GLFW/SDL 窗口或 swapchain。相同 revision 复用缓存，UI 隐藏时不提交 Vulkan 绘制或 RGA panel 覆盖。
-- 线程安全的 UI controller 支持按住 `Back/Select + Start` 3 秒开关 UI、完整释放门、owner、全局输入截获、D-pad/左摇杆焦点导航和断开/reset 清理。当前页面仍是三项只读状态页；A/Back 只产生导航事件，尚未接入 Sunshine action。
+- Vulkan UI 使用固定版本的 Dear ImGui core 与官方 Vulkan renderer backend 离屏绘制 960x180 不透明 BGR 诊断页；BGR888 直通时 Vulkan 直接导入并写入当前 HDMI RX capture DMA-BUF 的 ROI，视频 RGA fallback 时才把缓存面板转换覆盖到 NV12 target。不创建 GLFW/SDL 窗口或 swapchain；相同 revision 复用缓存，UI 隐藏时不提交绘制或 ROI 覆盖。
+- 线程安全的 UI controller 支持先按住 `Start`、再点按 `Back/Select` 立即开关 UI；Start 修饰键会先被截获，未组成快捷键时在松开后补发普通 Start 点击。实现同时保留完整释放门、owner、全局输入截获、D-pad/左摇杆焦点导航和断开/reset 清理。
 - 可通过 `audio_source` 选择 HDMI RX 对应的 PulseAudio/PipeWire Source，并复用 Sunshine 的 float PCM → Opus 音频链路；空值保持原有 `audio_sink` monitor 回退。PulseAudio 生命周期改由 `pa_threaded_mainloop` 和 mainloop lock 串行化，避免断流 teardown 与事件清理并发。ROCK 5B+ 已识别 ALSA `hw:3,0` 和对应的双声道 PipeWire Source，支持的枚举格式为 S16LE、S24_32LE、S32LE、32–192 kHz。Source 优先级和 monitor 回退已有自动测试；真实 PCM、Moonlight 播放、断开恢复及 A/V 同步尚未完成实机验收。
 
 # NS

@@ -152,3 +152,79 @@ TEST(FrameProfileSnapshotStore, PublishesOnlyNewGenerations) {
   EXPECT_EQ(received.captured_frames, 123U);
   EXPECT_FALSE(store.read_newer(generation, received));
 }
+
+TEST(FrameProfileTimeline, PreservesRelativeStageBoundsAndOverlap) {
+  using namespace std::chrono;
+  auto profile = complete_profile(1000000);
+  const auto origin = *profile.capture;
+  profile.frame_index = 42;
+  profile.capture_sequence = 7;
+  profile.ui_render_begin = origin + microseconds(155);
+  profile.ui_render_end = origin + microseconds(225);
+  profile.ui_compose_begin = origin + microseconds(225);
+  profile.ui_compose_end = origin + microseconds(245);
+
+  const auto frame = video::make_frame_profile_timeline_frame(profile, origin - milliseconds(10));
+  ASSERT_TRUE(frame);
+  EXPECT_EQ(frame->frame_index, 42);
+  EXPECT_EQ(frame->capture_sequence, 7U);
+  EXPECT_EQ(frame->origin_offset_us, 10000);
+  EXPECT_EQ(frame->end_us, 650);
+  EXPECT_EQ(frame->missing_stage_mask, 0U);
+  EXPECT_EQ(frame->invalid_stage_mask, 0U);
+  EXPECT_EQ(frame->span_count, video::frame_profile_timeline_frame_t::max_spans);
+
+  const auto find = [&](video::frame_profile_timeline_stage_e stage) -> const video::frame_profile_timeline_span_t * {
+    for (std::size_t index = 0; index < frame->span_count; ++index) {
+      if (frame->spans[index].stage == stage) {
+        return &frame->spans[index];
+      }
+    }
+    return nullptr;
+  };
+  const auto *rga = find(video::frame_profile_timeline_stage_e::rga);
+  const auto *ui_render = find(video::frame_profile_timeline_stage_e::ui_render);
+  ASSERT_NE(rga, nullptr);
+  ASSERT_NE(ui_render, nullptr);
+  EXPECT_EQ(rga->start_us, 150);
+  EXPECT_EQ(rga->end_us, 250);
+  EXPECT_EQ(ui_render->start_us, 155);
+  EXPECT_EQ(ui_render->end_us, 225);
+  EXPECT_EQ(rga->lane, video::frame_profile_timeline_lane_e::rga);
+  EXPECT_EQ(ui_render->lane, video::frame_profile_timeline_lane_e::ui);
+}
+
+TEST(FrameProfileTimeline, MarksMissingAndInvalidStagesWithoutCreatingZeroBars) {
+  auto profile = complete_profile();
+  profile.rga_used = false;
+  profile.mpp_import_end.reset();
+  profile.packetize_begin = *profile.send_end + std::chrono::microseconds(1);
+
+  const auto frame = video::make_frame_profile_timeline_frame(profile, *profile.capture);
+  ASSERT_TRUE(frame);
+  const auto import_bit = 1U << static_cast<std::uint8_t>(video::frame_profile_timeline_stage_e::mpp_import);
+  const auto encoded_queue_bit = 1U << static_cast<std::uint8_t>(video::frame_profile_timeline_stage_e::encoded_queue);
+  const auto packet_send_bit = 1U << static_cast<std::uint8_t>(video::frame_profile_timeline_stage_e::packetize_send);
+  EXPECT_TRUE(frame->rga_bypass);
+  EXPECT_NE(frame->missing_stage_mask & import_bit, 0U);
+  EXPECT_NE(frame->invalid_stage_mask & encoded_queue_bit, 0U);
+  EXPECT_NE(frame->invalid_stage_mask & packet_send_bit, 0U);
+}
+
+TEST(FrameProfileTimelineStore, KeepsNewestFramesInOldestToNewestOrder) {
+  auto &store = video::frame_profile_timeline_store();
+  store.reset();
+  for (std::size_t index = 0; index < video::frame_profile_timeline_snapshot_t::frame_capacity + 3U; ++index) {
+    auto profile = complete_profile(static_cast<std::int64_t>(index * 1000U));
+    profile.frame_index = static_cast<std::int64_t>(index);
+    ASSERT_TRUE(store.publish(profile));
+  }
+
+  std::uint64_t generation {};
+  video::frame_profile_timeline_snapshot_t snapshot;
+  ASSERT_TRUE(store.read_newer(generation, snapshot));
+  ASSERT_EQ(snapshot.frame_count, video::frame_profile_timeline_snapshot_t::frame_capacity);
+  EXPECT_EQ(snapshot.frames.front().frame_index, 3);
+  EXPECT_EQ(snapshot.frames[snapshot.frame_count - 1U].frame_index, static_cast<std::int64_t>(video::frame_profile_timeline_snapshot_t::frame_capacity + 2U));
+  EXPECT_FALSE(store.read_newer(generation, snapshot));
+}

@@ -5,10 +5,14 @@
 #pragma once
 
 // standard includes
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
+
+// local includes
+#include "ui_controller.h"
 
 namespace platf::vulkan_ui {
   /** @brief Linear floating-point RGBA color used by the render model. */
@@ -30,7 +34,53 @@ namespace platf::vulkan_ui {
     std::uint32_t height {};
     std::uint64_t revision {};
     color_t background;
-    std::uint8_t focus {};  ///< Focused item in the three-column status page.
+    platf::ui::page_e page {platf::ui::page_e::main_menu};  ///< Modal page to render.
+    std::uint8_t focus {};  ///< Focused item in the three-entry main menu.
+    platf::ui::connection_status_t connection;  ///< Sanitized connection values for the status page.
+    platf::ui::profile_status_t profile;  ///< Latest completed-window values for the Profile page.
+  };
+
+  /** @brief One clipped renderer-independent bar in the rolling Timeline viewport. */
+  struct timeline_bar_t {
+    video::frame_profile_timeline_stage_e stage {video::frame_profile_timeline_stage_e::rx_driver_age};
+    video::frame_profile_timeline_lane_e lane {video::frame_profile_timeline_lane_e::capture};
+    std::int64_t frame_index {-1};
+    std::int64_t start_us {};  ///< Unclipped start relative to the frame's RX EOF.
+    std::int64_t end_us {};  ///< Unclipped end relative to the frame's RX EOF.
+    float left {};  ///< Clipped normalized viewport coordinate.
+    float right {};  ///< Clipped normalized viewport coordinate.
+  };
+
+  /** @brief Fixed geometry derived from recent completed frames without Vulkan state. */
+  struct timeline_geometry_t {
+    static constexpr std::size_t bar_capacity = video::frame_profile_timeline_snapshot_t::frame_capacity * video::frame_profile_timeline_frame_t::max_spans;
+
+    std::array<timeline_bar_t, bar_capacity> bars;
+    std::size_t bar_count {};
+    std::int64_t view_start_us {};
+    std::int64_t view_end_us {};
+    std::int64_t latest_frame_index {-1};
+    std::int64_t latest_frame_end_us {};
+  };
+
+  /** @brief One packed BGR888 capture DMA-BUF that Vulkan may cover in place. */
+  struct bgr888_dma_buf_t {
+    int dma_buf_fd {-1};  ///< Borrowed capture descriptor.
+    std::uint64_t allocation_size {};  ///< Available bytes in the capture allocation.
+    std::uint32_t width {};  ///< Visible frame width.
+    std::uint32_t height {};  ///< Visible frame height.
+    std::uint32_t stride {};  ///< Packed BGR byte stride.
+    std::uint64_t generation {};  ///< Capture generation used to invalidate imports.
+    std::uint32_t slot {};  ///< Stable buffer index within one generation.
+  };
+
+  /** @brief Validated Vulkan image-to-buffer copy geometry for a BGR888 panel. */
+  struct bgr888_copy_region_t {
+    std::uint64_t buffer_offset {};
+    std::uint32_t buffer_row_length {};
+    std::uint32_t buffer_image_height {};
+    std::uint32_t panel_left {};
+    std::uint32_t panel_top {};
   };
 
   /**
@@ -42,17 +92,22 @@ namespace platf::vulkan_ui {
   std::optional<std::string> validate_render_model(const render_model_t &model);
 
   /**
-   * @brief Build one renderer-independent Dear ImGui status-page snapshot.
+   * @brief Build one renderer-independent Dear ImGui modal-page snapshot.
    *
    * @param width Panel width in pixels.
    * @param height Panel height in pixels.
-   * @param focus Focused status item in the range [0, 2].
-   * @param revision Revision assigned to the resulting immutable snapshot.
+   * @param snapshot Complete controller and automatic-status snapshot.
    * @return Opaque status-page state. Dear ImGui owns visible widget geometry.
    */
-  render_model_t make_status_model(std::uint32_t width, std::uint32_t height, std::uint8_t focus, std::uint64_t revision = 1);
+  render_model_t make_render_model(std::uint32_t width, std::uint32_t height, const platf::ui::snapshot_t &snapshot);
 
-  /** @brief Long-lived Vulkan renderer bound to one external RGBA DMA-BUF. */
+  /** @brief Convert the completed-frame ring into clipped rolling Timeline geometry. */
+  timeline_geometry_t make_timeline_geometry(const video::frame_profile_timeline_snapshot_t &timeline);
+
+  /** @brief Validate a packed BGR888 target and place one bottom-centered panel. */
+  bgr888_copy_region_t make_bgr888_copy_region(const bgr888_dma_buf_t &target, std::uint32_t panel_width, std::uint32_t panel_height, std::uint32_t panel_margin);
+
+  /** @brief Long-lived Vulkan renderer bound to one external BGR888 panel DMA-BUF. */
   class renderer_t {
   public:
     /** @brief Renderers own unique Vulkan and imported-memory state. */
@@ -71,9 +126,9 @@ namespace platf::vulkan_ui {
      *
      * @param dma_buf_fd Borrowed external DMA-BUF descriptor.
      * @param allocation_size Available bytes in the DMA-BUF.
-     * @param width Visible RGBA width.
+     * @param width Visible BGR width.
      * @param height Visible RGBA height.
-     * @param stride RGBA byte stride.
+     * @param stride packed BGR byte stride.
      * @return Initialized long-lived renderer.
      * @throws std::runtime_error When Vulkan or DMA-BUF import fails.
      */
@@ -87,6 +142,18 @@ namespace platf::vulkan_ui {
      * @throws std::runtime_error When validation or Vulkan execution fails.
      */
     bool render(const render_model_t &model);
+
+    /** @brief Publish a changed cached panel to the external BGR DMA-BUF used by RGA fallback. */
+    bool publish();
+
+    /**
+     * @brief Copy the cached opaque BGR panel directly into one capture DMA-BUF.
+     *
+     * The target is imported as a Vulkan buffer and retained by generation and
+     * slot. Completion is synchronous so MPP may consume the same DMA-BUF when
+     * this call returns.
+     */
+    bool cover_bgr888(const bgr888_dma_buf_t &target, std::uint32_t panel_margin);
 
     /** @brief Return the most recently completed model revision, or zero before rendering. */
     std::uint64_t rendered_revision() const noexcept;

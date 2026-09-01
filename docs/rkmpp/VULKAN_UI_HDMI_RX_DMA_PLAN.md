@@ -5,12 +5,15 @@
 在 Sunshine 的 RKMPP HDMI RX 路径中建立一个通用、可交互的 UI 系统：
 
 - 以固定版本的 Dear ImGui 和官方 Vulkan renderer backend 建立 UI，而不是继续扩展临时 5x7 位图绘制器。
-- 按住 `Back/Select + Start` 3 秒打开或关闭 UI。
+- 先按住 `Start`，再点按 `Back/Select` 立即打开或关闭 UI。
 - UI 打开后，手柄导航输入由 UI 截获，不再发送给远端主机。
 - UI 支持焦点、高亮、选择、返回和状态反馈。
 - UI 操作通过明确的 action 接口反映到 Sunshine，而不是直接耦合到绘制代码。
+- 从 Moonlight 会话的首个绿色 placeholder 帧开始自动显示连接状态；只有视频链路和
+  当前应用选择的手柄输出链路都已就绪，连接状态才自动隐藏。
+- 正式 UI 首个版本提供“连接状态”、“Profile”和“退出 UI”三个入口。
 - Profile HUD 迁移为 UI 系统中的一个页面，不再作为独立的固定 OSD 实现。
-- UI 使用 Vulkan 在 GPU 上生成不透明 RGBA 内容，再由 RGA 将 UI 直接覆盖到当前 HDMI RX NV12 DMA-BUF 的目标区域，最后交给 MPP 编码。
+- UI 使用 Vulkan 在 GPU 上生成不透明 BGR 内容。BGR888 直通时由 Vulkan 将 ROI 直接写入当前 HDMI RX DMA-BUF；只有视频本身已进入 NV12 RGA fallback 时，才由 RGA 覆盖转换后的目标。
 
 本计划不要求半透明效果。生产路径不得为 alpha blend 读取目标视频区域，也不得复制整帧 HDMI 图像。
 
@@ -60,23 +63,28 @@ VIDIOC_REQBUFS(V4L2_MEMORY_MMAP)
 
 ```text
 UI state dirty
-  -> Vulkan 渲染不透明 RGBA panel
-  -> UI DMA-BUF（缓存，非每帧重绘）
+  -> Vulkan 渲染不透明 BGR panel image（缓存，非每帧重绘）
 
-HDMI RX VIDIOC_DQBUF
-  -> RGA: UI RGBA DMA-BUF -> 当前 HDMI RX NV12 DMA-BUF 的目标 ROI
+HDMI RX BGR888 直通 VIDIOC_DQBUF
+  -> Vulkan 导入当前 capture slot 为 buffer
+  -> vkCmdCopyImageToBuffer 写入目标 ROI
   -> MPP 编码同一个 HDMI RX DMA-BUF
   -> VIDIOC_QBUF
+
+视频 RGA fallback
+  -> Vulkan 按 revision 发布缓存 BGR panel DMA-BUF
+  -> RGA: BGR panel -> NV12 fallback target 的目标 ROI
+  -> MPP 编码同一个 NV12 target
 ```
 
 约束：
 
 - 不得在 capture slot 仍处于 `QBUF` 状态时写入。
-- RGA 必须以同步模式完成，或显式等待 fence 后才能调用 MPP。
+- Vulkan 直写与 RGA fallback 都必须同步完成，或显式等待 fence 后才能调用 MPP。
 - MPP 完成输入消费前不得释放 frame holder 或归还 V4L2 slot。
-- UI 隐藏时不得执行 Vulkan UI 更新或 RGA UI 合成。
-- UI 可见但状态未变化时，复用缓存的 UI DMA-BUF；每个视频帧只执行一次 ROI 覆盖。
-- UI 为完全不透明区域；RGA 只做颜色转换、裁剪和目标覆盖，不启用 blending。
+- UI 隐藏时不得执行 Vulkan UI 更新、Vulkan ROI copy 或 RGA UI 合成。
+- UI 可见但状态未变化时，复用缓存的 panel image；每个视频帧只执行一次 ROI 覆盖。
+- UI 为完全不透明区域；直通路径不读取目标像素，fallback 中 RGA 只做颜色转换、裁剪和目标覆盖，不启用 blending。
 - NV12 目标坐标和尺寸至少满足 4:2:0 偶数对齐，并同时满足实机 RGA 限制。
 
 ## Gate 4：真实 HDMI RX DMA-BUF 原位覆盖
@@ -127,16 +135,15 @@ Gate 4 只验证真实 capture buffer，不引入正式 UI。
 - 原先用于 Gate 5 的手写 5x7 位图页面仅证明过 Vulkan/RGA 后端；它不再是后续 UI 的实现基础。
 - **本次执行顺序调整：先接入 Dear ImGui，再实现 UI 状态、Sunshine action 和手柄路由。**
   `third-party/imgui` 已固定为本仓库子模块；仅编译 ImGui core 与上游
-  `imgui_impl_vulkan`，渲染到现有离屏 RGBA image，再 copy 到已分配的 DMA-BUF。
+  `imgui_impl_vulkan`，渲染到离屏 BGR image，再按当前路径 copy 到 capture DMA-BUF 或已分配的 panel DMA-BUF。
   不引入 GLFW、SDL、swapchain 或第二个窗口系统；Moonlight 手柄输入由 Sunshine input
   ingress 交给独立 UI controller，renderer 只消费其 `focus/revision` 快照。
 - ImGui 初始页面保持只读。chord、owner、截获与 neutral cleanup 已有单元测试，但当前
   controller 只改变三项焦点并产生 confirm/back 事件，尚未把 action 绑定到页面控件。
-- 960x180 RGBA DMA-BUF 由 CMA allocator 外部分配，Vulkan 只导入重复的 FD；绘制先在
-  optimal-tiled image 中完成，再由 GPU copy 到共享线性 buffer，原 FD 同时由 RGA 持有。
+- NV12 fallback 使用的 960x180 BGR DMA-BUF 由 CMA allocator 外部分配，Vulkan 只导入重复的 FD；BGR888 直通路径则按 capture generation 和 slot 缓存 Vulkan buffer import，并把 ROI 直接写入当前 leased capture DMA-BUF。
 - ImGui 初始诊断页面是底部横向栏，包含不透明背景、标题和三个从左到右排列的
   只读状态项；相同 revision 直接复用缓存，不提交 Vulkan 工作。它只用于打通
-  ImGui -> Vulkan -> DMA-BUF -> RGA 后端，不在这个阶段接收手柄输入或执行 action。
+  ImGui -> Vulkan -> DMA-BUF 后端，不在这个阶段接收手柄输入或执行 action。
 - 当前实机可见的三列诊断页已经由 Dear ImGui 生成 draw data 并通过官方 Vulkan backend
   渲染；它仍不是包含设置项和 action 的完整 ImGui UI，不能用阶段 5 PASS 推导完整 UI 已完成。
 - Vulkan fence 完成并将 buffer ownership 释放给 external queue family 后，RGA 才能读取；
@@ -149,13 +156,16 @@ Gate 4 只验证真实 capture buffer，不引入正式 UI。
   RGA `RGBA -> NV12 -> RGBA` 回读方向一致，文字保持正向；RKMPP 专用测试 188/188 通过。
 - 修复二进制已部署并通过真实 Moonlight 画面复验：首个会话即显示，页面方向、文字与
   横向布局正常；运行日志确认走 RGA fallback target 后完成同步合成。阶段 5 状态为 **PASS**。
+- 2026-09-02 修复 BGR888 直通会话误按 NV12 校验并提前关闭 overlay 的问题。Mali-G610
+  已验证支持 `VK_FORMAT_B8G8R8_UNORM` color attachment/transfer source；Vulkan 成功导入
+  1920x1080、stride 5760 的真实 capture slot 并直接完成 ROI cover，直通 UI 不再经过 RGA。
 
 ### 资源模型
 
 - 建立长生命周期 Vulkan instance、device、queue 和 command pool，禁止每帧创建。
-- UI surface 按 panel 实际尺寸分配，不分配全屏 RGBA UI surface。
+- UI surface 按 panel 实际尺寸分配，不分配全屏 UI surface。
 - DMA-BUF 由外部 allocator 创建后导入 Vulkan；不得依赖当前驱动不支持的 Vulkan export。
-- Vulkan 使用 optimal-tiled render image，完成绘制后由 GPU copy 到导入的线性 DMA-BUF buffer。
+- Vulkan 使用 optimal-tiled BGR render image；直通时由 GPU copy 到导入的 capture buffer ROI，fallback 时才发布到共享 panel buffer 供 RGA 读取。
 - UI DMA-BUF 的 row pitch、allocation size 和 FD 生命周期必须显式记录。
 - UI 更新与 RGA 读取串行化，或使用明确的 fence；不得覆盖仍由 RGA 使用的缓存。
 
@@ -187,17 +197,18 @@ Gate 4 只验证真实 capture buffer，不引入正式 UI。
 - 已加入与 Vulkan 无关、线程安全的 `ui_controller`：以 Sunshine 全局 gamepad slot
   标识 owner，分别保存每个手柄的 chord、按键 edge 和摇杆 hysteresis 状态，避免多客户端
   都使用 `controllerNumber=0` 时发生 owner 冲突。
-- `Back/Select + Start` 必须连续保持 3 秒才打开或关闭 UI；触发前先 neutralize 当前输出，
-  触发后直到两个组合键都释放才解除 release gate。UI 可见时所有手柄输入均被消费，只有
+- 隐藏状态下先按 `Start` 会立即 neutralize 并暂存为 UI 修饰键，再按 `Back/Select` 即刻打开；
+  未组成快捷键时在 Start 松开后向当前输出补发一个普通点击。触发后直到组合键完全释放才解除
+  release gate。UI 可见时所有手柄输入均被消费，只有
   owner 可以通过 D-pad 或左摇杆改变焦点，A/Back 产生 confirm/back 事件。
 - UI 打开或关闭时会取消当前 stream 的 Back 长按计时器并 neutralize 已分配的手柄；owner
   断开、stream reset 或 gamepad free 会关闭 UI 并清理路由状态。
 - renderer 现在消费 controller 发布的 `visible/focus/revision` 快照。UI 初始隐藏；隐藏时不
   提交 Vulkan render，也不执行 RGA panel ROI 覆盖；焦点变化才提高 revision 并重绘缓存。
   旧 5x7 glyph、rectangle 列表和无效静态布局模型已从 Vulkan UI 后端删除。
-- 首次实机运行发现 Moonlight 在按键状态不变时不会发送周期性重复包，原先只在输入包到达时
-  检查 3 秒期限，因此静止长按永远无法触发。现由活动视频帧调用 controller `tick()` 推进
-  deadline；按下组合键时已 neutralize，期限到达后进入完整释放门，不向 Xbox 泄漏按键。
+- 首次实机运行发现 Moonlight 在按键状态不变时不会发送周期性重复包；随后 GDB 实机捕获又确认
+  旧方案会先把单独的 Start 转发到 Xbox，导致第二个按键到达前会话已受影响。现改为有顺序的
+  Start 修饰键：第一个按键即被截获，Select 到达时立即触发，不再依赖视频 tick 或保持期限。
 - EDID 与缩放策略以 `SPEC.md` 为准：只有 HDMI 输入尺寸已经与 Moonlight 请求尺寸一致时
   才跳过 EDID 和 RGA；任何尺寸不匹配都先从 base DTD、CTA Video Data Block 与 YCbCr
   4:2:0 Video Data Block 中选择尺寸
@@ -216,9 +227,11 @@ Gate 4 只验证真实 capture buffer，不引入正式 UI。
   均只有 `rga_bypass` 计数而没有视频 `RGA` 阶段。EDID/模式选择/协商聚焦测试
   **18/18 PASS**，完整 RKMPP 专用测试 **205/205 PASS**；RGA DMA-BUF smoke 完成 3 轮且
   FD 保持 `5 -> 5`。三项退出码均为 0。
-- controller 的 chord/release gate、视频线程 tick、modal owner、导航、摇杆 hysteresis、
+- controller 的有序 chord/release gate、Start 普通点击补发、modal owner、导航、摇杆 hysteresis、
   disconnect 与 reset 共 7 项测试已覆盖。阶段 6 尚未标记为完整实机 PASS：1080p/4K 直通
   与断流已验证，但仍需完成音频以及 UI 打开、导航、截获、关闭、恢复的整套验收后再更新结论。
+- 初步实机操作已确认手柄方向输入能够移动 UI 焦点。当前页面仍没有可见的“退出 UI”选项，
+  也可再次使用有序组合键关闭；这部分必须在正式页面模型中补齐后再做完整验收。
 
 将 UI 状态、输入和绘制分成独立层：
 
@@ -233,44 +246,122 @@ Sunshine controller event
 
 ### 输入规则
 
-1. `Back/Select + Start` 必须连续保持 3 秒才触发打开或关闭。
-2. 触发后等待组合键完全释放，避免 `Start` 或 `Back` 泄漏到 Sunshine/Xbox。
-3. UI 关闭时，除组合键检测外，手柄事件维持现有 Sunshine 路径。
-4. UI 打开时，方向键/左摇杆、确认、返回等导航事件由 UI 消费。
-5. UI 不识别的输入默认也不向远端透传，除非某个页面明确声明 passthrough。
-6. 打开 UI 的手柄成为当前 owner；其他手柄的处理策略必须明确并测试。
-7. UI 关闭、stream teardown 或输入设备断开时，发送必要的 neutral cleanup，避免远端残留按键状态。
+1. 先按住 `Start`，再点按 `Back/Select`，第二个按键到达时立即触发打开或关闭。
+2. Start 修饰键从第一个数据包起即被截获；未组成快捷键时在松开后补发普通 Start 点击。
+3. 触发后等待组合键完全释放，避免 `Start` 或 `Back` 泄漏到 Sunshine/Xbox。
+4. UI 关闭时，除组合键检测外，手柄事件维持现有 Sunshine 路径。
+5. UI 打开时，方向键/左摇杆、确认、返回等导航事件由 UI 消费。
+6. UI 不识别的输入默认也不向远端透传，除非某个页面明确声明 passthrough。
+7. 打开 UI 的手柄成为当前 owner；其他手柄的处理策略必须明确并测试。
+8. UI 关闭、stream teardown 或输入设备断开时，发送必要的 neutral cleanup，避免远端残留按键状态。
 
 ### UI 模型
 
 - 页面、控件、焦点顺序和 action 使用与 Vulkan 无关的数据结构。
+- UI 有两个相互独立的显示来源：连接未完成时自动显示的非模态连接状态，以及由手柄组合键
+  打开的模态页面。自动连接状态不得取得 modal owner，也不得截获或改变手柄输入。
+- 正式首个版本的主菜单固定包含“连接状态”、“Profile”和“退出 UI”。“退出 UI”收到确认后
+  关闭模态页面并执行必要的 neutral cleanup；`Back` 可作为页面返回或关闭 UI 的快捷操作。
 - renderer 只消费 render model，不直接修改 Sunshine 配置或 encoder 状态。
 - action 通过线程安全命令队列进入对应 Sunshine owner thread。
 - 每个 action 返回成功、失败或 pending 状态，UI 显示实际结果。
 - 不允许仅更新 UI 显示而未执行 Sunshine 操作。
 
+### 连接状态模型
+
+- 连接状态必须从首个绿色 placeholder 帧开始合成，并在连接完成前持续显示；不能等真实
+  HDMI RX 帧出现或等用户手动打开 UI 后才绘制。
+- “连接完成”是组合条件：HDMI RX 视频状态已进入 `streaming_direct` 或 `streaming_rga`，并且
+  当前应用选择的手柄输出链路已进入可接收输入的 ready 状态。Xbox Remote Play 模式使用
+  已有的 sanitized lifecycle snapshot；renderer 不直接查询或持有 Xbox worker。
+- 视频已就绪但手柄仍在 authentication、discovery、wake、provisioning、signaling、transport、
+  handshake 或 reconnect 时，连接状态必须继续显示。手柄先就绪但视频仍在 `starting`、
+  `no_signal`、`negotiating` 或 `source_change` 时也必须继续显示。
+- 两个条件首次同时满足后自动隐藏连接状态，不要求用户按键。连接完成后任一链路再次失去
+  ready，连接状态应自动重新出现，并持续到两者再次就绪。
+- 自动连接状态至少显示视频状态、手柄状态、Moonlight 目标分辨率和当前 HDMI 输入分辨率；
+  失败信息只使用脱敏的固定状态、stage 和 failure kind，不显示凭据或设备标识。
+- 用户从主菜单打开“连接状态”页面时，即使连接已经完成也保持显示，直到用户返回或退出 UI；
+  自动隐藏规则只作用于非模态连接状态。
+- 状态变化才增加 render revision。绿色 placeholder 期间可以每帧覆盖缓存面板，但不得每帧
+  重新提交 Vulkan 绘制。
+
 ### 验收
 
-- 组合键不足 3 秒不会打开 UI。
+- Start 单键不会立即转发；Start 后接 Select 会立即打开 UI，Start 单独松开会补发普通点击。
 - UI 打开期间导航稳定，高亮与焦点一致，按键不会到达 Xbox/远端应用。
+- 主菜单中的“退出 UI”可通过确认键关闭 UI，关闭后不需要再次输入组合键。
 - UI 关闭后输入透传恢复，没有 stuck button。
+- 自动连接状态不截获手柄；它只按视频与手柄 ready 条件自动显示、隐藏和重新出现。
 - action 的显示状态与 Sunshine 实际状态一致。
 - UI renderer 可替换，不影响输入和 action 单元测试。
 
-## 阶段 7：Sunshine action 与 Profile HUD 迁移
+## 阶段 7：连接状态、Sunshine action 与 Profile HUD 迁移
 
-1. 先接入只读状态和低风险、可逆 action，验证 UI 到 Sunshine 的命令边界。
-2. 对需要重建 encoder、切换输入或断开 session 的 action，明确展示确认和执行结果。
-3. 将 Profile HUD 数据源转换为一个只读 UI page。
-4. 删除 Profile HUD 对固定 640x176 palette bitmap 的 UI 职责；旧 MPP OSD 可暂时作为回退后端。
-5. 确认 Vulkan UI 后端稳定后，再单独计划移除旧的固定 OSD 实现。
+### 当前实施状态（2026-09-01）
+
+- 正式主菜单已经替换阶段 5 的三列诊断页，固定提供“连接状态”、“Profile”和“退出 UI”三个
+  入口；连接状态与 Profile 已能进入独立只读页面，Back 返回主菜单。
+- “退出 UI”确认和主菜单 Back 快捷操作都通过显式 `close_modal` action 关闭 modal owner，并
+  复用既有 `visibility_changed` 路径 neutralize 所有已分配手柄；无需再次输入组合键。
+- HDMI RX 每帧携带脱敏的 state machine、Moonlight 目标尺寸和当前输入尺寸；UI 会合并现有的
+  Xbox Remote Play sanitized lifecycle snapshot。只有视频处于 `streaming_direct`/
+  `streaming_rga` 且所选手柄链路 ready 时，自动连接状态才隐藏。
+- 绿色 placeholder 在 RGA fill 之后、MPP 提交之前执行同一缓存 UI 的 ROI 覆盖，因此首个
+  placeholder 帧已经具备显示连接状态的代码路径。自动连接状态不取得 modal owner，也不消费
+  或改变手柄输入；用户主动打开的连接状态页不受自动隐藏条件影响。
+- renderer 当前显示视频状态、手柄 state/stage/failure kind、Moonlight 目标分辨率和当前 HDMI
+  输入分辨率。Xbox lifecycle 最多每 100 ms 轮询一次，状态不变时不增加 render revision。
+- Profile 页面现已接入逐帧 Timeline：网络线程在最后一次 `send_batch()` 返回后，将最近 32 个已完成
+  captured frame 以固定容量 ring 发布。每个 concrete span 同时保留相对该帧 `RX EOF` 的 start/end，
+  每帧还保留相对当前 stream epoch 的 origin，因此既能显示单帧内部阶段位置，也不会丢失后续多帧
+  在途时的跨帧重叠关系。Timeline 使用 Capture、RGA、Vulkan UI、MPP 和 Network 五条稳定 execution
+  lane，当前覆盖 RX EOF-DQ、Capture queue、RGA、UI render、UI compose、MPP import/output
+  preparation/submit/wait、Encoded queue 和 Packetize/send；missing/invalid stage 使用 bit mask 保留，
+  不会伪装成零耗时条。
+- 原 5 秒 completed-window snapshot、P50/P95/P99、sample/overflow、placeholder/repeated/captured、
+  RGA bypass 和旧 MPP OSD 回退路径继续保留，不与逐帧 Timeline 混合聚合。Vulkan UI 最多每 100 ms
+  读取并重绘一次 Timeline revision，数据仍逐个完成帧采集；Profile 页面不可见时不会因 Timeline
+  generation 单独增加 render revision。直通帧上的 UI RGA 覆盖单独记录为 `UI COMPOSE`，不再将其
+  计入视频转换 `RGA`，变化页面的同步 Vulkan 提交则单独记录为 `UI RENDER`。
+- Timeline/Profile/UI controller 定向测试 **29/29 PASS**，完整 RKMPP 专用测试 **218/218 PASS**；
+  `scripts/build-rkmpp.sh` prepared-cache 构建完成，`sunshine` 及全部模块测试目标成功链接。
+- Timeline 变更前的阶段 7 构建已部署到 ROCK 5B+ 并由 PID 53673 运行；进程 `/proc` 映像与磁盘产物 SHA256
+  均为 `4f8bbb978563b8af98c40f494fe71dade568cf8048225bd6e4063ff0395e872c`，Moonlight 客户端
+  已完成真实 Xbox 会话验收。首个绿色 placeholder 帧可见底部连接状态；Xbox lifecycle 从
+  authentication/discovery/wake/provisioning 变化时页面持续显示并只按状态变化重绘；视频与
+  手柄同时 ready 后页面自动隐藏；随后数据通道进入 `failed/data_channel/retryable` 时页面在
+  流不中断的情况下自动重新出现。上述自动显示、隐藏和掉线重现均为 **PASS**。
+- 新 Timeline 代码目前只完成源码、模块测试与构建验证，尚未替换运行中进程；真实 Timeline 画面和
+  性能数据必须在单独获得部署/重启授权后验收，不能沿用上一构建的实机结论。
+- 真实手柄的组合键打开、主菜单/子页面导航、“退出 UI”、输入截获与恢复仍需完成本轮实机验收；
+  macOS Computer Use 可以操作 Moonlight 窗口和键盘，但不能合成游戏手柄事件。Profile Timeline
+  的真实 Vulkan/RGA 画面布局、10 Hz 更新节奏和相对时间可读性也依赖该组合键进入，因此阶段 7
+  尚未整体标记为 PASS。
+
+1. 建立与 Vulkan 无关的连接 snapshot，将 HDMI RX state machine 与当前手柄输出后端的
+   sanitized lifecycle 状态汇总成明确的 video ready、gamepad ready 和整体完成条件。
+2. 在绿色 placeholder 的 RGA fill 完成后、MPP 编码前合成自动连接状态；真实帧路径复用同一
+   render model 和缓存，并按组合完成条件自动隐藏或重新出现。
+3. 建立包含“连接状态”、“Profile”和“退出 UI”的正式页面导航；退出 action 关闭模态 UI
+   并完成输入清理，不修改视频或手柄连接本身。
+4. Profile 页面同时消费逐帧固定容量 Timeline 与现有 completed-window snapshot；Timeline 保留每帧
+   公共 epoch origin、各阶段相对 RX EOF 的 start/end 和 execution lane，统计路径继续保留
+   P50/P95/P99、sample/overflow、placeholder/repeated/captured 和 RGA bypass 等既有语义。
+5. 先接入退出 UI 这类低风险、可逆 action，验证 UI 到 Sunshine controller owner 的命令边界；
+   对需要重建 encoder、切换输入或断开 session 的后续 action，明确展示确认和执行结果。
+6. 删除旧固定 Profile HUD 对 640x176 palette bitmap 的 UI 职责；迁移验收完成前，旧 MPP OSD
+   暂时作为回退后端。确认 Vulkan UI 后端稳定后，再单独计划移除旧实现。
 
 ## 测试与验证
 
 ### 离线测试
 
-- chord 的 3 秒边界、释放门和重复触发。
+- 有序 chord 的首键截获、立即触发、普通 Start 补发、释放门和重复触发。
 - UI focus、navigation、返回和 action dispatch。
+- 连接完成组合条件的全部边界：仅视频 ready、仅手柄 ready、两者 ready 和任一链路重新断开。
+- 自动连接状态从 placeholder 开始显示、两者 ready 后隐藏、断线后重新出现，且始终不截获输入。
+- 主菜单页面切换和“退出 UI”确认后的关闭与 neutral cleanup。
 - UI 打开/关闭时的 input interception。
 - NV12 ROI 的对齐、范围、stride、offset 和 allocation 校验。
 - frame holder 在 RGA 与 MPP 完成前保持有效。
@@ -286,11 +377,13 @@ Sunshine controller event
 
 1. Gate 4 单帧测试图。
 2. Gate 4 连续帧稳定性与 capture slot 轮转。
-3. UI 静态页面显示与隐藏。
-4. UI dirty 更新和高频手柄导航。
-5. Moonlight -> Sunshine -> Xbox 输入截获与恢复。
-6. HDMI source change、无信号、Moonlight 重连和 Sunshine teardown。
-7. 记录 UI 隐藏/显示时的 RGA、MPP、端到端延迟以及队列等待，不用单次样本代替稳定性结论。
+3. 首个绿色 placeholder 帧即显示连接状态；视频或手柄任一未 ready 时持续显示，两者 ready 后
+   自动隐藏，并在任一链路断开后自动重新出现。
+4. 主菜单、“连接状态”页面、“Profile”页面和“退出 UI”的导航、显示与隐藏。
+5. UI dirty 更新和高频手柄导航。
+6. Moonlight -> Sunshine -> Xbox 输入截获、退出 UI 后恢复以及无 stuck button。
+7. HDMI source change、无信号、手柄重连、Moonlight 重连和 Sunshine teardown。
+8. 记录 UI 隐藏/显示时的 RGA、MPP、端到端延迟以及队列等待，不用单次样本代替稳定性结论。
 
 ## 性能验收
 
@@ -316,6 +409,9 @@ Sunshine controller event
 - Gate 4 在真实 HDMI RX capture buffer 上通过。
 - Vulkan UI、RGA 原位覆盖和 MPP 编码链路在 Moonlight 中完成实机验证。
 - 手柄打开、导航、截获、关闭和 neutral cleanup 全部通过集成验证。
+- 连接状态从首个绿色 placeholder 帧持续显示到视频与手柄同时 ready，并能在连接丢失后
+  自动重新出现；连接完成后无需用户操作即可自动隐藏。
+- 正式 UI 包含“连接状态”、“Profile”和可用的“退出 UI”入口。
 - 至少一个 Sunshine action 能执行并将真实结果反馈到 UI。
 - Profile HUD 已作为 UI page 工作，旧固定 OSD 的保留或移除状态有明确记录。
 - RKMPP 专用测试通过，性能数据和已知限制已记录。

@@ -47,6 +47,10 @@ namespace video {
     std::optional<time_point> capture_queue_exit;  ///< Time the encoder thread began processing the captured image.
     std::optional<time_point> rga_begin;  ///< Time immediately before RGA work began.
     std::optional<time_point> rga_end;  ///< Time immediately after RGA work completed.
+    std::optional<time_point> ui_render_begin;  ///< Time immediately before a changed Vulkan UI snapshot was rendered.
+    std::optional<time_point> ui_render_end;  ///< Time immediately after the changed Vulkan UI snapshot finished rendering.
+    std::optional<time_point> ui_compose_begin;  ///< Time immediately before the cached UI panel was composed with RGA.
+    std::optional<time_point> ui_compose_end;  ///< Time immediately after the cached UI panel was composed with RGA.
     std::optional<time_point> mpp_import_begin;  ///< Time immediately before a non-cached MPP DMA-BUF import.
     std::optional<time_point> mpp_import_end;  ///< Time immediately after a non-cached MPP DMA-BUF import.
     std::optional<time_point> mpp_output_buffer_begin;  ///< Time immediately before MPP allocates an output buffer.
@@ -105,6 +109,105 @@ namespace video {
     std::uint64_t freshness_drops {};  ///< Total older V4L2 frames proactively discarded to keep the newest frame.
     std::uint32_t dropped_samples {};  ///< Samples discarded after the bounded buffer filled.
   };
+
+  /** @brief Concrete work spans retained for the real-time frame timeline. */
+  enum class frame_profile_timeline_stage_e : std::uint8_t {
+    rx_driver_age,  ///< Observable RX EOF timestamp to successful dequeue.
+    capture_queue,  ///< Successful dequeue to encoder-thread processing.
+    rga,  ///< Video conversion, scaling, fill, or letterbox work.
+    ui_render,  ///< Changed Dear ImGui snapshot rendered through Vulkan.
+    ui_compose,  ///< Cached Vulkan UI panel composed into the video through RGA.
+    mpp_import,  ///< Non-cached MPP DMA-BUF import.
+    mpp_output_buffer_acquire,  ///< MPP output-buffer allocation.
+    mpp_output_packet_init,  ///< MPP output-packet wrapper initialization.
+    mpp_submit,  ///< Time spent in encode_put_frame.
+    mpp_output_wait,  ///< encode_put_frame return to complete MppPacket.
+    encoded_queue,  ///< Complete MppPacket to network-thread processing.
+    packetize_send,  ///< Network-thread processing to final send return.
+    count  ///< Number of concrete timeline stages.
+  };
+
+  /** @brief Execution resources used to place overlapping spans on stable rows. */
+  enum class frame_profile_timeline_lane_e : std::uint8_t {
+    capture,  ///< HDMI RX dequeue and capture queue.
+    rga,  ///< RGA video conversion or fill.
+    ui,  ///< Vulkan rendering and RGA UI composition.
+    mpp,  ///< MPP preparation, submission, and output wait.
+    network,  ///< Encoded queue, packetization, and send.
+    count  ///< Number of timeline lanes.
+  };
+
+  /** @brief One valid concrete stage interval relative to its frame's RX EOF origin. */
+  struct frame_profile_timeline_span_t {
+    frame_profile_timeline_stage_e stage {frame_profile_timeline_stage_e::rx_driver_age};  ///< Stable stage identifier.
+    frame_profile_timeline_lane_e lane {frame_profile_timeline_lane_e::capture};  ///< Execution row used by the renderer.
+    std::int64_t start_us {};  ///< Stage start relative to RX EOF in microseconds.
+    std::int64_t end_us {};  ///< Stage end relative to RX EOF in microseconds.
+
+    bool operator==(const frame_profile_timeline_span_t &) const = default;
+  };
+
+  /** @brief Fixed-size timeline for one completed captured frame. */
+  struct frame_profile_timeline_frame_t {
+    static constexpr auto stage_count = static_cast<std::size_t>(frame_profile_timeline_stage_e::count);
+    static constexpr auto max_spans = stage_count;
+
+    std::array<frame_profile_timeline_span_t, max_spans> spans;  ///< Valid spans in stage order.
+    std::uint32_t capture_sequence {};  ///< V4L2 sequence for correlation.
+    std::int64_t frame_index {-1};  ///< Sunshine frame index for correlation.
+    std::int64_t origin_offset_us {};  ///< RX EOF relative to the current stream epoch.
+    std::int64_t end_us {};  ///< Final send return relative to RX EOF.
+    std::uint32_t missing_stage_mask {};  ///< Concrete stages lacking either timestamp.
+    std::uint32_t invalid_stage_mask {};  ///< Concrete stages with negative or out-of-frame bounds.
+    std::uint8_t span_count {};  ///< Number of populated entries in spans.
+    bool rga_bypass {};  ///< Whether video conversion/fill bypassed RGA.
+
+    bool operator==(const frame_profile_timeline_frame_t &) const = default;
+  };
+
+  /** @brief Immutable oldest-to-newest ring snapshot consumed by the Vulkan UI. */
+  struct frame_profile_timeline_snapshot_t {
+    static constexpr std::size_t frame_capacity = 32;
+
+    std::array<frame_profile_timeline_frame_t, frame_capacity> frames;  ///< Completed frames ordered from oldest to newest.
+    std::uint32_t frame_count {};  ///< Number of populated frames.
+    std::uint32_t rejected_frames {};  ///< Captured profiles rejected because the frame boundary was missing or invalid.
+    std::uint64_t stream_generation {};  ///< Generation changed when the producing video sender resets.
+
+    bool operator==(const frame_profile_timeline_snapshot_t &) const = default;
+  };
+
+  /** @brief Return the stable display name for a concrete timeline stage. */
+  constexpr std::string_view frame_profile_timeline_stage_name(frame_profile_timeline_stage_e stage) noexcept {
+    switch (stage) {
+      case frame_profile_timeline_stage_e::rx_driver_age:
+        return "RX EOF-DQ";
+      case frame_profile_timeline_stage_e::capture_queue:
+        return "CAP QUEUE";
+      case frame_profile_timeline_stage_e::rga:
+        return "RGA";
+      case frame_profile_timeline_stage_e::ui_render:
+        return "UI RENDER";
+      case frame_profile_timeline_stage_e::ui_compose:
+        return "UI COMPOSE";
+      case frame_profile_timeline_stage_e::mpp_import:
+        return "MPP IMPORT";
+      case frame_profile_timeline_stage_e::mpp_output_buffer_acquire:
+        return "MPP OUT BUF";
+      case frame_profile_timeline_stage_e::mpp_output_packet_init:
+        return "MPP PACKET";
+      case frame_profile_timeline_stage_e::mpp_submit:
+        return "MPP SUBMIT";
+      case frame_profile_timeline_stage_e::mpp_output_wait:
+        return "MPP WAIT";
+      case frame_profile_timeline_stage_e::encoded_queue:
+        return "ENC QUEUE";
+      case frame_profile_timeline_stage_e::packetize_send:
+        return "PACKET-SEND";
+      default:
+        return "UNKNOWN";
+    }
+  }
 
   /**
    * @brief Return a stable display name for a profile metric.
@@ -368,6 +471,135 @@ namespace video {
   /** @brief Return the process-wide fixed snapshot store shared by stream and encoder threads. */
   inline frame_profile_snapshot_store_t &frame_profile_snapshot_store() noexcept {
     static frame_profile_snapshot_store_t store;
+    return store;
+  }
+
+  /** @brief Build one renderer-ready timeline frame from completed raw timestamps. */
+  inline std::optional<frame_profile_timeline_frame_t> make_frame_profile_timeline_frame(
+    const frame_profile_t &profile,
+    frame_profile_t::time_point stream_epoch
+  ) noexcept {
+    if (profile.kind != frame_profile_kind_e::captured || !profile.capture || !profile.send_end || *profile.send_end < *profile.capture) {
+      return std::nullopt;
+    }
+
+    frame_profile_timeline_frame_t frame {
+      .capture_sequence = profile.capture_sequence,
+      .frame_index = profile.frame_index,
+      .origin_offset_us = std::chrono::duration_cast<std::chrono::microseconds>(*profile.capture - stream_epoch).count(),
+      .end_us = std::chrono::duration_cast<std::chrono::microseconds>(*profile.send_end - *profile.capture).count(),
+      .rga_bypass = !profile.rga_used
+    };
+    auto append = [&](frame_profile_timeline_stage_e stage, frame_profile_timeline_lane_e lane, const std::optional<frame_profile_t::time_point> &start, const std::optional<frame_profile_t::time_point> &end) {
+      const auto bit = 1U << static_cast<std::uint8_t>(stage);
+      if (!start || !end) {
+        frame.missing_stage_mask |= bit;
+        return;
+      }
+      const auto start_us = std::chrono::duration_cast<std::chrono::microseconds>(*start - *profile.capture).count();
+      const auto end_us = std::chrono::duration_cast<std::chrono::microseconds>(*end - *profile.capture).count();
+      if (start_us < 0 || end_us < start_us || end_us > frame.end_us) {
+        frame.invalid_stage_mask |= bit;
+        return;
+      }
+      frame.spans[frame.span_count++] = {stage, lane, start_us, end_us};
+    };
+
+    append(frame_profile_timeline_stage_e::rx_driver_age, frame_profile_timeline_lane_e::capture, profile.capture, profile.dequeued);
+    append(frame_profile_timeline_stage_e::capture_queue, frame_profile_timeline_lane_e::capture, profile.dequeued, profile.capture_queue_exit);
+    if (profile.rga_used) {
+      append(frame_profile_timeline_stage_e::rga, frame_profile_timeline_lane_e::rga, profile.rga_begin, profile.rga_end);
+    }
+    if (profile.ui_render_begin || profile.ui_render_end) {
+      append(frame_profile_timeline_stage_e::ui_render, frame_profile_timeline_lane_e::ui, profile.ui_render_begin, profile.ui_render_end);
+    }
+    if (profile.ui_compose_begin || profile.ui_compose_end) {
+      append(frame_profile_timeline_stage_e::ui_compose, frame_profile_timeline_lane_e::ui, profile.ui_compose_begin, profile.ui_compose_end);
+    }
+    append(frame_profile_timeline_stage_e::mpp_import, frame_profile_timeline_lane_e::mpp, profile.mpp_import_begin, profile.mpp_import_end);
+    append(frame_profile_timeline_stage_e::mpp_output_buffer_acquire, frame_profile_timeline_lane_e::mpp, profile.mpp_output_buffer_begin, profile.mpp_output_buffer_end);
+    append(frame_profile_timeline_stage_e::mpp_output_packet_init, frame_profile_timeline_lane_e::mpp, profile.mpp_output_packet_begin, profile.mpp_output_packet_end);
+    append(frame_profile_timeline_stage_e::mpp_submit, frame_profile_timeline_lane_e::mpp, profile.mpp_submit_begin, profile.mpp_submit_end);
+    append(frame_profile_timeline_stage_e::mpp_output_wait, frame_profile_timeline_lane_e::mpp, profile.mpp_submit_end, profile.mpp_output);
+    append(frame_profile_timeline_stage_e::encoded_queue, frame_profile_timeline_lane_e::network, profile.mpp_output, profile.packetize_begin);
+    append(frame_profile_timeline_stage_e::packetize_send, frame_profile_timeline_lane_e::network, profile.packetize_begin, profile.send_end);
+    return frame;
+  }
+
+  /** @brief Thread-safe fixed ring of completed frames for the real-time Timeline page. */
+  class frame_profile_timeline_store_t {
+  public:
+    /** @brief Reset the producer epoch and begin a new stream generation. */
+    void reset() noexcept {
+      std::lock_guard<std::mutex> lock(mutex_);
+      frames_ = {};
+      next_ = 0;
+      used_ = 0;
+      rejected_frames_ = 0;
+      epoch_.reset();
+      ++stream_generation_;
+      ++publication_generation_;
+    }
+
+    /** @brief Publish one completed captured frame into the bounded ring. */
+    bool publish(const frame_profile_t &profile) noexcept {
+      if (profile.kind != frame_profile_kind_e::captured) {
+        return false;
+      }
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!profile.capture || !profile.send_end || *profile.send_end < *profile.capture) {
+        ++rejected_frames_;
+        ++publication_generation_;
+        return false;
+      }
+      if (!epoch_) {
+        epoch_ = profile.capture;
+      }
+      auto frame = make_frame_profile_timeline_frame(profile, *epoch_);
+      if (!frame) {
+        ++rejected_frames_;
+        ++publication_generation_;
+        return false;
+      }
+      frames_[next_] = *frame;
+      next_ = (next_ + 1U) % frame_profile_timeline_snapshot_t::frame_capacity;
+      used_ = std::min<std::size_t>(used_ + 1U, frame_profile_timeline_snapshot_t::frame_capacity);
+      ++publication_generation_;
+      return true;
+    }
+
+    /** @brief Copy a newer oldest-to-newest Timeline snapshot for a reader. */
+    bool read_newer(std::uint64_t &generation, frame_profile_timeline_snapshot_t &snapshot) noexcept {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (generation == publication_generation_) {
+        return false;
+      }
+      snapshot = {};
+      snapshot.frame_count = static_cast<std::uint32_t>(used_);
+      snapshot.rejected_frames = rejected_frames_;
+      snapshot.stream_generation = stream_generation_;
+      const auto oldest = used_ == frame_profile_timeline_snapshot_t::frame_capacity ? next_ : 0U;
+      for (std::size_t index = 0; index < used_; ++index) {
+        snapshot.frames[index] = frames_[(oldest + index) % frame_profile_timeline_snapshot_t::frame_capacity];
+      }
+      generation = publication_generation_;
+      return true;
+    }
+
+  private:
+    std::mutex mutex_;  ///< Protects the fixed ring and producer epoch.
+    std::array<frame_profile_timeline_frame_t, frame_profile_timeline_snapshot_t::frame_capacity> frames_;  ///< Circular completed-frame storage.
+    std::optional<frame_profile_t::time_point> epoch_;  ///< RX EOF of the first accepted frame in the current stream.
+    std::size_t next_ {};  ///< Slot overwritten by the next accepted frame.
+    std::size_t used_ {};  ///< Number of valid ring slots.
+    std::uint32_t rejected_frames_ {};  ///< Invalid captured profiles in this stream.
+    std::uint64_t stream_generation_ {};  ///< Producer-reset generation.
+    std::uint64_t publication_generation_ {};  ///< Any observable store change.
+  };
+
+  /** @brief Return the process-wide completed-frame Timeline store. */
+  inline frame_profile_timeline_store_t &frame_profile_timeline_store() noexcept {
+    static frame_profile_timeline_store_t store;
     return store;
   }
 }  // namespace video

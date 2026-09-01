@@ -554,6 +554,40 @@ namespace platf::rga {
     }
   }
 
+  target_buffer_t target_buffer_t::allocate_bgr888(backend_t &backend, dma_allocator_t &allocator, std::uint32_t width, std::uint32_t height, std::uint32_t stride) {
+    if (width == 0 || height == 0 || width > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) || height > static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+      throw error_t("BGR888 target allocation", invalid_status("BGR888 target dimensions must be positive and fit librga int parameters"));
+    }
+    const auto minimum_stride = static_cast<std::uint64_t>(width) * 3U;
+    if (minimum_stride > std::numeric_limits<std::uint32_t>::max()) {
+      throw error_t("BGR888 target allocation", invalid_status("BGR888 target stride exceeds uint32 capacity"));
+    }
+    if (stride == 0) {
+      stride = static_cast<std::uint32_t>(minimum_stride);
+    }
+    if (stride < minimum_stride || stride % 3U != 0 || stride > static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+      throw error_t("BGR888 target allocation", invalid_status("BGR888 target stride must hold complete three-byte pixels and fit librga int parameters"));
+    }
+    if (static_cast<std::uint64_t>(stride) > std::numeric_limits<std::uint64_t>::max() / height) {
+      throw error_t("BGR888 target allocation", invalid_status("BGR888 target allocation arithmetic overflow"));
+    }
+    const auto allocation_size = static_cast<std::uint64_t>(stride) * height;
+    if (allocation_size > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+      throw error_t("BGR888 target allocation", invalid_status("BGR888 target allocation exceeds librga importbuffer_fd(int size) capacity"));
+    }
+    const auto dma_buf_fd = allocator.allocate(allocation_size);
+    if (dma_buf_fd < 0) {
+      throw error_t("BGR888 target allocation", invalid_status("allocator returned an invalid DMA-BUF descriptor"));
+    }
+    try {
+      auto buffer = imported_buffer_t::import(backend, {dma_buf_fd, width, height, stride, allocation_size, pixel_format_e::bgr888});
+      return target_buffer_t(&allocator, dma_buf_fd, std::move(buffer));
+    } catch (...) {
+      allocator.close(dma_buf_fd);
+      throw;
+    }
+  }
+
   imported_buffer_t &target_buffer_t::rga_buffer() noexcept {
     return buffer_;
   }

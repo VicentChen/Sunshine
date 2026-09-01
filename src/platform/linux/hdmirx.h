@@ -9,6 +9,7 @@
 #pragma once
 
 #include "src/platform/common.h"
+#include "src/platform/linux/input_state_machine.h"
 
 #include <chrono>
 #include <cstdint>
@@ -202,6 +203,11 @@ namespace platf::hdmirx {
     // Consumed by the RKMPP encode session to request an IDR for the first
     // placeholder and the first recovered real frame.
     bool request_idr {};
+    input_sm::state_e connection_state {input_sm::state_e::starting};  ///< HDMI RX state for the UI snapshot.
+    std::uint32_t moonlight_width {};  ///< Requested Moonlight width for the UI snapshot.
+    std::uint32_t moonlight_height {};  ///< Requested Moonlight height for the UI snapshot.
+    std::uint32_t input_width {};  ///< Current HDMI input width, or zero when unavailable.
+    std::uint32_t input_height {};  ///< Current HDMI input height, or zero when unavailable.
   };
 
   /**

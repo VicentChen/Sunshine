@@ -108,6 +108,7 @@ namespace input {
     std::string failure_stage;  ///< Fixed failure stage, empty outside failed state.
     std::string failure_kind;  ///< Fixed retry, reauthentication, or permanent policy.
     std::uint64_t epoch = 0;  ///< Monotonic connection generation without remote identifiers.
+    bool selected = false;  ///< Whether the active application routes gamepads through Xbox Remote Play.
   };
 
   /**
@@ -185,6 +186,15 @@ namespace input {
      * @return True when an allocated router accepted the state.
      */
     bool update_gamepad(const std::shared_ptr<input_t> &input, std::uint8_t client_index, const platf::gamepad_state_t &state);
+
+    /**
+     * @brief Submit a complete gamepad state through production passthrough routing.
+     *
+     * @param input Retained test input.
+     * @param client_index Client-relative controller index.
+     * @param state Complete controller state.
+     */
+    void passthrough_gamepad(const std::shared_ptr<input_t> &input, std::uint8_t client_index, const platf::gamepad_state_t &state);
 
     /**
      * @brief Synchronously neutralize retained gamepads for a unit test.

@@ -509,6 +509,7 @@ namespace input {
     gamepad_t():
         gamepad_state {},
         back_timeout_id {},
+        ui_start_release_timeout_id {},
         id {-1},
         client_index {},
         back_button_state {button_state_e::NONE} {
@@ -529,6 +530,7 @@ namespace input {
     platf::gamepad_state_t gamepad_state;  ///< Gamepad state.
 
     thread_pool_util::ThreadPool::task_id_t back_timeout_id;  ///< Back timeout ID.
+    thread_pool_util::ThreadPool::task_id_t ui_start_release_timeout_id;  ///< Deferred standalone Start release ID.
 
     int id;  ///< Global gamepad slot assigned to this client controller.
     std::uint8_t client_index;  ///< Client-relative controller index used by output sinks.
@@ -668,6 +670,10 @@ namespace input {
         task_pool.cancel(gamepad.back_timeout_id);
         gamepad.back_timeout_id = nullptr;
       }
+      if (gamepad.ui_start_release_timeout_id) {
+        task_pool.cancel(gamepad.ui_start_release_timeout_id);
+        gamepad.ui_start_release_timeout_id = nullptr;
+      }
       if (gamepad.id >= 0) {
         ::input::free_gamepad(platf_input, gamepad.router, {gamepad.id, gamepad.client_index});
         gamepad.id = -1;
@@ -715,6 +721,10 @@ namespace input {
         if (controller.back_timeout_id) {
           task_pool.cancel(controller.back_timeout_id);
           controller.back_timeout_id = nullptr;
+        }
+        if (controller.ui_start_release_timeout_id) {
+          task_pool.cancel(controller.ui_start_release_timeout_id);
+          controller.ui_start_release_timeout_id = nullptr;
         }
         const platf::gamepad_id_t id {controller.id, controller.client_index};
         controller.router->neutralize(id);
@@ -1903,6 +1913,10 @@ namespace input {
       }
     } else if (!(packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id >= 0) {
       // If this is the final event for a gamepad being removed, free the gamepad and return.
+      if (gamepad.ui_start_release_timeout_id) {
+        task_pool.cancel(gamepad.ui_start_release_timeout_id);
+        gamepad.ui_start_release_timeout_id = nullptr;
+      }
       ::input::free_gamepad(platf_input, gamepad.router, {gamepad.id, static_cast<std::uint8_t>(packet->controllerNumber)});
       gamepad.id = -1;
       gamepad.router.reset();
@@ -1928,6 +1942,11 @@ namespace input {
       packet->rightStickY
     };
 
+    if (gamepad.ui_start_release_timeout_id) {
+      task_pool.cancel(gamepad.ui_start_release_timeout_id);
+      gamepad.ui_start_release_timeout_id = nullptr;
+    }
+
 #if defined(SUNSHINE_BUILD_RKMPP) && defined(SUNSHINE_BUILD_VULKAN)
     const auto ui_decision = platf::ui::global_controller().update(
       static_cast<std::uint8_t>(gamepad.id),
@@ -1942,6 +1961,10 @@ namespace input {
             task_pool.cancel(candidate.back_timeout_id);
             candidate.back_timeout_id = nullptr;
           }
+          if (candidate.ui_start_release_timeout_id) {
+            task_pool.cancel(candidate.ui_start_release_timeout_id);
+            candidate.ui_start_release_timeout_id = nullptr;
+          }
           if (candidate.id >= 0 && candidate.router) {
             candidate.router->neutralize({candidate.id, static_cast<std::uint8_t>(client_index)});
           }
@@ -1950,10 +1973,35 @@ namespace input {
         }
         BOOST_LOG(info) << "RKMPP Vulkan UI " << (ui_decision.visible ? "opened" : "closed")
                         << " by gamepad slot " << gamepad.id;
+      } else if (ui_decision.replay_start_tap) {
+        auto replay_state = gamepad_state;
+        replay_state.buttonFlags |= platf::START;
+        update_gamepad(gamepad.router, {gamepad.id, static_cast<std::uint8_t>(packet->controllerNumber)}, replay_state);
+        gamepad.gamepad_state = replay_state;
+
+        auto release_start = [input, controller = packet->controllerNumber]() {
+          if (controller < 0 || controller >= input->gamepads.size()) {
+            return;
+          }
+          auto &candidate = input->gamepads[controller];
+          candidate.ui_start_release_timeout_id = nullptr;
+          if (candidate.id < 0 || !candidate.router) {
+            return;
+          }
+          candidate.gamepad_state.buttonFlags &= ~platf::START;
+          update_gamepad(candidate.router, {candidate.id, static_cast<std::uint8_t>(controller)}, candidate.gamepad_state);
+        };
+        if (task_pool.running()) {
+          gamepad.ui_start_release_timeout_id = task_pool.pushDelayed(std::move(release_start), 50ms).task_id;
+        } else {
+          release_start();
+        }
       } else if (ui_decision.neutralize) {
         gamepad.router->neutralize({gamepad.id, static_cast<std::uint8_t>(packet->controllerNumber)});
       }
-      gamepad.gamepad_state = {};
+      if (!ui_decision.replay_start_tap) {
+        gamepad.gamepad_state = {};
+      }
       return;
     }
 #endif
@@ -2446,6 +2494,10 @@ namespace input {
         task_pool.cancel(gamepad.back_timeout_id);
         gamepad.back_timeout_id = nullptr;
       }
+      if (gamepad.ui_start_release_timeout_id) {
+        task_pool.cancel(gamepad.ui_start_release_timeout_id);
+        gamepad.ui_start_release_timeout_id = nullptr;
+      }
       if (gamepad.id >= 0) {
 #if defined(SUNSHINE_BUILD_RKMPP) && defined(SUNSHINE_BUILD_VULKAN)
         (void) platf::ui::global_controller().disconnect(static_cast<std::uint8_t>(gamepad.id));
@@ -2633,6 +2685,8 @@ namespace input {
   }
 
   xbox_remote_status_t xbox_remote_status() {
+    const auto router = selected_gamepad_router();
+    const bool selected = router && router->mode() == gamepad::output_mode_e::xbox_remote;
 #ifdef SUNSHINE_XBOX_REMOTE_PLAY
     std::shared_ptr<::xbox_remote::worker::session_t> worker;
     {
@@ -2640,11 +2694,11 @@ namespace input {
       worker = xbox_remote_worker;
     }
     if (worker) {
-      return {std::string {::xbox_remote::worker::state_name(worker->state())}, worker->stage(), worker->failure_stage(), worker->failure_kind(), worker->epoch()};
+      return {std::string {::xbox_remote::worker::state_name(worker->state())}, worker->stage(), worker->failure_stage(), worker->failure_kind(), worker->epoch(), selected};
     }
-    return {"idle", {}, {}, {}, 0};
+    return {"idle", {}, {}, {}, 0, selected};
 #else
-    return {"unavailable", {}, {}, {}, 0};
+    return {"unavailable", {}, {}, {}, 0, selected};
 #endif
   }
 
@@ -2757,6 +2811,25 @@ namespace input {
       }
       const auto &gamepad = input->gamepads[client_index];
       return gamepad.id >= 0 && gamepad.router && gamepad.router->update({gamepad.id, client_index}, state);
+    }
+
+    void passthrough_gamepad(const std::shared_ptr<input_t> &input, std::uint8_t client_index, const platf::gamepad_state_t &state) {
+      if (!input || client_index >= input->gamepads.size()) {
+        return;
+      }
+      NV_MULTI_CONTROLLER_PACKET packet {};
+      packet.controllerNumber = client_index;
+      packet.activeGamepadMask = 1U << client_index;
+      packet.buttonFlags = static_cast<std::uint16_t>(state.buttonFlags);
+      packet.buttonFlags2 = static_cast<std::uint16_t>(state.buttonFlags >> 16U);
+      packet.leftTrigger = state.lt;
+      packet.rightTrigger = state.rt;
+      packet.leftStickX = state.lsX;
+      packet.leftStickY = state.lsY;
+      packet.rightStickX = state.rsX;
+      packet.rightStickY = state.rsY;
+      auto mutable_input = input;
+      ::input::passthrough(mutable_input, &packet);
     }
 
     void neutralize_gamepads(const std::shared_ptr<input_t> &input) {

@@ -837,6 +837,7 @@ namespace platf {
               rx_image->placeholder = true;
               rx_image->request_idr = sm_.consume_idr_request();
               rx_image->frame_timestamp = std::chrono::steady_clock::now();
+              populate_connection_status(*rx_image);
               if (config::video.rkmpp_profile) {
                 rx_image->frame_profile.emplace();
                 rx_image->frame_profile->kind = video::frame_profile_kind_e::placeholder;
@@ -883,6 +884,7 @@ namespace platf {
             rx_image->placeholder = false;
             rx_image->request_idr = sm_.consume_idr_request();
             rx_image->frame_timestamp = rx_image->frame->timestamp();
+            populate_connection_status(*rx_image);
             if (config::video.rkmpp_profile) {
               rx_image->frame_profile.emplace();
               rx_image->frame_profile->kind = video::frame_profile_kind_e::captured;
@@ -924,6 +926,7 @@ namespace platf {
             rx_image->placeholder = true;
             rx_image->request_idr = sm_.consume_idr_request();
             rx_image->frame_timestamp = std::chrono::steady_clock::now();
+            populate_connection_status(*rx_image);
             if (config::video.rkmpp_profile) {
               rx_image->frame_profile.emplace();
               rx_image->frame_profile->kind = video::frame_profile_kind_e::placeholder;
@@ -938,6 +941,7 @@ namespace platf {
           rx_image->placeholder = false;
           rx_image->request_idr = sm_.consume_idr_request();
           rx_image->frame_timestamp = rx_image->frame->timestamp();
+          populate_connection_status(*rx_image);
           if (config::video.rkmpp_profile) {
             rx_image->frame_profile.emplace();
             rx_image->frame_profile->kind = video::frame_profile_kind_e::captured;
@@ -970,6 +974,19 @@ namespace platf {
       }
 
     private:
+      /** @brief Attach the sanitized per-frame connection snapshot consumed by the UI. */
+      void populate_connection_status(hdmirx::hdmirx_img_t &image) const {
+        image.connection_state = sm_.state();
+        image.moonlight_width = moonlight_resolution_.width;
+        image.moonlight_height = moonlight_resolution_.height;
+        std::optional<hdmirx::resolution_t> input;
+        if (image.connection_state == input_sm::state_e::negotiating || input_sm::is_streaming_state(image.connection_state)) {
+          input = actual_input_resolution();
+        }
+        image.input_width = input ? input->width : 0;
+        image.input_height = input ? input->height : 0;
+      }
+
       std::optional<hdmirx::resolution_t> actual_input_resolution() const {
         const auto &timings = capture_.timings();
         if (!timings || timings->type != V4L2_DV_BT_656_1120 || timings->bt.width == 0 || timings->bt.height == 0) {

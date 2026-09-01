@@ -1478,6 +1478,9 @@ namespace stream {
     logging::min_max_avg_periodic_logger<double> frame_processing_latency_logger(debug, "Frame processing latency", "ms");
     video::frame_profile_window_t rkmpp_profile_window;
     auto rkmpp_profile_window_start = std::chrono::steady_clock::now();
+    if (config::video.rkmpp_profile) {
+      video::frame_profile_timeline_store().reset();
+    }
 
     logging::time_delta_periodic_logger frame_send_batch_latency_logger(debug, "Network: each send_batch() latency");
     logging::time_delta_periodic_logger frame_fec_latency_logger(debug, "Network: each FEC block latency");
@@ -1784,6 +1787,7 @@ namespace stream {
           packet->frame_profile->send_end = std::chrono::steady_clock::now();
         }
         if (packet->frame_profile && config::video.rkmpp_profile) {
+          video::frame_profile_timeline_store().publish(*packet->frame_profile);
           rkmpp_profile_window.collect(*packet->frame_profile);
           const auto now = std::chrono::steady_clock::now();
           if (now - rkmpp_profile_window_start >= 5s) {
