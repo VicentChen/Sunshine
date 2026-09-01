@@ -755,14 +755,6 @@ namespace platf {
         return {};
       }
 
-      platf::edid::edid_result_t<void> reset_hdmi_link() override {
-        int unused = 0;
-        constexpr auto k_soft_reset = _IO('V', BASE_VIDIOC_PRIVATE + 6);
-        if (ioctl(fd_, k_soft_reset, &unused) < 0) {
-          return std::unexpected(platf::edid::edid_error_t {platf::edid::classify_errno(errno), errno, "RK_HDMIRX_CMD_SOFT_RESET failed"});
-        }
-        return {};
-      }
     };
 
     /**

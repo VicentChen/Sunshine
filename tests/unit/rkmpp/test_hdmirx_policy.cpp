@@ -78,7 +78,7 @@ namespace {
     EXPECT_EQ(viewport->destination.height % 2, 0U);
   }
 
-  TEST(HdmirxPolicyMode, ChoosesSmallestSufficientMode) {
+  TEST(HdmirxPolicyMode, ChoosesExactRequestedMode) {
     const std::vector<hdmi_mode_t> modes {
       {{3840, 2160}, {60, 1}, true},
       {{2560, 1440}, {60, 1}, true},
@@ -89,7 +89,7 @@ namespace {
     EXPECT_EQ(selected->resolution, (resolution_t {1920, 1080}));
   }
 
-  TEST(HdmirxPolicyMode, ChoosesLargestWhenNoModeIsSufficient) {
+  TEST(HdmirxPolicyMode, ChoosesClosestMode) {
     const std::vector<hdmi_mode_t> modes {
       {{1280, 720}, {60, 1}, true},
       {{1920, 1080}, {60, 1}, true},
@@ -98,6 +98,16 @@ namespace {
     const auto selected = platf::hdmirx::select_hdmi_mode(modes, {2560, 1440});
     ASSERT_TRUE(selected.has_value());
     EXPECT_EQ(selected->resolution, (resolution_t {1920, 1080}));
+  }
+
+  TEST(HdmirxPolicyMode, CloserSmallerModeBeatsDistantLargerMode) {
+    const std::vector<hdmi_mode_t> modes {
+      {{3840, 2160}, {60, 1}, true},
+      {{1600, 900}, {60, 1}, true},
+    };
+    const auto selected = platf::hdmirx::select_hdmi_mode(modes, {1920, 1080});
+    ASSERT_TRUE(selected.has_value());
+    EXPECT_EQ(selected->resolution, (resolution_t {1600, 900}));
   }
 
   TEST(HdmirxPolicyMode, UsesAspectAndRefreshTieBreakersDeterministically) {
@@ -139,22 +149,22 @@ namespace {
 
   TEST(HdmirxPolicyMode, ComparesAspectDistanceAsARealRatio) {
     const std::vector<hdmi_mode_t> modes {
-      {{923, 480}, {60, 1}, true},
-      {{852, 520}, {60, 1}, true},
+      {{923, 400}, {60, 1}, true},
+      {{852, 471}, {60, 1}, true},
     };
     const auto selected = platf::hdmirx::select_hdmi_mode(modes, {1920, 1080});
     ASSERT_TRUE(selected.has_value());
-    EXPECT_EQ(selected->resolution, (resolution_t {852, 520}));
+    EXPECT_EQ(selected->resolution, (resolution_t {852, 471}));
   }
 
-  TEST(HdmirxPolicyMode, FallbackUsesAspectBeforeDimensionDelta) {
+  TEST(HdmirxPolicyMode, DimensionDistancePrecedesAspectTieBreaker) {
     const std::vector<hdmi_mode_t> modes {
       {{500, 200}, {60, 1}, true},
       {{400, 250}, {60, 1}, true},
     };
     const auto selected = platf::hdmirx::select_hdmi_mode(modes, {1920, 1080});
     ASSERT_TRUE(selected.has_value());
-    EXPECT_EQ(selected->resolution, (resolution_t {400, 250}));
+    EXPECT_EQ(selected->resolution, (resolution_t {500, 200}));
   }
 
   TEST(HdmirxPolicyMode, UsesRawRefreshFieldsForEquivalentRates) {

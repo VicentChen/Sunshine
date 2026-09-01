@@ -181,18 +181,6 @@ namespace platf::edid {
       return std::unexpected(edid_error_t{error_category_e::not_supported, ENOTTY, "HDMI audio control is not supported"});
     }
 
-    /**
-     * @brief Request an optional HDMI RX link reset after an EDID update.
-     *
-     * Some HDMI RX drivers must reconfigure their link state after EDID data
-     * changes.  Devices without such a control can safely report
-     * not_supported.
-     *
-     * @return Success, or not_supported when the device has no reset control.
-     */
-    virtual edid_result_t<void> reset_hdmi_link() {
-      return std::unexpected(edid_error_t{error_category_e::not_supported, ENOTTY, "HDMI link reset is not supported"});
-    }
   };
 
   // -------------------------------------------------------------------------
@@ -275,14 +263,33 @@ namespace platf::edid {
   /**
    * @brief Parse a complete EDID blob and extract all HDMI modes.
    *
-   * Validates checksums, parses detailed timing descriptors from the base
-   * block, and converts each to an hdmi_mode_t.
+   * Validates every declared block, parses detailed timing descriptors from the
+   * base block, and adds recognized progressive CTA-861 video modes. Duplicate
+   * resolution/refresh pairs are collapsed.
    *
    * @param edid_data Complete EDID data.
    * @return Vector of HDMI modes, empty if EDID is invalid or has no timings.
    */
   std::vector<platf::hdmirx::hdmi_mode_t> parse_edid_modes(
     std::span<const std::uint8_t> edid_data) noexcept;
+
+  /**
+   * @brief Restrict a valid source EDID to one advertised resolution.
+   *
+   * Preserves the receiver identity and non-video CTA capability blocks such
+   * as audio, HDMI VSDB, and HDMI Forum VSDB. Video descriptors are rewritten
+   * so the selected resolution is preferred and other resolutions are no
+   * longer advertised. This is required for HDMI 2.0 sources that reject a
+   * synthetic minimal EDID lacking their negotiated link capabilities.
+   *
+   * @param source_edid Complete EDID currently advertised by the receiver.
+   * @param target Resolution selected from parse_edid_modes(source_edid).
+   * @return Restricted EDID with valid checksums, or an empty vector when the
+   * source is invalid, the target was not advertised, or cannot be represented.
+   */
+  std::vector<std::uint8_t> restrict_edid_to_resolution(
+    std::span<const std::uint8_t> source_edid,
+    const platf::hdmirx::resolution_t &target) noexcept;
 
   // -------------------------------------------------------------------------
   // EDID fixture generation

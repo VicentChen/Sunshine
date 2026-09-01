@@ -48,13 +48,6 @@ namespace platf::hdmirx {
     }
 
     /**
-     * @brief Compute a validated resolution's pixel area.
-     */
-    std::uint64_t area(const resolution_t &resolution) noexcept {
-      return static_cast<std::uint64_t>(resolution.width) * resolution.height;
-    }
-
-    /**
      * @brief Compute the sum of absolute width and height differences.
      */
     std::uint64_t dimension_delta(const resolution_t &left, const resolution_t &right) noexcept {
@@ -227,25 +220,12 @@ namespace platf::hdmirx {
       return std::nullopt;
     }
 
-    const auto has_sufficient_mode = std::any_of(valid.begin(), valid.end(), [&target](const hdmi_mode_t *mode) {
-      return mode->resolution.width >= target.width && mode->resolution.height >= target.height;
-    });
     const auto target_refresh = requested_refresh.value_or(refresh_rate_t {});
     const auto better = [=](const hdmi_mode_t *left, const hdmi_mode_t *right) {
-      const auto left_sufficient = left->resolution.width >= target.width && left->resolution.height >= target.height;
-      const auto right_sufficient = right->resolution.width >= target.width && right->resolution.height >= target.height;
-      if (has_sufficient_mode) {
-        if (left_sufficient != right_sufficient) {
-          return left_sufficient;
-        }
-        if (area(left->resolution) != area(right->resolution)) {
-          return left_sufficient ? area(left->resolution) < area(right->resolution) : false;
-        }
-        if (left_sufficient && dimension_delta(left->resolution, target) != dimension_delta(right->resolution, target)) {
-          return dimension_delta(left->resolution, target) < dimension_delta(right->resolution, target);
-        }
-      } else if (area(left->resolution) != area(right->resolution)) {
-        return area(left->resolution) > area(right->resolution);
+      const auto left_dimension_delta = dimension_delta(left->resolution, target);
+      const auto right_dimension_delta = dimension_delta(right->resolution, target);
+      if (left_dimension_delta != right_dimension_delta) {
+        return left_dimension_delta < right_dimension_delta;
       }
       const auto left_aspect_delta = aspect_delta(left->resolution, target);
       const auto right_aspect_delta = aspect_delta(right->resolution, target);

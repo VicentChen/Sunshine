@@ -7,6 +7,7 @@
  */
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
@@ -391,6 +392,95 @@ namespace {
       EXPECT_EQ(modes[0].resolution.width, f.expected_w);
       EXPECT_EQ(modes[0].resolution.height, f.expected_h);
     }
+  }
+
+  TEST(EdidModeParsing, IncludesProgressiveCtaVideoModes) {
+    const auto edid = with_cta_lpcm_audio_extension(make_1080p_edid(), 97);
+    const auto modes = parse_edid_modes(edid);
+    ASSERT_EQ(modes.size(), 2U);
+    const auto has_1080p = std::any_of(modes.begin(), modes.end(), [](const auto &mode) {
+      return mode.resolution == resolution_t {1920, 1080};
+    });
+    const auto has_2160p60 = std::any_of(modes.begin(), modes.end(), [](const auto &mode) {
+      return mode.resolution == resolution_t {3840, 2160} && mode.refresh_rate.numerator == 60U && mode.refresh_rate.denominator == 1U;
+    });
+    EXPECT_TRUE(has_1080p);
+    EXPECT_TRUE(has_2160p60);
+  }
+
+  TEST(EdidModeParsing, IncludesY420OnlyVideoModes) {
+    auto edid = with_cta_lpcm_audio_extension(make_1080p_edid(), 16);
+    auto extension = std::span<std::uint8_t, k_edid_block_size> {edid.data() + k_edid_block_size, k_edid_block_size};
+    const std::array<std::uint8_t, 4> y420_vdb {0xe3, 0x0e, 0x60, 0x61};
+    std::copy(y420_vdb.begin(), y420_vdb.end(), extension.begin() + extension[2]);
+    extension[2] += y420_vdb.size();
+    std::uint8_t sum = 0;
+    for (std::size_t index = 0; index < 127; ++index) {
+      sum += extension[index];
+    }
+    extension[127] = static_cast<std::uint8_t>(256 - sum);
+
+    const auto modes = parse_edid_modes(edid);
+    EXPECT_TRUE(std::any_of(modes.begin(), modes.end(), [](const auto &mode) {
+      return mode.resolution == resolution_t {3840, 2160} && mode.refresh_rate.numerator == 60U;
+    }));
+  }
+
+  TEST(EdidModeParsing, RejectsInvalidDeclaredCtaBlock) {
+    auto edid = with_cta_lpcm_audio_extension(make_1080p_edid(), 97);
+    ASSERT_EQ(edid.size(), k_edid_block_size * 2U);
+    edid.back() ^= 0x01U;
+    EXPECT_TRUE(parse_edid_modes(edid).empty());
+  }
+
+  TEST(EdidRestriction, PreservesHdmiForumCapabilitiesAndKeepsOnly1080p) {
+    auto source = with_cta_lpcm_audio_extension(make_1080p_edid(), 97);
+    ASSERT_EQ(source.size(), k_edid_block_size * 2U);
+    auto extension = std::span<std::uint8_t, k_edid_block_size> {source.data() + k_edid_block_size, k_edid_block_size};
+    const std::array<std::uint8_t, 4> forum_vsdb {0xe3, 0x05, 0x03, 0x01};
+    std::copy(forum_vsdb.begin(), forum_vsdb.end(), extension.begin() + extension[2]);
+    extension[2] += forum_vsdb.size();
+    const std::array<std::uint8_t, 4> y420_vdb {0xe3, 0x0e, 0x60, 0x61};
+    std::copy(y420_vdb.begin(), y420_vdb.end(), extension.begin() + extension[2]);
+    extension[2] += y420_vdb.size();
+    std::uint8_t sum = 0;
+    for (std::size_t index = 0; index < 127; ++index) {
+      sum += extension[index];
+    }
+    extension[127] = static_cast<std::uint8_t>(256 - sum);
+
+    const auto restricted = restrict_edid_to_resolution(source, {1920, 1080});
+    ASSERT_EQ(restricted.size(), source.size());
+    EXPECT_TRUE(validate_edid_checksums(restricted));
+    const auto modes = parse_edid_modes(restricted);
+    ASSERT_FALSE(modes.empty());
+    EXPECT_TRUE(std::all_of(modes.begin(), modes.end(), [](const auto &mode) {
+      return mode.resolution == resolution_t {1920, 1080};
+    }));
+    EXPECT_NE(std::search(restricted.begin(), restricted.end(), forum_vsdb.begin(), forum_vsdb.end()), restricted.end());
+    EXPECT_EQ(std::search(restricted.begin(), restricted.end(), y420_vdb.begin(), y420_vdb.end()), restricted.end());
+    EXPECT_EQ(source[8], restricted[8]);
+    EXPECT_EQ(source[9], restricted[9]);
+  }
+
+  TEST(EdidRestriction, Promotes4KAndRetainsNonVideoCtaBlocks) {
+    const auto source = with_cta_lpcm_audio_extension(make_1080p_edid(), 97);
+    const auto restricted = restrict_edid_to_resolution(source, {3840, 2160});
+    ASSERT_EQ(restricted.size(), source.size());
+    EXPECT_TRUE(validate_edid_checksums(restricted));
+    const auto modes = parse_edid_modes(restricted);
+    ASSERT_FALSE(modes.empty());
+    EXPECT_TRUE(std::all_of(modes.begin(), modes.end(), [](const auto &mode) {
+      return mode.resolution == resolution_t {3840, 2160};
+    }));
+    const std::array<std::uint8_t, 3> hdmi_oui {0x03, 0x0c, 0x00};
+    EXPECT_NE(std::search(restricted.begin(), restricted.end(), hdmi_oui.begin(), hdmi_oui.end()), restricted.end());
+  }
+
+  TEST(EdidRestriction, RejectsUnadvertisedAndInvalidTargets) {
+    const auto source = make_1080p_edid();
+    EXPECT_TRUE(restrict_edid_to_resolution(source, {3840, 2160}).empty());
+    EXPECT_TRUE(restrict_edid_to_resolution(make_bad_checksum_edid(), {1920, 1080}).empty());
   }
 
   // =========================================================================

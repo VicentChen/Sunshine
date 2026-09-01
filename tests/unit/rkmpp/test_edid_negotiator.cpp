@@ -31,12 +31,10 @@ public:
     std::span<const std::uint8_t>
   )>;
   using set_audio_enabled_fn = std::function<edid_result_t<void>(bool)>;
-  using reset_hdmi_link_fn = std::function<edid_result_t<void>()>;
 
   get_edid_fn on_get_edid;
   set_edid_fn on_set_edid;
   set_audio_enabled_fn on_set_audio_enabled;
-  reset_hdmi_link_fn on_reset_hdmi_link;
 
   edid_result_t<std::uint32_t> get_edid(
     std::uint32_t pad,
@@ -69,12 +67,6 @@ public:
     return ioctl_backend_t::set_audio_enabled(enabled);
   }
 
-  edid_result_t<void> reset_hdmi_link() override {
-    if (on_reset_hdmi_link) {
-      return on_reset_hdmi_link();
-    }
-    return ioctl_backend_t::reset_hdmi_link();
-  }
 };
 
 TEST(EdidNegotiatorTest, HardwareWithoutEdidSupport) {
@@ -97,15 +89,15 @@ TEST(EdidNegotiatorTest, HardwareWithoutEdidSupport) {
   EXPECT_EQ(sm.state(), state_e::streaming_rga);  // Mismatch target and actual
 }
 
-TEST(EdidNegotiatorTest, UpstreamObeysDirectPath) {
+TEST(EdidNegotiatorTest, EdidWriteReliesOnDriverHpdAndReachesDirectPathWhenObserved) {
   mock_ioctl_backend_t backend;
+  const auto original = with_cta_lpcm_audio_extension(make_2160p_edid(), 16);
   std::vector<std::uint32_t> write_block_counts;
   std::vector<std::uint8_t> negotiated_edid;
   std::vector<bool> audio_states;
-  std::uint32_t link_resets = 0;
 
-  backend.on_get_edid = [](auto, auto, auto blocks, auto buf) -> edid_result_t<std::uint32_t> {
-    std::memset(buf.data(), 0, blocks * 128);
+  backend.on_get_edid = [&original](auto, auto, auto blocks, auto buf) -> edid_result_t<std::uint32_t> {
+    std::memcpy(buf.data(), original.data(), blocks * k_edid_block_size);
     return blocks;
   };
   backend.on_set_edid = [&write_block_counts, &negotiated_edid](auto, auto, auto blocks, auto data) -> edid_result_t<std::uint32_t> {
@@ -117,10 +109,6 @@ TEST(EdidNegotiatorTest, UpstreamObeysDirectPath) {
   };
   backend.on_set_audio_enabled = [&audio_states](bool enabled) -> edid_result_t<void> {
     audio_states.push_back(enabled);
-    return {};
-  };
-  backend.on_reset_hdmi_link = [&link_resets]() -> edid_result_t<void> {
-    ++link_resets;
     return {};
   };
 
@@ -144,18 +132,16 @@ TEST(EdidNegotiatorTest, UpstreamObeysDirectPath) {
   ASSERT_EQ(negotiated_edid.size(), k_edid_block_size * 2U);
   EXPECT_EQ(negotiated_edid[126], 1U);
   EXPECT_EQ(negotiated_edid[k_edid_block_size], 0x02U);
-  EXPECT_EQ(negotiated_edid[k_edid_block_size + 3U], 0x40U);
+  EXPECT_EQ(negotiated_edid[k_edid_block_size + 3U], 0x41U);
   EXPECT_EQ(negotiated_edid[k_edid_block_size + 5U], 0x90U);
   EXPECT_EQ(negotiated_edid[k_edid_block_size + 7U], 0x09U);
-  EXPECT_EQ(link_resets, 1U);
   EXPECT_EQ(audio_states, (std::vector<bool> {true}));
 }
 
-TEST(EdidNegotiatorTest, MatchingLiveTimingSkipsEdidWriteAndLinkReset) {
+TEST(EdidNegotiatorTest, MatchingLiveTimingSkipsEdidWrite) {
   mock_ioctl_backend_t backend;
   std::uint32_t reads = 0;
   std::uint32_t writes = 0;
-  std::uint32_t resets = 0;
   backend.on_get_edid = [&reads](auto, auto, auto, auto) -> edid_result_t<std::uint32_t> {
     ++reads;
     return std::unexpected(edid_error_t {error_category_e::not_supported, ENOTTY, "unexpected EDID read"});
@@ -163,10 +149,6 @@ TEST(EdidNegotiatorTest, MatchingLiveTimingSkipsEdidWriteAndLinkReset) {
   backend.on_set_edid = [&writes](auto, auto, auto blocks, auto) -> edid_result_t<std::uint32_t> {
     ++writes;
     return blocks;
-  };
-  backend.on_reset_hdmi_link = [&resets]() -> edid_result_t<void> {
-    ++resets;
-    return {};
   };
 
   state_machine_t sm;
@@ -177,7 +159,36 @@ TEST(EdidNegotiatorTest, MatchingLiveTimingSkipsEdidWriteAndLinkReset) {
   EXPECT_EQ(sm.state(), state_e::streaming_direct);
   EXPECT_EQ(reads, 0U);
   EXPECT_EQ(writes, 0U);
-  EXPECT_EQ(resets, 0U);
+  EXPECT_EQ(sm.last_reason(), "timing matches");
+}
+
+TEST(EdidNegotiatorTest, HigherLiveTimingNegotiatesRequestedModeAndReachesDirectPath) {
+  mock_ioctl_backend_t backend;
+  const auto original = with_cta_lpcm_audio_extension(make_2160p_edid(), 16);
+  std::uint32_t writes = 0;
+  backend.on_get_edid = [&original](auto, auto, auto blocks, auto buffer) -> edid_result_t<std::uint32_t> {
+    std::memcpy(buffer.data(), original.data(), blocks * k_edid_block_size);
+    return blocks;
+  };
+  backend.on_set_edid = [&writes](auto, auto, auto blocks, auto) -> edid_result_t<std::uint32_t> {
+    ++writes;
+    return blocks;
+  };
+
+  state_machine_t sm;
+  session_negotiator_t negotiator(backend, sm, 0);
+  const resolution_t target {1920, 1080};
+  const resolution_t live {3840, 2160};
+  negotiator.start_negotiation(target, {{target, {60, 1}, true}}, live);
+
+  EXPECT_EQ(sm.state(), state_e::negotiating);
+  EXPECT_GT(writes, 0U);
+  for (int i = 0; i < 30; ++i) {
+    if (negotiator.check_lock(target)) {
+      break;
+    }
+  }
+  EXPECT_EQ(sm.state(), state_e::streaming_direct);
   EXPECT_EQ(sm.last_reason(), "timing matches");
 }
 
@@ -209,4 +220,54 @@ TEST(EdidNegotiatorTest, WriteFailureRestoresSavedOriginal) {
 
   EXPECT_EQ(writes, 2U);
   EXPECT_EQ(sm.last_reason(), "EDID write failed; original restored");
+}
+
+TEST(EdidNegotiatorTest, SessionEndRestoresOriginalThroughDriverHpdCycle) {
+  mock_ioctl_backend_t backend;
+  const auto original = with_cta_lpcm_audio_extension(make_2160p_edid(), 16);
+  std::uint32_t writes = 0;
+  backend.on_get_edid = [&original](auto, auto, std::uint32_t blocks, std::span<std::uint8_t> buffer)
+    -> edid_result_t<std::uint32_t> {
+    if (blocks != 1U && blocks != 2U) {
+      return std::unexpected(edid_error_t {error_category_e::invalid_argument, EINVAL, "unexpected block count"});
+    }
+    std::memcpy(buffer.data(), original.data(), blocks * k_edid_block_size);
+    return blocks;
+  };
+  backend.on_set_edid = [&writes](auto, auto, std::uint32_t blocks, auto) -> edid_result_t<std::uint32_t> {
+    ++writes;
+    return blocks;
+  };
+
+  state_machine_t sm;
+  session_negotiator_t negotiator(backend, sm, 0);
+  const resolution_t target {1920, 1080};
+  negotiator.start_negotiation(target, {{target, {60, 1}, true}});
+  ASSERT_EQ(writes, 1U);
+
+  negotiator.end_session();
+  EXPECT_EQ(writes, 2U);
+  EXPECT_EQ(sm.state(), state_e::shutdown);
+}
+
+TEST(EdidNegotiatorTest, UnsupportedModeIsNotSilentlyWrittenAs1080p) {
+  mock_ioctl_backend_t backend;
+  std::uint32_t reads = 0;
+  std::uint32_t writes = 0;
+  backend.on_get_edid = [&reads](auto, auto, auto, auto) -> edid_result_t<std::uint32_t> {
+    ++reads;
+    return std::unexpected(edid_error_t {error_category_e::not_supported, ENOTTY, "unexpected EDID read"});
+  };
+  backend.on_set_edid = [&writes](auto, auto, std::uint32_t blocks, auto) -> edid_result_t<std::uint32_t> {
+    ++writes;
+    return blocks;
+  };
+
+  state_machine_t sm;
+  session_negotiator_t negotiator(backend, sm, 0);
+  negotiator.start_negotiation({4096, 2160}, {{{4096, 2160}, {60, 1}, true}});
+
+  EXPECT_EQ(sm.state(), state_e::negotiating);
+  EXPECT_EQ(reads, 1U);
+  EXPECT_EQ(writes, 0U);
 }

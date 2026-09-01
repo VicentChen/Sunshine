@@ -2448,8 +2448,13 @@ namespace video {
     rkmpp_encode_session_t(const config_t &config, const platf::rkmpp::input_layout_t &input_layout):
         input_layout_(input_layout),
         config_(config),
-        encoder_(platf::rkmpp::encoder_t::create(make_rkmpp_encoder_config(config, input_layout))),
         video_format_(config.videoFormat) {
+      const platf::hdmirx::resolution_t input_resolution {input_layout.visible_width, input_layout.visible_height};
+      const platf::hdmirx::resolution_t target_resolution {static_cast<std::uint32_t>(config.width), static_cast<std::uint32_t>(config.height)};
+      if (!platf::hdmirx::needs_conversion(input_resolution, target_resolution)) {
+        encoder_ = platf::rkmpp::encoder_t::create(make_rkmpp_encoder_config(config, input_layout));
+        direct_encoder_ready_ = true;
+      }
       if (config::video.vulkan_ui) {
         try {
           vulkan_ui_ = std::make_shared<rkmpp_vulkan_ui_session_t>();
@@ -2487,17 +2492,17 @@ namespace video {
       if (platf::hdmirx::needs_conversion(input_resolution, target_resolution)) {
         return convert_with_rga(img);
       }
-      if (rga_fallback_) {
-        rga_fallback_.reset();
-        BOOST_LOG(info) << "RKMPP direct path restored; released RGA fallback resources"sv;
-      }
-      if (*live_layout != input_layout_) {
+      if (!direct_encoder_ready_ || *live_layout != input_layout_) {
         try {
           reconfigure_direct(*live_layout);
         } catch (const std::exception &e) {
           BOOST_LOG(error) << "RKMPP direct encoder reconfiguration failed: " << e.what();
           return -1;
         }
+      }
+      if (rga_fallback_) {
+        rga_fallback_.reset();
+        BOOST_LOG(info) << "RKMPP direct path activated for matching HDMI RX timing; released RGA fallback resources"sv;
       }
       use_rga_ = false;
       if (image_->frame_profile) {
@@ -2534,6 +2539,9 @@ namespace video {
       }
       if (!image_ || !image_->frame) {
         throw std::runtime_error("RKMPP encode called without an HDMI RX frame");
+      }
+      if (!direct_encoder_ready_) {
+        throw std::runtime_error("RKMPP direct encoder is not initialized");
       }
       if (vulkan_ui_) {
         try {
@@ -2598,11 +2606,13 @@ namespace video {
      * @param input_layout Current HDMI RX DMA-BUF layout.
      */
     void reconfigure_direct(const platf::rkmpp::input_layout_t &input_layout) {
-      BOOST_LOG(info) << "RKMPP direct input layout changed; recreating encoder for "
+      BOOST_LOG(info) << (direct_encoder_ready_ ? "RKMPP direct input layout changed; recreating encoder for " : "RKMPP matching input observed; creating direct encoder for ")
                       << input_layout.visible_width << 'x' << input_layout.visible_height
                       << " format=" << input_layout.format
                       << " stride=" << input_layout.horizontal_stride << 'x' << input_layout.vertical_stride;
-      encoder_ = platf::rkmpp::encoder_t::create(make_rkmpp_encoder_config(config_, input_layout));
+      auto replacement = platf::rkmpp::encoder_t::create(make_rkmpp_encoder_config(config_, input_layout));
+      encoder_ = std::move(replacement);
+      direct_encoder_ready_ = true;
       input_layout_ = input_layout;
       input_cache_generation_.reset();
       profile_overlay_ = {};
@@ -2649,6 +2659,7 @@ namespace video {
     rkmpp_profile_overlay_t profile_overlay_;
     bool use_rga_ {};
     bool force_idr_ {};
+    bool direct_encoder_ready_ {};
     int video_format_ {};
   };
 
@@ -3264,9 +3275,14 @@ namespace video {
         return nullptr;
       }
       const auto layout_check = make_rkmpp_encoder_config(config, *input_layout);
-      if (platf::rkmpp::validate_encoder_config(layout_check) == platf::rkmpp::encoder_config_status_e::converter_required) {
-        BOOST_LOG(info) << "RKMPP input conversion is required for HDMI RX " << input_layout->visible_width << "x" << input_layout->visible_height << " to requested coded size " << config.width << "x" << config.height << "; using RGA pipeline.";
-        return std::make_unique<rkmpp_rga_encode_session_t>(config, *input_layout, config.width, config.height);
+      const auto layout_status = platf::rkmpp::validate_encoder_config(layout_check);
+      if (layout_status == platf::rkmpp::encoder_config_status_e::converter_required) {
+        BOOST_LOG(info) << "RKMPP initial HDMI RX " << input_layout->visible_width << "x" << input_layout->visible_height
+                        << " does not match requested coded size " << config.width << "x" << config.height
+                        << "; using adaptive RGA fallback until matching input is observed.";
+      } else if (layout_status != platf::rkmpp::encoder_config_status_e::ok) {
+        BOOST_LOG(error) << "RKMPP input layout or encoder configuration is invalid (status=" << static_cast<int>(layout_status) << ')';
+        return nullptr;
       }
       return std::make_unique<rkmpp_encode_session_t>(config, *input_layout);
 #endif

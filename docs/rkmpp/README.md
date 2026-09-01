@@ -73,7 +73,6 @@ sudo apt-get install --no-install-recommends \
 此外需要系统已安装 Rockchip MPP 开发文件：pkg-config --modversion rockchip_mpp 应能返回版本，且 /usr/include/rockchip/rk_mpi.h 必须存在。脚本只检查这项；它不会猜测或替换板卡仓库提供的 RKMPP 软件包。
 
 GLAD 的生成器刻意选择系统 Python，并要求其中可导入 Jinja2；上述 python3-jinja2 满足此要求。
-GLAD 的生成器刻意选择系统 Python，并要求其中可导入 Jinja2；上述 python3-jinja2 满足此要求。
 
 ### 项目目录内下载的依赖
 
@@ -240,23 +239,33 @@ Gate 4 已通过真实 4K HDMI RX/Moonlight 画面和 4 个 capture slot 连续�
 
 ## RGA 视频缩放与格式转换
 
-仅当 Moonlight 请求的分辨率与 HDMI RX 实际可见分辨率不一致时，Sunshine 才使用
-RGA 执行硬件缩放、颜色转换以及保持宽高比的黑边或居中裁剪。尺寸一致时，原始
-HDMI RX DMA-BUF 会直接交给 RKMPP；恢复后格式或 stride 变化会重建直通编码器。
+仅当 Moonlight 请求的分辨率与 HDMI RX 实际可见分辨率不一致时，Sunshine 才使用 RGA
+执行视频硬件缩放、颜色转换以及保持宽高比的黑边或居中裁剪。尺寸一致时不得使用 RGA
+重新缩放视频，原始 HDMI RX DMA-BUF 会直接交给 RKMPP；恢复后格式或 stride 变化会重建
+直通编码器。这里的“视频缩放”不包含可见 Vulkan UI 使用的局部 ROI 覆盖：UI 打开时仍会
+使用 RGA 把 960x180 面板合成到直通帧，UI 隐藏时不会执行这项合成。
 
 RGA 转换路径使用一个可复用的 NV12 目标 DMA-BUF。同步编码在消费完成后归还该缓冲；
 初始化阶段产生但未编码的占位图像也会在下一次转换前主动释放。这样可以降低 4K CMA
-峰值，并避免唯一缓冲被占用后导致首帧断流。该生命周期修复已通过 1080p 实机连接；
-4K 新缓冲配置仍需单独做长时间实机验证。
+峰值，并避免唯一缓冲被占用后导致首帧断流。1080p 与 4K 的精确输入均已验证进入直通
+编码；RGA fallback 的 DMA-BUF smoke 连续三轮后 FD 数保持不变。长时间 4K fallback
+稳定性仍未单独验收。
 
 ## EDID 协商
 
 若 HDMI RX 支持可恢复的 EDID 读写，Sunshine 会尝试请求 Moonlight 所需的分辨率和帧率：
 
-- 当前 HDMI 输入时序已经与目标尺寸一致时，跳过 EDID 重写和 HDMI 链路重置。
-- 写入成功且输入采用目标分辨率时使用直通 DMA-BUF 路径。
+- 当前 HDMI 输入时序已经与目标尺寸一致时，跳过 EDID 重写和视频 RGA。
+- 从 base DTD、CTA Video Data Block 与 YCbCr 4:2:0 Video Data Block 解析可用的逐行扫描模式；不匹配时选择尺寸距离最接近、
+  且当前生成器能精确表示的模式，写入 EDID 并请求 HDMI 链路重新协商。
+- 限制 EDID 时保留接收器身份、音频、HDMI VSDB 与 HDMI Forum VSDB，同时过滤普通 VDB 和
+  YCbCr 4:2:0 VDB 中不属于目标尺寸的 VIC，并删除因 VDB 重排而失效的 4:2:0 capability map。
+- RK3588 的 `VIDIOC_S_EDID` 自己负责 HPD 拉低、写入和延迟重新拉高；Sunshine 不再紧接着发送
+  `RK_HDMIRX_CMD_SOFT_RESET`，避免打断驱动的 HPD 重协商周期。
+- 写入成功且输入采用目标分辨率时使用直通 DMA-BUF 路径；即使会话最初因旧 timing 使用 RGA，
+  观察到匹配输入后也会重建直通编码器并释放 RGA fallback。
 - 上游不接受 EDID、设备不支持 EDID 或最终尺寸不一致时，自动使用实际输入加 RGA。
-- 会话结束时恢复原 EDID。
+- 会话结束时恢复原 EDID，由同一驱动 HPD 周期再次请求 HDMI 链路重新协商。
 - 等待协商、短暂无信号或 source change 恢复期间输出绿色占位帧，避免立即断开 Moonlight。
 
 ## HDMI RX 音频

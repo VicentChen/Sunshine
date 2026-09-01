@@ -5,6 +5,9 @@
 
 #include "src/platform/linux/input_state_machine.h"
 
+#include <algorithm>
+#include <iterator>
+
 namespace platf::input_sm {
 
   state_e state_machine_t::state() const noexcept {
@@ -178,12 +181,11 @@ namespace platf::hdmirx {
     target_ = target;
     last_input_.reset();
 
-    // The capture device has already queried a live timing before negotiation.
-    // If it is exactly what Moonlight requested, rewriting EDID and resetting the
-    // HDMI link only creates a needless no-signal interval and placeholder/RGA
-    // allocation. Treat the already-locked timing as stable and keep the link up.
+    // An already matching live timing is the only case where EDID negotiation
+    // cannot improve the route. Any mismatch must still select and apply the
+    // closest advertised mode so RGA remains a fallback rather than policy.
     if (current_input && *current_input == target) {
-      sm_.enter_negotiating("current HDMI timing already matches target; skipped EDID reset");
+      sm_.enter_negotiating("current HDMI timing already matches target; skipped EDID write");
       for (std::uint32_t sample = 0; sample < input_sm::k_stable_timing_count; ++sample) {
         if (check_lock(current_input)) {
           break;
@@ -191,7 +193,18 @@ namespace platf::hdmirx {
       }
       return;
     }
-    auto selected = select_hdmi_mode(candidates, target);
+    // The current EDID writer has exact timing fixtures for these four
+    // resolutions. Do not silently turn an unsupported selected mode into a
+    // 1080p EDID: select the closest mode that can actually be advertised.
+    std::vector<hdmi_mode_t> writable_candidates;
+    std::copy_if(candidates.begin(), candidates.end(), std::back_inserter(writable_candidates), [](const auto &mode) {
+      const auto &resolution = mode.resolution;
+      return resolution == resolution_t {1280, 720} ||
+             resolution == resolution_t {1920, 1080} ||
+             resolution == resolution_t {2560, 1440} ||
+             resolution == resolution_t {3840, 2160};
+    });
+    auto selected = select_hdmi_mode(writable_candidates, target);
     auto caps = edid::probe_capabilities(backend_, pad_);
 
     // The capability probe is intentionally read-only.  Do not write anything
@@ -210,30 +223,15 @@ namespace platf::hdmirx {
       return;
     }
 
-    // Write the test EDID (we just use make_1080p_edid or matching size since we don't have full CVT generator in stage 6)
-    // According to stage 6, we have make_720p_edid, make_1080p_edid, make_1440p_edid, make_2160p_edid.
-    std::vector<std::uint8_t> new_edid;
-    if (selected->resolution.width == 1280) {
-      new_edid = edid::make_720p_edid();
-    } else if (selected->resolution.width == 1920) {
-      new_edid = edid::make_1080p_edid();
-    } else if (selected->resolution.width == 2560) {
-      new_edid = edid::make_1440p_edid();
-    } else if (selected->resolution.width == 3840) {
-      new_edid = edid::make_2160p_edid();
-    } else {
-      new_edid = edid::make_1080p_edid();  // fallback
+    // Keep the receiver's audio, HDMI VSDB, and HDMI Forum VSDB capabilities.
+    // Real HDMI 2.0 sources can reject a synthetic minimal EDID even when its
+    // single video timing is valid, falling back to 640x480 instead of 4K60.
+    const auto new_edid = edid::restrict_edid_to_resolution(guard_->saved_edid(), selected->resolution);
+    if (new_edid.empty()) {
+      guard_.reset();
+      sm_.enter_negotiating("selected mode could not be represented while preserving the original EDID");
+      return;
     }
-
-    std::uint8_t native_cta_vic = 0;
-    if (selected->resolution.width == 1280 && selected->resolution.height == 720) {
-      native_cta_vic = 4;
-    } else if (selected->resolution.width == 1920 && selected->resolution.height == 1080) {
-      native_cta_vic = 16;
-    } else if (selected->resolution.width == 3840 && selected->resolution.height == 2160) {
-      native_cta_vic = 97;
-    }
-    new_edid = edid::with_cta_lpcm_audio_extension(new_edid, native_cta_vic);
 
     auto res = edid::write_edid(backend_, pad_, new_edid);
     if (!res.has_value()) {
@@ -245,10 +243,12 @@ namespace platf::hdmirx {
       return;
     }
 
-    // Rockchip HDMI RX requires a link reset to apply a changed EDID.  Its
-    // internal delayed reset sequence restores a valid upstream video lock.
-    (void) backend_.reset_hdmi_link();
-    sm_.enter_negotiating("EDID written with restore guard armed");
+    // RK3588's VIDIOC_S_EDID implementation already drives HPD low, leaves it
+    // low while programming EDID, and schedules the hot-plug worker to raise
+    // HPD after one second.  Issuing RK_HDMIRX_CMD_SOFT_RESET here resets the
+    // same receiver registers before that pulse completes and can leave a
+    // source transmitting its old timing against the new EDID.
+    sm_.enter_negotiating("EDID written; driver HPD renegotiation requested");
   }
 
   bool session_negotiator_t::check_lock(const std::optional<resolution_t> &actual_input) {
@@ -289,7 +289,10 @@ namespace platf::hdmirx {
   }
 
   void session_negotiator_t::end_session() {
-    guard_.reset();
+    if (guard_) {
+      (void) guard_->restore();
+      guard_.reset();
+    }
     sm_.enter_shutdown();
   }
 

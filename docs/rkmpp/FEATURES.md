@@ -5,11 +5,11 @@
 - 在 Linux aarch64 的 Rockchip 平台提供 `hdmirx` 捕获后端和 `rkmpp` 编码后端；两者必须配套使用。
 - 从 `/dev/video0` 的 `rk_hdmirx` V4L2 多平面设备捕获视频，默认向驱动请求四个 capture slot，支持 BGR3、NV24、NV16 和 NV12，并通过 DMA-BUF 把原始帧交给硬件链路，避免 CPU 像素复制和软件颜色转换。
 - 使用 Rockchip MPP 编码 H.264 和 H.265，支持 IDR 请求及 Annex-B 参数集处理，并复用 Sunshine 现有的 RTP、FEC、加密和 UDP 发送链路。
-- HDMI 输入尺寸与 Moonlight 请求尺寸一致时使用直通编码；尺寸不一致时使用 RGA 硬件缩放和格式转换，支持保持宽高比的黑边或居中裁剪。
+- HDMI 输入尺寸与 Moonlight 请求尺寸一致时使用直通编码，不用 RGA 重新缩放视频；尺寸不一致时才使用 RGA 硬件缩放和格式转换，支持保持宽高比的黑边或居中裁剪。可见 Vulkan UI 的局部 ROI 覆盖独立于视频缩放，UI 隐藏时不执行该覆盖。
 - HDMI RX 捕获会阻塞等待首帧，然后非阻塞丢弃积压旧帧并选择最新完整帧；主动 freshness drop、驱动丢帧和捕获年龄分别统计，避免信号恢复后继续编码过期画面。
 - 直通路径按捕获 generation 与 buffer index 缓存 MPP 输入导入，RGA 路径按固定 target slot 缓存；fd 数值不作为跨重开身份，source change、encoder reconfigure 和 teardown 会使对应缓存失效。
-- RGA 转换只保留一个可复用的 NV12 目标 DMA-BUF；初始化阶段未编码的占位输入会在下一次转换前释放，正常编码完成也走同一清理路径。该修复已通过 1080p Moonlight 实机连接，4K 新缓冲配置仍待长时间实机验证。
-- 支持可选 EDID 协商、会话结束时恢复原 EDID，以及上游不接受 EDID 或设备不支持 EDID 时自动回退到实际输入尺寸加 RGA 的路径；当前输入已匹配目标尺寸时跳过不必要的 EDID 重写和 HDMI 链路重置。
+- RGA 转换只保留一个可复用的 NV12 目标 DMA-BUF；初始化阶段未编码的占位输入会在下一次转换前释放，正常编码完成也走同一清理路径。1080p 与 4K 精确输入均已验证进入直通编码；RGA fallback 的 DMA-BUF smoke 连续三轮后 FD 数保持不变，长时间 4K fallback 稳定性仍未单独验收。
+- 支持从 base DTD、CTA Video Data Block 与 YCbCr 4:2:0 Video Data Block 解析逐行扫描模式，并在 HDMI 输入尺寸不匹配时选择最接近且可精确生成的模式写入 EDID、请求链路重新协商。受限 EDID 保留接收器的音频、HDMI VSDB 与 HDMI Forum VSDB，但会同步过滤普通和 4:2:0 视频块，避免目标为 1080p 时仍通过 Y420 VIC 96/97 宣告 4K50/60；失效的 4:2:0 capability map 会被删除。RK3588 的 `VIDIOC_S_EDID` 已自行完成 HPD 周期，因此不再追加会干扰它的 soft-reset。当前输入已匹配目标尺寸时跳过 EDID 与视频 RGA，会话结束时恢复原 EDID，并由驱动重新协商。上游不接受 EDID 或最终尺寸仍不匹配时才回退到 RGA，后续观察到匹配输入会自动切回直通编码。
 - 支持 HDMI 拔插、信号丢失和模式变化后的重新检测与重建；协商或短暂无信号期间可输出绿色占位帧，避免会话立即断开。
 - 直通、RGA 创建和运行时 reconfigure 共用同一套 MPP 配置构造，Moonlight 请求的帧率、分数帧率、码率和 GOP 不再在直通路径静默回落到默认值。
 - 编码输出使用调用方提供的 8 MiB MPP packet buffer，并由 `encoded_packet_t` 持有到网络消费者释放，不额外复制到 `std::vector`。普通 P 帧会跳过不必要的 Annex-B IDR 扫描。

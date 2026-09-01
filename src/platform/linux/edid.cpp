@@ -146,16 +146,117 @@ namespace platf::edid {
     };
   }
 
+  namespace {
+    /** Map the progressive CTA VICs used by common HDMI consoles and displays. */
+    std::optional<platf::hdmirx::hdmi_mode_t> cta_vic_to_hdmi_mode(std::uint8_t vic) noexcept {
+      using platf::hdmirx::hdmi_mode_t;
+      using platf::hdmirx::refresh_rate_t;
+      using platf::hdmirx::resolution_t;
+      const auto mode = [](resolution_t resolution, refresh_rate_t refresh_rate) {
+        return hdmi_mode_t {resolution, refresh_rate, true};
+      };
+      switch (vic) {
+        case 1: return mode({640, 480}, {60, 1});
+        case 2:
+        case 3: return mode({720, 480}, {60, 1});
+        case 4: return mode({1280, 720}, {60, 1});
+        case 16: return mode({1920, 1080}, {60, 1});
+        case 17:
+        case 18: return mode({720, 576}, {50, 1});
+        case 19: return mode({1280, 720}, {50, 1});
+        case 31: return mode({1920, 1080}, {50, 1});
+        case 32: return mode({1920, 1080}, {24, 1});
+        case 33: return mode({1920, 1080}, {25, 1});
+        case 34: return mode({1920, 1080}, {30, 1});
+        case 93: return mode({3840, 2160}, {24, 1});
+        case 94: return mode({3840, 2160}, {25, 1});
+        case 95: return mode({3840, 2160}, {30, 1});
+        case 96: return mode({3840, 2160}, {50, 1});
+        case 97: return mode({3840, 2160}, {60, 1});
+        case 98: return mode({4096, 2160}, {24, 1});
+        case 99: return mode({4096, 2160}, {25, 1});
+        case 100: return mode({4096, 2160}, {30, 1});
+        case 101: return mode({4096, 2160}, {50, 1});
+        case 102: return mode({4096, 2160}, {60, 1});
+        default: return std::nullopt;
+      }
+    }
+
+    bool same_hdmi_mode(const platf::hdmirx::hdmi_mode_t &left, const platf::hdmirx::hdmi_mode_t &right) noexcept {
+      if (left.resolution != right.resolution) {
+        return false;
+      }
+      return static_cast<std::uint64_t>(left.refresh_rate.numerator) * right.refresh_rate.denominator ==
+             static_cast<std::uint64_t>(right.refresh_rate.numerator) * left.refresh_rate.denominator;
+    }
+
+    void append_unique_mode(std::vector<platf::hdmirx::hdmi_mode_t> &modes, const platf::hdmirx::hdmi_mode_t &mode) {
+      if (std::none_of(modes.begin(), modes.end(), [&mode](const auto &candidate) { return same_hdmi_mode(candidate, mode); })) {
+        modes.push_back(mode);
+      }
+    }
+
+    void append_cta_video_modes(std::span<const std::uint8_t, k_edid_block_size> extension,
+                                std::vector<platf::hdmirx::hdmi_mode_t> &modes) {
+      if (extension[0] != 0x02U) {
+        return;
+      }
+      // A zero DTD offset means this CTA block has no data-block collection.
+      // Treating the zero padding as headers would be harmless but obscures
+      // malformed-extension diagnostics and needlessly scans the whole block.
+      if (extension[2] == 0) {
+        return;
+      }
+      const auto data_end = std::min<std::size_t>(extension[2], 127);
+      for (std::size_t offset = 4; offset < data_end;) {
+        const auto header = extension[offset++];
+        const auto tag = header >> 5U;
+        const auto length = static_cast<std::size_t>(header & 0x1fU);
+        if (length > data_end - offset) {
+          return;
+        }
+        if (tag == 0x02U) {
+          for (std::size_t index = 0; index < length; ++index) {
+            if (auto mode = cta_vic_to_hdmi_mode(extension[offset + index] & 0x7fU)) {
+              append_unique_mode(modes, *mode);
+            }
+          }
+        } else if (tag == 0x07U && length > 1U && extension[offset] == 0x0eU) {
+          // CTA extended tag 0x0e is a YCbCr 4:2:0 Video Data Block. Its
+          // remaining bytes are VICs just like a normal Video Data Block and
+          // can advertise 4K50/60 even when the normal VDB contains only 2K.
+          for (std::size_t index = 1; index < length; ++index) {
+            if (auto mode = cta_vic_to_hdmi_mode(extension[offset + index] & 0x7fU)) {
+              append_unique_mode(modes, *mode);
+            }
+          }
+        }
+        offset += length;
+      }
+    }
+  }  // namespace
+
   std::vector<platf::hdmirx::hdmi_mode_t> parse_edid_modes(
     std::span<const std::uint8_t> edid_data) noexcept {
     if (edid_data.size() < k_edid_block_size) {
       return {};
     }
 
-    // Validate at least the base block checksum.
+    // A mode set is trusted only when every block declared by the base block is
+    // present and valid. This also prevents selecting from a truncated CTA list.
     std::span<const std::uint8_t, k_edid_block_size> base{edid_data.data(), k_edid_block_size};
     if (!validate_block_checksum(base)) {
       return {};
+    }
+    const auto block_count = static_cast<std::size_t>(base[126]) + 1U;
+    if (block_count > k_max_edid_blocks || edid_data.size() < block_count * k_edid_block_size) {
+      return {};
+    }
+    for (std::size_t index = 1; index < block_count; ++index) {
+      std::span<const std::uint8_t, k_edid_block_size> block {edid_data.data() + index * k_edid_block_size, k_edid_block_size};
+      if (!validate_block_checksum(block)) {
+        return {};
+      }
     }
 
     auto timings = parse_base_block_timings(base);
@@ -163,8 +264,12 @@ namespace platf::edid {
     modes.reserve(timings.size());
     for (const auto &t : timings) {
       if (auto mode = timing_to_hdmi_mode(t)) {
-        modes.push_back(*mode);
+        append_unique_mode(modes, *mode);
       }
+    }
+    for (std::size_t index = 1; index < block_count; ++index) {
+      std::span<const std::uint8_t, k_edid_block_size> extension {edid_data.data() + index * k_edid_block_size, k_edid_block_size};
+      append_cta_video_modes(extension, modes);
     }
     return modes;
   }
@@ -391,6 +496,147 @@ namespace platf::edid {
     // H: 3840 active + 560 blanking = 4400 total
     // V: 2160 active + 90 blanking = 2250 total
     return generate_edid_base_block(3840, 2160, 560, 90, 29700);
+  }
+
+  std::vector<std::uint8_t> restrict_edid_to_resolution(
+    std::span<const std::uint8_t> source_edid,
+    const platf::hdmirx::resolution_t &target) noexcept {
+    if (!validate_edid_checksums(source_edid)) {
+      return {};
+    }
+    const auto source_modes = parse_edid_modes(source_edid);
+    if (std::none_of(source_modes.begin(), source_modes.end(), [&target](const auto &mode) {
+          return mode.resolution == target;
+        })) {
+      return {};
+    }
+
+    std::vector<std::uint8_t> target_base;
+    if (target == platf::hdmirx::resolution_t {1280, 720}) {
+      target_base = make_720p_edid();
+    } else if (target == platf::hdmirx::resolution_t {1920, 1080}) {
+      target_base = make_1080p_edid();
+    } else if (target == platf::hdmirx::resolution_t {2560, 1440}) {
+      target_base = make_1440p_edid();
+    } else if (target == platf::hdmirx::resolution_t {3840, 2160}) {
+      target_base = make_2160p_edid();
+    } else {
+      return {};
+    }
+
+    const auto block_count = static_cast<std::size_t>(source_edid[126]) + 1U;
+    if (block_count > k_max_edid_blocks || source_edid.size() != block_count * k_edid_block_size) {
+      return {};
+    }
+    std::vector<std::uint8_t> restricted(source_edid.begin(), source_edid.end());
+    auto base = std::span<std::uint8_t, k_edid_block_size> {restricted.data(), k_edid_block_size};
+
+    // Keep the real receiver identity and monitor descriptors, but make the
+    // selected timing the only base-block video mode and mark it preferred.
+    base[24] |= 0x02U;
+    base[35] = 0;
+    base[36] = 0;
+    base[37] = 0;
+    for (std::size_t offset = 38; offset < 54; offset += 2) {
+      base[offset] = 0x01;
+      base[offset + 1] = 0x01;
+    }
+    std::copy_n(target_base.begin() + 54, 18, base.begin() + 54);
+    for (std::size_t offset = 72; offset <= 108; offset += 18) {
+      if (base[offset] != 0 || base[offset + 1] != 0) {
+        std::fill_n(base.begin() + offset, 18, std::uint8_t {0});
+      }
+    }
+    fix_checksum(base);
+
+    const auto target_dtd = std::span<const std::uint8_t, 18> {target_base.data() + 54, 18};
+    for (std::size_t block_index = 1; block_index < block_count; ++block_index) {
+      auto extension = std::span<std::uint8_t, k_edid_block_size> {
+        restricted.data() + block_index * k_edid_block_size,
+        k_edid_block_size
+      };
+      if (extension[0] != 0x02U) {
+        continue;
+      }
+
+      const auto data_end = extension[2] == 0 ? std::size_t {4} : std::min<std::size_t>(extension[2], 127);
+      if (data_end < 4) {
+        return {};
+      }
+      std::vector<std::uint8_t> data_blocks;
+      for (std::size_t offset = 4; offset < data_end;) {
+        const auto header = extension[offset++];
+        const auto tag = header >> 5U;
+        const auto length = static_cast<std::size_t>(header & 0x1fU);
+        if (length > data_end - offset) {
+          return {};
+        }
+        const bool y420_video_block = tag == 0x07U && length > 1U && extension[offset] == 0x0eU;
+        const bool y420_capability_map = tag == 0x07U && length > 0U && extension[offset] == 0x0fU;
+        if (tag != 0x02U && !y420_video_block && !y420_capability_map) {
+          data_blocks.push_back(header);
+          data_blocks.insert(data_blocks.end(), extension.begin() + offset, extension.begin() + offset + length);
+          offset += length;
+          continue;
+        }
+
+        // A YCbCr 4:2:0 Capability Map indexes the original normal VDB. Once
+        // that VDB is filtered and reordered, retaining the map would attach
+        // 4:2:0 capability to unrelated modes. Dedicated Y420 video blocks
+        // below retain any target-specific 4:2:0 VICs without stale indexes.
+        if (y420_capability_map) {
+          offset += length;
+          continue;
+        }
+
+        std::vector<std::uint8_t> target_svds;
+        const auto first_vic = y420_video_block ? std::size_t {1} : std::size_t {0};
+        for (std::size_t index = first_vic; index < length; ++index) {
+          const auto vic = static_cast<std::uint8_t>(extension[offset + index] & 0x7fU);
+          if (const auto mode = cta_vic_to_hdmi_mode(vic); mode && mode->resolution == target) {
+            target_svds.push_back(vic);
+          }
+        }
+        if (!target_svds.empty()) {
+          if (y420_video_block) {
+            data_blocks.push_back(static_cast<std::uint8_t>(0xe0U | (target_svds.size() + 1U)));
+            data_blocks.push_back(0x0eU);
+            data_blocks.insert(data_blocks.end(), target_svds.begin(), target_svds.end());
+          } else {
+            const auto preferred = std::max_element(target_svds.begin(), target_svds.end(), [](std::uint8_t left, std::uint8_t right) {
+              const auto left_mode = cta_vic_to_hdmi_mode(left);
+              const auto right_mode = cta_vic_to_hdmi_mode(right);
+              return static_cast<std::uint64_t>(left_mode->refresh_rate.numerator) * right_mode->refresh_rate.denominator <
+                     static_cast<std::uint64_t>(right_mode->refresh_rate.numerator) * left_mode->refresh_rate.denominator;
+            });
+            data_blocks.push_back(static_cast<std::uint8_t>(0x40U | target_svds.size()));
+            for (const auto vic : target_svds) {
+              data_blocks.push_back(static_cast<std::uint8_t>(vic | (vic == *preferred ? 0x80U : 0U)));
+            }
+          }
+        }
+        offset += length;
+      }
+
+      if (4U + data_blocks.size() >= 127U) {
+        return {};
+      }
+      std::array<std::uint8_t, k_edid_block_size> rewritten {};
+      rewritten[0] = extension[0];
+      rewritten[1] = extension[1];
+      rewritten[3] = extension[3] & 0xf0U;
+      std::copy(data_blocks.begin(), data_blocks.end(), rewritten.begin() + 4);
+      const auto dtd_offset = 4U + data_blocks.size();
+      rewritten[2] = static_cast<std::uint8_t>(dtd_offset);
+      if (dtd_offset + target_dtd.size() <= 127U) {
+        std::copy(target_dtd.begin(), target_dtd.end(), rewritten.begin() + dtd_offset);
+        rewritten[3] |= 0x01U;
+      }
+      fix_checksum(std::span<std::uint8_t, k_edid_block_size> {rewritten.data(), rewritten.size()});
+      std::copy(rewritten.begin(), rewritten.end(), extension.begin());
+    }
+
+    return validate_edid_checksums(restricted) ? restricted : std::vector<std::uint8_t> {};
   }
 
   std::vector<std::uint8_t> make_bad_checksum_edid() noexcept {

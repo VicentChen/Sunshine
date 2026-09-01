@@ -140,10 +140,11 @@ namespace platf::hdmirx {
   /**
    * @brief Select one deterministic mode from a verified EDID candidate set.
    *
-   * Modes meeting both target dimensions are preferred.  Within that group
-   * the smallest area wins; if none meet both dimensions, the largest area
-   * wins.  Dimension delta, aspect-ratio delta, refresh-rate delta, and finally
-   * lexical mode fields provide stable tie-breakers independent of input order.
+   * The smallest sum of absolute width and height differences wins. Aspect-ratio
+   * delta, refresh-rate delta, and finally lexical mode fields provide stable
+   * tie-breakers independent of input order. This makes the exact requested
+   * resolution win whenever the source advertises it, without preferring a
+   * distant larger mode over a much closer smaller mode.
    *
    * @param candidates Modes prepared from and verified against the EDID.
    * @param target Moonlight requested dimensions T.
