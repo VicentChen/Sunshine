@@ -9,7 +9,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <vector>
 
 namespace platf::vulkan_ui {
   /** @brief Linear floating-point RGBA color used by the render model. */
@@ -18,15 +17,6 @@ namespace platf::vulkan_ui {
     float green {};
     float blue {};
     float alpha {1.0F};
-  };
-
-  /** @brief One opaque rectangle in panel pixel coordinates. */
-  struct rectangle_t {
-    std::uint32_t left {};
-    std::uint32_t top {};
-    std::uint32_t width {};
-    std::uint32_t height {};
-    color_t color;
   };
 
   /**
@@ -40,7 +30,7 @@ namespace platf::vulkan_ui {
     std::uint32_t height {};
     std::uint64_t revision {};
     color_t background;
-    std::vector<rectangle_t> rectangles;
+    std::uint8_t focus {};  ///< Focused item in the three-column status page.
   };
 
   /**
@@ -52,14 +42,15 @@ namespace platf::vulkan_ui {
   std::optional<std::string> validate_render_model(const render_model_t &model);
 
   /**
-   * @brief Build the horizontal static Vulkan UI bar used by the stage 5 gate.
+   * @brief Build one renderer-independent Dear ImGui status-page snapshot.
    *
    * @param width Panel width in pixels.
    * @param height Panel height in pixels.
+   * @param focus Focused status item in the range [0, 2].
    * @param revision Revision assigned to the resulting immutable snapshot.
-   * @return Opaque background, menu rows, focus highlight, and bitmap text.
+   * @return Opaque status-page state. Dear ImGui owns visible widget geometry.
    */
-  render_model_t make_gate5_static_model(std::uint32_t width, std::uint32_t height, std::uint64_t revision = 1);
+  render_model_t make_status_model(std::uint32_t width, std::uint32_t height, std::uint8_t focus, std::uint64_t revision = 1);
 
   /** @brief Long-lived Vulkan renderer bound to one external RGBA DMA-BUF. */
   class renderer_t {

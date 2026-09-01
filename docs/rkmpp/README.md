@@ -221,8 +221,8 @@ rkmpp_disable_reencode = disabled
 ### Vulkan UI 总控开关
 
 `vulkan_ui` 是 Vulkan UI 的唯一总控，默认启用。Sunshine 缓存一个 960x180 的不透明
-RGBA DMA-BUF。Vulkan 在 optimal-tiled image 中绘制静态诊断页面，再由 GPU copy 到这块
-共享 buffer；RGA 在直通 HDMI RX buffer 或分辨率/格式转换后的 NV12 target 底部居中、
+RGBA DMA-BUF。Dear ImGui 通过官方 Vulkan renderer backend 在 optimal-tiled image 中绘制
+当前诊断页面，再由 GPU copy 到共享 buffer；RGA 在直通 HDMI RX buffer 或分辨率/格式转换后的 NV12 target 底部居中、
 距下边缘 32 像素的位置同步执行一次 BT.709 limited 覆盖，然后交给 MPP。页面状态不变时
 不会重复提交 Vulkan 绘制。RGB 与 YUV 色域通过 librga 的 source/destination buffer
 属性显式指定，不能写入 `improcess()` 的 transform usage 位。
@@ -233,7 +233,8 @@ vulkan_ui = enabled
 
 Gate 4 已通过真实 4K HDMI RX/Moonlight 画面和 4 个 capture slot 连续轮转验证。阶段 5
 也已通过真实 Moonlight 画面复验：首个会话能显示，页面方向、文字和横向布局均正常。
-该静态页面只用于打通渲染与合成链路，后续正式交互层计划接入 ImGui。Vulkan
+当前可见内容已经由 ImGui 绘制，但仍只是三个状态项组成的只读诊断页，不代表设置项、
+动作按钮等完整 ImGui UI 已完成。Vulkan
 初始化、模型校验或单帧 RGA 失败时，Sunshine 会在当前会话中关闭 UI 并继续基本编码。
 若需临时绕过所有 Vulkan UI 路径，可将唯一总控设置为 `vulkan_ui = disabled`。
 

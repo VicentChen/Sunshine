@@ -19,6 +19,10 @@
 #include <unistd.h>
 #include <vulkan/vulkan.h>
 
+// Dear ImGui is intentionally consumed from the pinned source submodule.
+#include <backends/imgui_impl_vulkan.h>
+#include <imgui.h>
+
 // local includes
 #include "vulkan_ui.h"
 
@@ -31,15 +35,23 @@ namespace platf::vulkan_ui {
     public:
       explicit fd_t(int value = -1) noexcept:
           value_(value) {}
+
       ~fd_t() {
         if (value_ >= 0) {
           (void) ::close(value_);
         }
       }
+
       fd_t(const fd_t &) = delete;
       fd_t &operator=(const fd_t &) = delete;
-      int get() const noexcept { return value_; }
-      int release() noexcept { return std::exchange(value_, -1); }
+
+      int get() const noexcept {
+        return value_;
+      }
+
+      int release() noexcept {
+        return std::exchange(value_, -1);
+      }
 
     private:
       int value_;
@@ -132,49 +144,56 @@ namespace platf::vulkan_ui {
       return value;
     }
 
-    /** @brief Return the 5x7 bitmap rows for the stage 5 uppercase font. */
-    std::array<std::uint8_t, 7> glyph(char character) noexcept {
-      switch (character) {
-        case 'A': return {0x0e, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11};
-        case 'D': return {0x1e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1e};
-        case 'E': return {0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x1f};
-        case 'I': return {0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1f};
-        case 'K': return {0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11};
-        case 'L': return {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1f};
-        case 'N': return {0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11};
-        case 'O': return {0x0e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e};
-        case 'P': return {0x1e, 0x11, 0x11, 0x1e, 0x10, 0x10, 0x10};
-        case 'R': return {0x1e, 0x11, 0x11, 0x1e, 0x14, 0x12, 0x11};
-        case 'S': return {0x0f, 0x10, 0x10, 0x0e, 0x01, 0x01, 0x1e};
-        case 'T': return {0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04};
-        case 'U': return {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e};
-        case 'V': return {0x11, 0x11, 0x11, 0x11, 0x11, 0x0a, 0x04};
-        case 'Y': return {0x11, 0x11, 0x0a, 0x04, 0x04, 0x04, 0x04};
-        default: return {};
-      }
-    }
-
-    /** @brief Append bitmap-font pixels as opaque rectangles. */
-    void append_text(render_model_t &model, std::uint32_t left, std::uint32_t top, std::string_view text, std::uint32_t scale, color_t color) {
-      for (const char character : text) {
-        const auto rows = glyph(character);
-        for (std::uint32_t row = 0; row < rows.size(); ++row) {
-          for (std::uint32_t column = 0; column < 5; ++column) {
-            if ((rows[row] & (1U << (4U - column))) != 0) {
-              model.rectangles.push_back({left + column * scale, top + row * scale, scale, scale, color});
-            }
-          }
-        }
-        left += 6U * scale;
-      }
-    }
-
     /** @brief Validate one finite normalized color. */
     bool valid_color(const color_t &color) noexcept {
       const std::array components {color.red, color.green, color.blue, color.alpha};
       return std::all_of(components.begin(), components.end(), [](float component) {
-        return std::isfinite(component) && component >= 0.0F && component <= 1.0F;
-      }) && color.alpha == 1.0F;
+               return std::isfinite(component) && component >= 0.0F && component <= 1.0F;
+             }) &&
+             color.alpha == 1.0F;
+    }
+
+    /** @brief Build the temporary read-only page entirely through Dear ImGui. */
+    void build_gate5_imgui_page(const render_model_t &model) {
+      auto &io = ImGui::GetIO();
+      io.DisplaySize = {static_cast<float>(model.width), static_cast<float>(model.height)};
+      ImGui_ImplVulkan_NewFrame();
+      ImGui::NewFrame();
+
+      const auto background = ImVec4 {model.background.red, model.background.green, model.background.blue, model.background.alpha};
+      ImGui::PushStyleColor(ImGuiCol_WindowBg, background);
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4 {0.940F, 0.965F, 1.0F, 1.0F});
+      ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0F);
+      ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0F);
+      ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2 {20.0F, 14.0F});
+      ImGui::SetNextWindowPos({0.0F, 0.0F});
+      ImGui::SetNextWindowSize(io.DisplaySize);
+      constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                                         ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs;
+      ImGui::Begin("Sunshine Vulkan UI", nullptr, flags);
+      ImGui::TextUnformatted("Vulkan UI");
+      ImGui::Separator();
+      if (ImGui::BeginTable("status", 3, ImGuiTableFlags_SizingStretchSame)) {
+        constexpr std::array<const char *, 3> labels {"VIDEO", "INPUT", "STATUS"};
+        constexpr std::array<const char *, 3> values {"ON", "IMGUI READY", "READY"};
+        for (std::size_t index = 0; index < labels.size(); ++index) {
+          ImGui::TableNextColumn();
+          const auto card = index == model.focus ? ImVec4 {0.055F, 0.330F, 0.720F, 1.0F} : ImVec4 {0.075F, 0.095F, 0.130F, 1.0F};
+          ImGui::PushStyleColor(ImGuiCol_ChildBg, card);
+          ImGui::BeginChild(labels[index], ImVec2 {0.0F, 74.0F}, ImGuiChildFlags_Borders);
+          ImGui::TextUnformatted(labels[index]);
+          ImGui::Spacing();
+          ImGui::TextUnformatted(values[index]);
+          ImGui::EndChild();
+          ImGui::PopStyleColor();
+        }
+        ImGui::EndTable();
+      }
+      ImGui::End();
+      ImGui::PopStyleVar(3);
+      ImGui::PopStyleColor(2);
+      ImGui::Render();
     }
   }  // namespace
 
@@ -185,49 +204,18 @@ namespace platf::vulkan_ui {
     if (!valid_color(model.background)) {
       return "Vulkan UI background must be finite, normalized, and opaque";
     }
-    for (const auto &rectangle : model.rectangles) {
-      if (rectangle.width == 0 || rectangle.height == 0) {
-        return "Vulkan UI rectangles must be nonempty";
-      }
-      if (rectangle.left >= model.width || rectangle.top >= model.height || rectangle.width > model.width - rectangle.left || rectangle.height > model.height - rectangle.top) {
-        return "Vulkan UI rectangle exceeds panel bounds";
-      }
-      if (!valid_color(rectangle.color)) {
-        return "Vulkan UI rectangles must be finite, normalized, and opaque";
-      }
+    if (model.focus >= 3) {
+      return "Vulkan UI focus exceeds the status page item count";
     }
     return std::nullopt;
   }
 
-  render_model_t make_gate5_static_model(std::uint32_t width, std::uint32_t height, std::uint64_t revision) {
+  render_model_t make_status_model(std::uint32_t width, std::uint32_t height, std::uint8_t focus, std::uint64_t revision) {
     if (width < 960 || height < 180) {
-      throw std::runtime_error("Gate 5 static Vulkan UI requires at least a 960x180 panel");
+      throw std::runtime_error("Vulkan UI status page requires at least a 960x180 panel");
     }
     const color_t background {0.025F, 0.035F, 0.060F, 1.0F};
-    const color_t header {0.055F, 0.085F, 0.140F, 1.0F};
-    const color_t focus {0.055F, 0.330F, 0.720F, 1.0F};
-    const color_t row {0.075F, 0.095F, 0.130F, 1.0F};
-    const color_t white {0.940F, 0.965F, 1.0F, 1.0F};
-    const color_t muted {0.620F, 0.690F, 0.790F, 1.0F};
-    const color_t ready {0.150F, 0.820F, 0.410F, 1.0F};
-    render_model_t model {width, height, revision, background, {}};
-    model.rectangles.reserve(420);
-    constexpr std::uint32_t margin = 20;
-    constexpr std::uint32_t gap = 12;
-    const auto card_width = (width - margin * 2U - gap * 2U) / 3U;
-    const std::array card_left {margin, margin + card_width + gap, margin + (card_width + gap) * 2U};
-    model.rectangles.push_back({0, 0, width, 52, header});
-    model.rectangles.push_back({card_left[0], 64, card_width, 92, focus});
-    model.rectangles.push_back({card_left[1], 64, card_width, 92, row});
-    model.rectangles.push_back({card_left[2], 64, card_width, 92, row});
-    model.rectangles.push_back({margin, 168, width - margin * 2U, 4, ready});
-    append_text(model, 24, 15, "VULKAN UI", 3, white);
-    append_text(model, card_left[0] + 16, 80, "VIDEO", 3, white);
-    append_text(model, card_left[0] + 16, 120, "ON", 2, white);
-    append_text(model, card_left[1] + 16, 80, "INPUT", 3, muted);
-    append_text(model, card_left[1] + 16, 120, "LIVE", 2, white);
-    append_text(model, card_left[2] + 16, 80, "STATUS", 3, muted);
-    append_text(model, card_left[2] + 16, 120, "READY", 2, ready);
+    render_model_t model {width, height, revision, background, focus};
     if (const auto error = validate_render_model(model)) {
       throw std::runtime_error(*error);
     }
@@ -266,6 +254,8 @@ namespace platf::vulkan_ui {
       if (model.revision == rendered_revision_) {
         return false;
       }
+      ImGui::SetCurrentContext(imgui_context_);
+      build_gate5_imgui_page(model);
 
       require_vk(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX), "vkWaitForFences(Vulkan UI)");
       require_vk(vkResetFences(device_, 1, &fence_), "vkResetFences(Vulkan UI)");
@@ -293,18 +283,7 @@ namespace platf::vulkan_ui {
       render_begin.clearValueCount = 1;
       render_begin.pClearValues = &clear;
       vkCmdBeginRenderPass(command_, &render_begin, VK_SUBPASS_CONTENTS_INLINE);
-      for (const auto &rectangle : model.rectangles) {
-        VkClearAttachment attachment {};
-        attachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        attachment.colorAttachment = 0;
-        attachment.clearValue.color = clear_color(rectangle.color);
-        VkClearRect clear_rectangle {};
-        clear_rectangle.rect.offset = {static_cast<std::int32_t>(rectangle.left), static_cast<std::int32_t>(rectangle.top)};
-        clear_rectangle.rect.extent = {rectangle.width, rectangle.height};
-        clear_rectangle.baseArrayLayer = 0;
-        clear_rectangle.layerCount = 1;
-        vkCmdClearAttachments(command_, 1, &attachment, 1, &clear_rectangle);
-      }
+      ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), command_);
       vkCmdEndRenderPass(command_);
 
       VkImageMemoryBarrier render_complete {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -510,20 +489,70 @@ namespace platf::vulkan_ui {
       VkFenceCreateInfo fence_info {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
       fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
       require_vk(vkCreateFence(device_, &fence_info, nullptr, &fence_), "vkCreateFence(Vulkan UI)");
+
+      IMGUI_CHECKVERSION();
+      imgui_context_ = ImGui::CreateContext();
+      ImGui::SetCurrentContext(imgui_context_);
+      auto &io = ImGui::GetIO();
+      io.IniFilename = nullptr;
+      io.LogFilename = nullptr;
+      io.DisplaySize = {static_cast<float>(width_), static_cast<float>(height_)};
+      ImGui::StyleColorsDark();
+      ImGui_ImplVulkan_InitInfo imgui_info {};
+      imgui_info.ApiVersion = VK_API_VERSION_1_1;
+      imgui_info.Instance = instance_;
+      imgui_info.PhysicalDevice = physical_device_;
+      imgui_info.Device = device_;
+      imgui_info.QueueFamily = queue_family_;
+      imgui_info.Queue = queue_;
+      imgui_info.DescriptorPoolSize = IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE + IMGUI_IMPL_VULKAN_MINIMUM_SAMPLER_POOL_SIZE;
+      imgui_info.MinImageCount = 2;
+      imgui_info.ImageCount = 2;
+      imgui_info.PipelineInfoMain.RenderPass = render_pass_;
+      if (!ImGui_ImplVulkan_Init(&imgui_info)) {
+        throw std::runtime_error("ImGui Vulkan renderer initialization failed");
+      }
+      imgui_ready_ = true;
     }
 
     void destroy() noexcept {
       if (device_ != VK_NULL_HANDLE) {
         (void) vkDeviceWaitIdle(device_);
-        if (fence_ != VK_NULL_HANDLE) vkDestroyFence(device_, fence_, nullptr);
-        if (command_pool_ != VK_NULL_HANDLE) vkDestroyCommandPool(device_, command_pool_, nullptr);
-        if (framebuffer_ != VK_NULL_HANDLE) vkDestroyFramebuffer(device_, framebuffer_, nullptr);
-        if (render_pass_ != VK_NULL_HANDLE) vkDestroyRenderPass(device_, render_pass_, nullptr);
-        if (image_view_ != VK_NULL_HANDLE) vkDestroyImageView(device_, image_view_, nullptr);
-        if (output_buffer_ != VK_NULL_HANDLE) vkDestroyBuffer(device_, output_buffer_, nullptr);
-        if (render_image_ != VK_NULL_HANDLE) vkDestroyImage(device_, render_image_, nullptr);
-        if (output_memory_ != VK_NULL_HANDLE) vkFreeMemory(device_, output_memory_, nullptr);
-        if (render_memory_ != VK_NULL_HANDLE) vkFreeMemory(device_, render_memory_, nullptr);
+        if (imgui_context_) {
+          ImGui::SetCurrentContext(imgui_context_);
+          if (imgui_ready_) {
+            ImGui_ImplVulkan_Shutdown();
+          }
+          ImGui::DestroyContext(imgui_context_);
+          imgui_context_ = nullptr;
+        }
+        if (fence_ != VK_NULL_HANDLE) {
+          vkDestroyFence(device_, fence_, nullptr);
+        }
+        if (command_pool_ != VK_NULL_HANDLE) {
+          vkDestroyCommandPool(device_, command_pool_, nullptr);
+        }
+        if (framebuffer_ != VK_NULL_HANDLE) {
+          vkDestroyFramebuffer(device_, framebuffer_, nullptr);
+        }
+        if (render_pass_ != VK_NULL_HANDLE) {
+          vkDestroyRenderPass(device_, render_pass_, nullptr);
+        }
+        if (image_view_ != VK_NULL_HANDLE) {
+          vkDestroyImageView(device_, image_view_, nullptr);
+        }
+        if (output_buffer_ != VK_NULL_HANDLE) {
+          vkDestroyBuffer(device_, output_buffer_, nullptr);
+        }
+        if (render_image_ != VK_NULL_HANDLE) {
+          vkDestroyImage(device_, render_image_, nullptr);
+        }
+        if (output_memory_ != VK_NULL_HANDLE) {
+          vkFreeMemory(device_, output_memory_, nullptr);
+        }
+        if (render_memory_ != VK_NULL_HANDLE) {
+          vkFreeMemory(device_, render_memory_, nullptr);
+        }
         vkDestroyDevice(device_, nullptr);
       }
       if (instance_ != VK_NULL_HANDLE) {
@@ -554,6 +583,8 @@ namespace platf::vulkan_ui {
     VkCommandPool command_pool_ {VK_NULL_HANDLE};
     VkCommandBuffer command_ {VK_NULL_HANDLE};
     VkFence fence_ {VK_NULL_HANDLE};
+    ImGuiContext *imgui_context_ {};
+    bool imgui_ready_ {};
   };
 
   renderer_t::renderer_t(std::unique_ptr<impl_t> impl) noexcept:

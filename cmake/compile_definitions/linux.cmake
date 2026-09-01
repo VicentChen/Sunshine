@@ -229,11 +229,24 @@ if(${SUNSHINE_ENABLE_VULKAN})
     list(APPEND SUNSHINE_DEFINITIONS SUNSHINE_BUILD_VULKAN=1)
     include_directories(SYSTEM ${VULKAN_HEADERS_DIR})
     list(APPEND PLATFORM_LIBRARIES ${VULKAN_LIBRARY})
+    # Dear ImGui is kept as a pinned source submodule. The Vulkan UI uses the
+    # core plus the upstream Vulkan renderer backend directly; no window-system
+    # backend is needed because it renders into an offscreen DMA-BUF.
+    set(IMGUI_SOURCE_DIR "${CMAKE_SOURCE_DIR}/third-party/imgui")
+    if(NOT EXISTS "${IMGUI_SOURCE_DIR}/imgui.h" OR NOT EXISTS "${IMGUI_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp")
+        message(FATAL_ERROR "Dear ImGui submodule is required for the RKMPP Vulkan UI")
+    endif()
+    include_directories(SYSTEM "${IMGUI_SOURCE_DIR}" "${IMGUI_SOURCE_DIR}/backends")
     list(APPEND PLATFORM_TARGET_FILES
             "${CMAKE_SOURCE_DIR}/src/platform/linux/vulkan_encode.h"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/vulkan_encode.cpp"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/vulkan_ui.h"
-            "${CMAKE_SOURCE_DIR}/src/platform/linux/vulkan_ui.cpp")
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/vulkan_ui.cpp"
+            "${IMGUI_SOURCE_DIR}/imgui.cpp"
+            "${IMGUI_SOURCE_DIR}/imgui_draw.cpp"
+            "${IMGUI_SOURCE_DIR}/imgui_tables.cpp"
+            "${IMGUI_SOURCE_DIR}/imgui_widgets.cpp"
+            "${IMGUI_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp")
 
     # compile GLSL -> SPIR-V -> C include at build time
     set(VULKAN_SHADER_DIR "${CMAKE_BINARY_DIR}/generated-src/shaders")

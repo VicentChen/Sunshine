@@ -2001,11 +2001,11 @@ namespace video {
 #ifdef SUNSHINE_BUILD_VULKAN
       const auto &layout = source_.layout();
       renderer_ = platf::vulkan_ui::renderer_t::create(layout.dma_buf_fd, layout.allocation_size, layout.width, layout.height, layout.stride);
-      const auto model = platf::vulkan_ui::make_gate5_static_model(panel_width, panel_height);
+      const auto model = platf::vulkan_ui::make_status_model(panel_width, panel_height, 0, 1);
       if (!renderer_->render(model)) {
         throw std::runtime_error("Vulkan UI initial model was unexpectedly cached");
       }
-      BOOST_LOG(info) << "RKMPP Vulkan UI stage 5 enabled on " << renderer_->device_name()
+      BOOST_LOG(info) << "RKMPP Dear ImGui Vulkan UI enabled on " << renderer_->device_name()
                       << ": rendered revision=" << renderer_->rendered_revision() << " into cached "
                       << panel_width << 'x' << panel_height
                       << " RGBA DMA-BUF, ROI=bottom-center margin=" << panel_margin;

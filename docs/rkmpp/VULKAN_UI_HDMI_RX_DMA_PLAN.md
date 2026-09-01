@@ -4,6 +4,7 @@
 
 在 Sunshine 的 RKMPP HDMI RX 路径中建立一个通用、可交互的 UI 系统：
 
+- 以固定版本的 Dear ImGui 和官方 Vulkan renderer backend 建立 UI，而不是继续扩展临时 5x7 位图绘制器。
 - 按住 `Back/Select + Start` 3 秒打开或关闭 UI。
 - UI 打开后，手柄导航输入由 UI 截获，不再发送给远端主机。
 - UI 支持焦点、高亮、选择、返回和状态反馈。
@@ -82,7 +83,7 @@ HDMI RX VIDIOC_DQBUF
 
 Gate 4 只验证真实 capture buffer，不引入正式 UI。
 
-### 当前实施状态（2026-08-31）
+### 当前实施状态（2026-09-01）
 
 - 已加入唯一的 `vulkan_ui` 总控开关，默认启用；关闭后跳过全部 Vulkan UI 路径。
 - 已支持外部分配并导入 RGA 的 RGBA8888 DMA-BUF，以及显式 BT.709 limited
@@ -123,12 +124,17 @@ Gate 4 只验证真实 capture buffer，不引入正式 UI。
 
 - 已加入独立的 `vulkan_ui` render model 与长生命周期 Vulkan renderer；renderer 持有
   instance、所选硬件 device、queue、command pool、command buffer 和 fence。
+- 原先用于 Gate 5 的手写 5x7 位图页面仅证明过 Vulkan/RGA 后端；它不再是后续 UI 的实现基础。
+- `third-party/imgui` 已固定为本仓库子模块；仅编译 ImGui core 与上游
+  `imgui_impl_vulkan`，渲染到现有离屏 RGBA image，再 copy 到已分配的 DMA-BUF。
+  不引入 GLFW、SDL、swapchain 或第二个窗口系统。
 - 960x180 RGBA DMA-BUF 由 CMA allocator 外部分配，Vulkan 只导入重复的 FD；绘制先在
   optimal-tiled image 中完成，再由 GPU copy 到共享线性 buffer，原 FD 同时由 RGA 持有。
-- 首个静态诊断页面是底部横向栏，包含不透明背景、标题、三个从左到右排列的项目、
-  焦点高亮、开关/状态和值，以及 5x7 位图文字；相同 revision 直接复用缓存，不提交
-  Vulkan 工作。它只用于打通后端，
-  不再扩展为正式 UI；后续交互层计划接入 ImGui。
+- ImGui 初始诊断页面是底部横向栏，包含不透明背景、标题和三个从左到右排列的
+  只读状态项；相同 revision 直接复用缓存，不提交 Vulkan 工作。它只用于打通
+  ImGui -> Vulkan -> DMA-BUF -> RGA 后端，尚未接收手柄输入或执行 action。
+- 当前实机可见的三列诊断页已经由 Dear ImGui 生成 draw data 并通过官方 Vulkan backend
+  渲染；它仍不是包含设置项和 action 的完整 ImGui UI，不能用阶段 5 PASS 推导完整 UI 已完成。
 - Vulkan fence 完成并将 buffer ownership 释放给 external queue family 后，RGA 才能读取；
   生产路径不 mmap 或读取 UI 像素。
 - 首轮实机发现两个问题：RGBA -> NV12 的 BT.709 mode 被错误并入 `improcess()` usage，
