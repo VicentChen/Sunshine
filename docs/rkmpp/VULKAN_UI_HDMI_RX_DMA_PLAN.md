@@ -125,14 +125,18 @@ Gate 4 只验证真实 capture buffer，不引入正式 UI。
 - 已加入独立的 `vulkan_ui` render model 与长生命周期 Vulkan renderer；renderer 持有
   instance、所选硬件 device、queue、command pool、command buffer 和 fence。
 - 原先用于 Gate 5 的手写 5x7 位图页面仅证明过 Vulkan/RGA 后端；它不再是后续 UI 的实现基础。
-- `third-party/imgui` 已固定为本仓库子模块；仅编译 ImGui core 与上游
+- **本次执行顺序调整：先接入 Dear ImGui，再实现 UI 状态、Sunshine action 和手柄路由。**
+  `third-party/imgui` 已固定为本仓库子模块；仅编译 ImGui core 与上游
   `imgui_impl_vulkan`，渲染到现有离屏 RGBA image，再 copy 到已分配的 DMA-BUF。
-  不引入 GLFW、SDL、swapchain 或第二个窗口系统。
+  不引入 GLFW、SDL、swapchain 或第二个窗口系统；Moonlight 手柄输入由 Sunshine input
+  ingress 交给独立 UI controller，renderer 只消费其 `focus/revision` 快照。
+- ImGui 初始页面保持只读。chord、owner、截获与 neutral cleanup 已有单元测试，但当前
+  controller 只改变三项焦点并产生 confirm/back 事件，尚未把 action 绑定到页面控件。
 - 960x180 RGBA DMA-BUF 由 CMA allocator 外部分配，Vulkan 只导入重复的 FD；绘制先在
   optimal-tiled image 中完成，再由 GPU copy 到共享线性 buffer，原 FD 同时由 RGA 持有。
 - ImGui 初始诊断页面是底部横向栏，包含不透明背景、标题和三个从左到右排列的
   只读状态项；相同 revision 直接复用缓存，不提交 Vulkan 工作。它只用于打通
-  ImGui -> Vulkan -> DMA-BUF -> RGA 后端，尚未接收手柄输入或执行 action。
+  ImGui -> Vulkan -> DMA-BUF -> RGA 后端，不在这个阶段接收手柄输入或执行 action。
 - 当前实机可见的三列诊断页已经由 Dear ImGui 生成 draw data 并通过官方 Vulkan backend
   渲染；它仍不是包含设置项和 action 的完整 ImGui UI，不能用阶段 5 PASS 推导完整 UI 已完成。
 - Vulkan fence 完成并将 buffer ownership 释放给 external queue family 后，RGA 才能读取；
@@ -177,6 +181,42 @@ Gate 4 只验证真实 capture buffer，不引入正式 UI。
 - Vulkan 初始化或运行失败时能关闭 UI 后端，不影响基本 HDMI RX 编码路径。
 
 ## 阶段 6：通用 UI 模型与手柄路由
+
+### 当前实施状态（2026-09-01）
+
+- 已加入与 Vulkan 无关、线程安全的 `ui_controller`：以 Sunshine 全局 gamepad slot
+  标识 owner，分别保存每个手柄的 chord、按键 edge 和摇杆 hysteresis 状态，避免多客户端
+  都使用 `controllerNumber=0` 时发生 owner 冲突。
+- `Back/Select + Start` 必须连续保持 3 秒才打开或关闭 UI；触发前先 neutralize 当前输出，
+  触发后直到两个组合键都释放才解除 release gate。UI 可见时所有手柄输入均被消费，只有
+  owner 可以通过 D-pad 或左摇杆改变焦点，A/Back 产生 confirm/back 事件。
+- UI 打开或关闭时会取消当前 stream 的 Back 长按计时器并 neutralize 已分配的手柄；owner
+  断开、stream reset 或 gamepad free 会关闭 UI 并清理路由状态。
+- renderer 现在消费 controller 发布的 `visible/focus/revision` 快照。UI 初始隐藏；隐藏时不
+  提交 Vulkan render，也不执行 RGA panel ROI 覆盖；焦点变化才提高 revision 并重绘缓存。
+  旧 5x7 glyph、rectangle 列表和无效静态布局模型已从 Vulkan UI 后端删除。
+- 首次实机运行发现 Moonlight 在按键状态不变时不会发送周期性重复包，原先只在输入包到达时
+  检查 3 秒期限，因此静止长按永远无法触发。现由活动视频帧调用 controller `tick()` 推进
+  deadline；按下组合键时已 neutralize，期限到达后进入完整释放门，不向 Xbox 泄漏按键。
+- EDID 与缩放策略以 `SPEC.md` 为准：只有 HDMI 输入尺寸已经与 Moonlight 请求尺寸一致时
+  才跳过 EDID 和 RGA；任何尺寸不匹配都先从 base DTD、CTA Video Data Block 与 YCbCr
+  4:2:0 Video Data Block 中选择尺寸
+  最接近且能精确生成的模式，写入 EDID 后请求 HDMI 链路重新协商。上游不接受或最终 timing
+  仍不匹配时，RGA 才作为硬件 fallback。
+- 受限 EDID 保留真实接收器身份、音频、HDMI VSDB 与 HDMI Forum VSDB，同时过滤普通 VDB 与
+  Y420 VDB 的非目标 VIC，并删除重排后失效的 Y420 capability map。RK3588 的
+  `VIDIOC_S_EDID` 已自行执行 HPD 周期，不再追加会打断该周期的 `RK_HDMIRX_CMD_SOFT_RESET`。
+- 协商器恢复原 EDID 后由驱动同样请求链路重新协商。编码会话不再根据首个旧 timing 固定为 RGA：
+  source change 后一旦观察到目标尺寸，会重建直通编码器并释放 RGA fallback。因此
+  `1080p + 1080p` 与 `4K + 4K` 都不得因会话初始状态继续执行视频缩放。
+- 本轮最终二进制已在 Moonlight 6.1.0 实机验证：1080p 会话锁定并编码
+  `1920x1080p59.94`，4K 会话锁定并编码 `3840x2160p59.94`；两者的稳定 profile window
+  均只有 `rga_bypass` 计数而没有视频 `RGA` 阶段。EDID/模式选择/协商聚焦测试
+  **18/18 PASS**，完整 RKMPP 专用测试 **205/205 PASS**；RGA DMA-BUF smoke 完成 3 轮且
+  FD 保持 `5 -> 5`。三项退出码均为 0。
+- controller 的 chord/release gate、视频线程 tick、modal owner、导航、摇杆 hysteresis、
+  disconnect 与 reset 共 7 项测试已覆盖。阶段 6 尚未标记为完整实机 PASS：1080p/4K 直通
+  与断流已验证，但仍需完成音频以及 UI 打开、导航、截获、关闭、恢复的整套验收后再更新结论。
 
 将 UI 状态、输入和绘制分成独立层：
 

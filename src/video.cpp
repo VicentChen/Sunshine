@@ -42,6 +42,7 @@ extern "C" {
   #include "platform/linux/hdmirx.h"
   #include "platform/linux/rga.h"
   #include "platform/linux/rkmpp.h"
+  #include "platform/linux/ui_controller.h"
   #ifdef SUNSHINE_BUILD_VULKAN
     #include "platform/linux/vulkan_ui.h"
   #endif
@@ -1998,20 +1999,15 @@ namespace video {
         throw std::runtime_error("Vulkan UI failed to initialize RGA resources");
       }
       source_ = platf::rga::target_buffer_t::allocate_rgba8888(*backend_, *allocator_, panel_width, panel_height);
-#ifdef SUNSHINE_BUILD_VULKAN
+  #ifdef SUNSHINE_BUILD_VULKAN
       const auto &layout = source_.layout();
       renderer_ = platf::vulkan_ui::renderer_t::create(layout.dma_buf_fd, layout.allocation_size, layout.width, layout.height, layout.stride);
-      const auto model = platf::vulkan_ui::make_status_model(panel_width, panel_height, 0, 1);
-      if (!renderer_->render(model)) {
-        throw std::runtime_error("Vulkan UI initial model was unexpectedly cached");
-      }
-      BOOST_LOG(info) << "RKMPP Dear ImGui Vulkan UI enabled on " << renderer_->device_name()
-                      << ": rendered revision=" << renderer_->rendered_revision() << " into cached "
-                      << panel_width << 'x' << panel_height
-                      << " RGBA DMA-BUF, ROI=bottom-center margin=" << panel_margin;
-#else
+      BOOST_LOG(info) << "RKMPP Vulkan UI initialized on " << renderer_->device_name()
+                      << ": hidden until Back+Start is held for 3 seconds; panel="
+                      << panel_width << 'x' << panel_height << " ROI=bottom-center margin=" << panel_margin;
+  #else
       throw std::runtime_error("Sunshine was built without Vulkan UI support");
-#endif
+  #endif
     }
 
     /** @brief Report the successfully exercised live-buffer path at teardown. */
@@ -2033,8 +2029,17 @@ namespace video {
       return *allocator_;
     }
 
-    /** @brief Cover the cached panel into an imported NV12 destination. */
-    void compose_into(platf::rga::imported_buffer_t &destination) {
+    /** @brief Render a changed visible snapshot and cover one imported NV12 destination. */
+    bool compose_into(platf::rga::imported_buffer_t &destination) {
+      if (!prepare_visible_panel()) {
+        return false;
+      }
+      compose_visible_into(destination);
+      return true;
+    }
+
+    /** @brief Cover the already-rendered visible panel into an imported NV12 destination. */
+    void compose_visible_into(platf::rga::imported_buffer_t &destination) {
       const auto &layout = destination.layout();
       if (layout.format != platf::rga::pixel_format_e::nv12 || (layout.width & 1U) != 0 || (layout.height & 1U) != 0) {
         throw std::runtime_error("Vulkan UI requires an even-sized NV12 destination");
@@ -2061,8 +2066,11 @@ namespace video {
       }
     }
 
-    /** @brief Synchronously compose into a dequeued, exclusively leased frame. */
-    void compose(platf::hdmirx::hdmirx_img_t &image) {
+    /** @brief Synchronously compose into a dequeued, exclusively leased frame when visible. */
+    bool compose(platf::hdmirx::hdmirx_img_t &image) {
+      if (!prepare_visible_panel()) {
+        return false;
+      }
       if (!image.frame || !image.capture_format || image.frame->planes().size() != 1 || image.capture_format->planes.size() != 1) {
         throw std::runtime_error("Vulkan UI requires one live HDMI RX plane");
       }
@@ -2115,13 +2123,38 @@ namespace video {
         image.frame_profile->rga_used = true;
         image.frame_profile->rga_begin = std::chrono::steady_clock::now();
       }
-      compose_into(destination->second);
+      compose_visible_into(destination->second);
       if (image.frame_profile) {
         image.frame_profile->rga_end = std::chrono::steady_clock::now();
       }
+      return true;
     }
 
   private:
+    /** @brief Render the current controller snapshot once and report visibility. */
+    bool prepare_visible_panel() {
+      auto &controller = platf::ui::global_controller();
+      const auto transition = controller.tick(platf::ui::controller_t::clock_t::now());
+      if (transition.visibility_changed) {
+        BOOST_LOG(info) << "RKMPP Vulkan UI " << (transition.visible ? "opened" : "closed")
+                        << " after continuous Back+Start hold";
+      }
+      const auto snapshot = controller.snapshot();
+      if (!snapshot.visible) {
+        return false;
+      }
+  #ifdef SUNSHINE_BUILD_VULKAN
+      const auto model = platf::vulkan_ui::make_status_model(panel_width, panel_height, snapshot.focus, snapshot.revision);
+      if (renderer_->render(model)) {
+        BOOST_LOG(info) << "RKMPP Vulkan UI rendered revision=" << snapshot.revision
+                        << " focus=" << static_cast<unsigned int>(snapshot.focus);
+      }
+      return true;
+  #else
+      return false;
+  #endif
+    }
+
     static constexpr std::uint32_t panel_margin = 32;
     static constexpr std::uint32_t panel_width = 960;
     static constexpr std::uint32_t panel_height = 180;
@@ -2129,9 +2162,9 @@ namespace video {
     std::unique_ptr<platf::rga::backend_t> backend_;
     std::unique_ptr<platf::rga::dma_allocator_t> allocator_;
     platf::rga::target_buffer_t source_;
-#ifdef SUNSHINE_BUILD_VULKAN
+  #ifdef SUNSHINE_BUILD_VULKAN
     std::unique_ptr<platf::vulkan_ui::renderer_t> renderer_;
-#endif
+  #endif
     std::unordered_map<std::uint32_t, platf::rga::imported_buffer_t> destinations_;
     std::optional<std::uint64_t> capture_generation_;
     std::uint64_t frames_composed_ {};
@@ -2269,8 +2302,8 @@ namespace video {
         platf::rga::process(src_rga, rga_src, target_buf->rga_buffer(), rga_dst);
         if (vulkan_ui_ && vulkan_ui_enabled_) {
           try {
-            vulkan_ui_->compose_into(target_buf->rga_buffer());
-            if (!vulkan_ui_rga_logged_) {
+            const bool composed = vulkan_ui_->compose_into(target_buf->rga_buffer());
+            if (composed && !vulkan_ui_rga_logged_) {
               vulkan_ui_rga_logged_ = true;
               BOOST_LOG(info) << "RKMPP Vulkan UI active on RGA fallback target "
                               << target_resolution_.width << 'x' << target_resolution_.height;

@@ -90,6 +90,8 @@ set(_RKMPP_PLATFORM_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/edid.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/input_state_machine.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/input_state_machine.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/ui_controller.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/ui_controller.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/rkmpp.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/rkmpp.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/rkmpp_annexb.cpp")

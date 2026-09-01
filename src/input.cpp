@@ -39,6 +39,9 @@ extern "C" {
 #include "platform/virtualhid_input.h"
 #include "thread_pool.h"
 #include "utility.h"
+#if defined(SUNSHINE_BUILD_RKMPP) && defined(SUNSHINE_BUILD_VULKAN)
+  #include "platform/linux/ui_controller.h"
+#endif
 
 #ifdef SUNSHINE_XBOX_REMOTE_PLAY
   #include "xbox_remote/production_connection.h"
@@ -483,6 +486,11 @@ namespace input {
    * @param id Sunshine global and client-relative controller identifiers.
    */
   void free_gamepad(platf::input_t &platf_input, const std::shared_ptr<gamepad::router_t> &router, const platf::gamepad_id_t &id) {
+#if defined(SUNSHINE_BUILD_RKMPP) && defined(SUNSHINE_BUILD_VULKAN)
+    if (id.globalIndex >= 0 && id.globalIndex < platf::MAX_GAMEPADS) {
+      (void) platf::ui::global_controller().disconnect(static_cast<std::uint8_t>(id.globalIndex));
+    }
+#endif
     if (router) {
       router->neutralize(id);
       router->free(id);
@@ -1920,6 +1928,36 @@ namespace input {
       packet->rightStickY
     };
 
+#if defined(SUNSHINE_BUILD_RKMPP) && defined(SUNSHINE_BUILD_VULKAN)
+    const auto ui_decision = platf::ui::global_controller().update(
+      static_cast<std::uint8_t>(gamepad.id),
+      {gamepad_state.buttonFlags, gamepad_state.lsX, gamepad_state.lsY},
+      platf::ui::controller_t::clock_t::now()
+    );
+    if (ui_decision.consume) {
+      if (ui_decision.visibility_changed) {
+        for (int client_index = 0; client_index < input->gamepads.size(); ++client_index) {
+          auto &candidate = input->gamepads[client_index];
+          if (candidate.back_timeout_id) {
+            task_pool.cancel(candidate.back_timeout_id);
+            candidate.back_timeout_id = nullptr;
+          }
+          if (candidate.id >= 0 && candidate.router) {
+            candidate.router->neutralize({candidate.id, static_cast<std::uint8_t>(client_index)});
+          }
+          candidate.gamepad_state = {};
+          candidate.back_button_state = button_state_e::NONE;
+        }
+        BOOST_LOG(info) << "RKMPP Vulkan UI " << (ui_decision.visible ? "opened" : "closed")
+                        << " by gamepad slot " << gamepad.id;
+      } else if (ui_decision.neutralize) {
+        gamepad.router->neutralize({gamepad.id, static_cast<std::uint8_t>(packet->controllerNumber)});
+      }
+      gamepad.gamepad_state = {};
+      return;
+    }
+#endif
+
     auto bf_new = gamepad_state.buttonFlags;
     switch (gamepad.back_button_state) {
       case button_state_e::UP:
@@ -2409,6 +2447,9 @@ namespace input {
         gamepad.back_timeout_id = nullptr;
       }
       if (gamepad.id >= 0) {
+#if defined(SUNSHINE_BUILD_RKMPP) && defined(SUNSHINE_BUILD_VULKAN)
+        (void) platf::ui::global_controller().disconnect(static_cast<std::uint8_t>(gamepad.id));
+#endif
         if (gamepad.router) {
           gamepad.router->neutralize({gamepad.id, static_cast<std::uint8_t>(client_index)});
         } else {
