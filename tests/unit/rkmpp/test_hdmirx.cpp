@@ -6,7 +6,6 @@
 
 #ifdef SUNSHINE_BUILD_RKMPP
   #include <linux/videodev2.h>
-
   #include <src/platform/linux/hdmirx.h>
 
 TEST(HdmirxMppFormat, MapsSupportedFormats) {
@@ -34,6 +33,12 @@ TEST(HdmirxMppFormat, ValidatesCompleteCaptureMetadata) {
   format.planes.front().sizeimage = 6220800;
   format.fourcc = v4l2_fourcc('T', 'E', 'S', 'T');
   EXPECT_FALSE(platf::hdmirx::capture_format_is_valid(format));
+}
+
+TEST(HdmirxBootstrapPolicy, InitializationNeverWaitsForLiveHdmi) {
+  EXPECT_TRUE(platf::hdmirx::uses_synthetic_bootstrap_frame(platf::display_purpose_e::encoder_probe));
+  EXPECT_TRUE(platf::hdmirx::uses_synthetic_bootstrap_frame(platf::display_purpose_e::stream));
+  EXPECT_FALSE(platf::hdmirx::uses_synthetic_bootstrap_frame(static_cast<platf::display_purpose_e>(255)));
 }
 
 TEST(HdmirxTimestamp, DecodesClockType) {

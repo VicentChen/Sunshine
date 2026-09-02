@@ -350,6 +350,7 @@ if(RKMPP_FOUND)
         ${CMAKE_SOURCE_DIR}/src/platform/linux/hdmirx.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/rkmpp.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/edid.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/hdmirx_edid_controller.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/input_state_machine.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/hdmirx_policy.cpp)
     target_link_libraries(rkmpp_rkmpp_smoke PRIVATE RockchipMPP::rockchip_mpp Boost::asio Boost::format Boost::log Boost::process)
@@ -380,6 +381,7 @@ if(RKMPP_FOUND)
         ${CMAKE_SOURCE_DIR}/tests/rkmpp_hdmirx_smoke.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/hdmirx.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/edid.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/hdmirx_edid_controller.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/input_state_machine.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/rkmpp.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/hdmirx_policy.cpp)

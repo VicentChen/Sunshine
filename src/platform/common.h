@@ -670,6 +670,14 @@ namespace platf {
   };
 
   /**
+   * @brief Purpose for which a display capture object is being created.
+   */
+  enum class display_purpose_e {
+    stream,  ///< A real Moonlight session; device control may apply its target.
+    encoder_probe,  ///< Read-only encoder capability validation.
+  };
+
+  /**
    * @brief Abstract display capture backend used by the streaming pipeline.
    */
   class display_t {
@@ -913,9 +921,15 @@ namespace platf {
    * If you require to use this parameter in a separate thread, make a copy of it.
    * @param display_name The name of the monitor that SHOULD be displayed
    * @param config Stream configuration
+   * @param purpose Whether the display is for streaming or a read-only probe.
    * @return The display_t instance based on hwdevice_type.
    */
-  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config);
+  std::shared_ptr<display_t> display(
+    mem_type_e hwdevice_type,
+    const std::string &display_name,
+    const video::config_t &config,
+    display_purpose_e purpose = display_purpose_e::stream
+  );
 
   // A list of names of displays accepted as display_name with the mem_type_e
   /**

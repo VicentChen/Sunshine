@@ -23,6 +23,21 @@
 #include <vector>
 
 namespace platf::hdmirx {
+  /**
+   * @brief Decide whether display initialization must use a synthetic frame.
+   *
+   * Encoder capability and session construction are independent from the
+   * source's instantaneous HDMI signal state. Both read-only probes and real
+   * streams therefore bootstrap with a target-sized placeholder. Only the
+   * capture loop may wait for and publish real HDMI frames.
+   *
+   * @param purpose Purpose assigned to the display instance.
+   * @return true for every supported HDMI RX display purpose.
+   */
+  constexpr bool uses_synthetic_bootstrap_frame(display_purpose_e purpose) noexcept {
+    return purpose == display_purpose_e::encoder_probe || purpose == display_purpose_e::stream;
+  }
+
   /** @brief Point in a captured frame at which the V4L2 timestamp was taken. */
   enum class timestamp_source_e {
     end_of_frame,  ///< The timestamp represents the end of frame reception.
@@ -274,5 +289,5 @@ namespace platf::hdmirx {
 }  // namespace platf::hdmirx
 
 namespace platf {
-  std::shared_ptr<display_t> hdmirx_display(const video::config_t &config);
+  std::shared_ptr<display_t> hdmirx_display(const video::config_t &config, display_purpose_e purpose);
 }

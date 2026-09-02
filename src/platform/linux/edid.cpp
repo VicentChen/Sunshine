@@ -1,19 +1,267 @@
 /**
  * @file src/platform/linux/edid.cpp
- * @brief EDID data model, parser, ioctl abstraction, and RAII restore guard.
+ * @brief EDID parsing, native-mode projection, and V4L2 ioctl implementation.
  */
-#include "edid.h"
+
+#include "src/platform/linux/edid.h"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cstring>
 #include <numeric>
 
 namespace platf::edid {
+  namespace {
+    /** @brief One established-timing bit and its decoded video mode. */
+    struct established_timing_t {
+      std::uint8_t byte;  ///< Base-block byte containing the bit.
+      std::uint8_t mask;  ///< Bit mask inside byte.
+      platf::hdmirx::resolution_t resolution;  ///< Active dimensions.
+      platf::hdmirx::refresh_rate_t refresh;  ///< Nominal refresh rate.
+      bool interlaced;  ///< Whether the mode is interlaced.
+    };
 
-  // -------------------------------------------------------------------------
-  // Error classification
-  // -------------------------------------------------------------------------
+    constexpr std::array k_established_timings {
+      established_timing_t {35, 0x80, {720, 400}, {70, 1}, false},
+      established_timing_t {35, 0x40, {720, 400}, {88, 1}, false},
+      established_timing_t {35, 0x20, {640, 480}, {60, 1}, false},
+      established_timing_t {35, 0x10, {640, 480}, {67, 1}, false},
+      established_timing_t {35, 0x08, {640, 480}, {72, 1}, false},
+      established_timing_t {35, 0x04, {640, 480}, {75, 1}, false},
+      established_timing_t {35, 0x02, {800, 600}, {56, 1}, false},
+      established_timing_t {35, 0x01, {800, 600}, {60, 1}, false},
+      established_timing_t {36, 0x80, {800, 600}, {72, 1}, false},
+      established_timing_t {36, 0x40, {800, 600}, {75, 1}, false},
+      established_timing_t {36, 0x20, {832, 624}, {75, 1}, false},
+      established_timing_t {36, 0x10, {1024, 768}, {87, 1}, true},
+      established_timing_t {36, 0x08, {1024, 768}, {60, 1}, false},
+      established_timing_t {36, 0x04, {1024, 768}, {70, 1}, false},
+      established_timing_t {36, 0x02, {1024, 768}, {75, 1}, false},
+      established_timing_t {36, 0x01, {1280, 1024}, {75, 1}, false},
+      established_timing_t {37, 0x80, {1152, 870}, {75, 1}, false},
+    };
+
+    /** @brief Update one EDID block checksum after rewriting bytes. */
+    void fix_checksum(std::span<std::uint8_t, k_edid_block_size> block) noexcept {
+      const auto sum = std::accumulate(block.begin(), block.begin() + 127, std::uint8_t {0});
+      block[127] = static_cast<std::uint8_t>(0U - sum);
+    }
+
+    /** @brief Compare refresh rates exactly. */
+    bool same_refresh(const platf::hdmirx::refresh_rate_t &left, const platf::hdmirx::refresh_rate_t &right) noexcept {
+      return static_cast<std::uint64_t>(left.numerator) * right.denominator ==
+             static_cast<std::uint64_t>(right.numerator) * left.denominator;
+    }
+
+    /** @brief Compare hardware-independent modes while ignoring provenance. */
+    bool same_mode(const platf::hdmirx::hdmi_mode_t &left, const platf::hdmirx::hdmi_mode_t &right) noexcept {
+      return left.resolution == right.resolution && same_refresh(left.refresh_rate, right.refresh_rate);
+    }
+
+    /** @brief Decode one base-block standard timing pair. */
+    std::optional<platf::hdmirx::hdmi_mode_t> standard_timing_to_mode(
+      std::uint8_t horizontal,
+      std::uint8_t aspect_and_refresh,
+      bool legacy_aspect
+    ) noexcept {
+      if ((horizontal == 0x01U && aspect_and_refresh == 0x01U) || horizontal == 0U) {
+        return std::nullopt;
+      }
+      const auto width = static_cast<std::uint32_t>(horizontal + 31U) * 8U;
+      std::uint32_t height;
+      switch (aspect_and_refresh >> 6U) {
+        case 0:
+          height = legacy_aspect ? width : width * 10U / 16U;
+          break;
+        case 1:
+          height = width * 3U / 4U;
+          break;
+        case 2:
+          height = width * 4U / 5U;
+          break;
+        default:
+          height = width * 9U / 16U;
+          break;
+      }
+      if (height == 0) {
+        return std::nullopt;
+      }
+      return platf::hdmirx::hdmi_mode_t {{width, height}, {static_cast<std::uint32_t>(aspect_and_refresh & 0x3fU) + 60U, 1}, true};
+    }
+
+    /** @brief Decode CTA VICs used by HDMI sources supported by this receiver. */
+    std::optional<std::pair<platf::hdmirx::hdmi_mode_t, bool>> cta_vic_to_mode(std::uint8_t vic) noexcept {
+      using platf::hdmirx::hdmi_mode_t;
+      const auto progressive = [](platf::hdmirx::resolution_t resolution, platf::hdmirx::refresh_rate_t refresh) {
+        return std::pair {hdmi_mode_t {resolution, refresh, true}, false};
+      };
+      const auto interlaced = [](platf::hdmirx::resolution_t resolution, platf::hdmirx::refresh_rate_t refresh) {
+        return std::pair {hdmi_mode_t {resolution, refresh, true}, true};
+      };
+      switch (vic) {
+        case 1:
+          return progressive({640, 480}, {60, 1});
+        case 2:
+        case 3:
+          return progressive({720, 480}, {60, 1});
+        case 4:
+          return progressive({1280, 720}, {60, 1});
+        case 5:
+          return interlaced({1920, 1080}, {60, 1});
+        case 16:
+          return progressive({1920, 1080}, {60, 1});
+        case 17:
+        case 18:
+          return progressive({720, 576}, {50, 1});
+        case 19:
+          return progressive({1280, 720}, {50, 1});
+        case 20:
+          return interlaced({1920, 1080}, {50, 1});
+        case 31:
+          return progressive({1920, 1080}, {50, 1});
+        case 32:
+          return progressive({1920, 1080}, {24, 1});
+        case 33:
+          return progressive({1920, 1080}, {25, 1});
+        case 34:
+          return progressive({1920, 1080}, {30, 1});
+        case 60:
+          return progressive({1280, 720}, {24, 1});
+        case 61:
+          return progressive({1280, 720}, {25, 1});
+        case 62:
+          return progressive({1280, 720}, {30, 1});
+        case 63:
+          return progressive({1920, 1080}, {120, 1});
+        case 64:
+          return progressive({1920, 1080}, {100, 1});
+        case 93:
+          return progressive({3840, 2160}, {24, 1});
+        case 94:
+          return progressive({3840, 2160}, {25, 1});
+        case 95:
+          return progressive({3840, 2160}, {30, 1});
+        case 96:
+          return progressive({3840, 2160}, {50, 1});
+        case 97:
+          return progressive({3840, 2160}, {60, 1});
+        case 98:
+          return progressive({4096, 2160}, {24, 1});
+        case 99:
+          return progressive({4096, 2160}, {25, 1});
+        case 100:
+          return progressive({4096, 2160}, {30, 1});
+        case 101:
+          return progressive({4096, 2160}, {50, 1});
+        case 102:
+          return progressive({4096, 2160}, {60, 1});
+        default:
+          return std::nullopt;
+      }
+    }
+
+    /** @brief Append a DTD record from a known block and byte offset. */
+    void append_dtd_record(
+      std::vector<mode_record_t> &catalog,
+      std::span<const std::uint8_t, 18> bytes,
+      mode_origin_e origin,
+      std::uint32_t block_index,
+      std::uint32_t byte_offset,
+      bool native
+    ) {
+      const auto timing = parse_timing_descriptor(bytes);
+      if (!timing) {
+        return;
+      }
+      const auto mode = timing_to_hdmi_mode(*timing);
+      if (!mode) {
+        return;
+      }
+      catalog.push_back(mode_record_t {
+        .mode = *mode,
+        .origin = origin,
+        .block_index = block_index,
+        .byte_offset = byte_offset,
+        .native = native,
+        .y420_only = false,
+        .interlaced = timing->interlaced,
+        .raw_encoding = {bytes.begin(), bytes.end()},
+      });
+    }
+
+    /** @brief Check that a CTA data-block collection has valid boundaries. */
+    bool valid_cta_data_blocks(std::span<const std::uint8_t, k_edid_block_size> extension) noexcept {
+      if (extension[0] != 0x02U) {
+        return false;
+      }
+      if (extension[2] == 0) {
+        return true;
+      }
+      const auto end = static_cast<std::size_t>(extension[2]);
+      if (end < 4 || end > 127) {
+        return false;
+      }
+      for (std::size_t offset = 4; offset < end;) {
+        const auto length = static_cast<std::size_t>(extension[offset++] & 0x1fU);
+        if (length > end - offset) {
+          return false;
+        }
+        offset += length;
+      }
+      return true;
+    }
+
+    /** @brief Filter one CTA video data block into a projected collection. */
+    bool append_projected_cta_block(
+      std::span<const std::uint8_t> block,
+      const platf::hdmirx::resolution_t &target,
+      std::vector<std::uint8_t> &output
+    ) {
+      const auto header = block.front();
+      const auto tag = header >> 5U;
+      const auto length = static_cast<std::size_t>(header & 0x1fU);
+      const bool y420_vdb = tag == 0x07U && length > 1U && block[1] == 0x0eU;
+      const bool y420_map = tag == 0x07U && length > 0U && block[1] == 0x0fU;
+      if (tag != 0x02U && !y420_vdb && !y420_map) {
+        output.insert(output.end(), block.begin(), block.end());
+        return true;
+      }
+      if (y420_map) {
+        return true;
+      }
+
+      const auto first = y420_vdb ? std::size_t {2} : std::size_t {1};
+      std::vector<std::uint8_t> selected;
+      for (std::size_t index = first; index < block.size(); ++index) {
+        const auto vic = static_cast<std::uint8_t>(block[index] & 0x7fU);
+        const auto decoded = cta_vic_to_mode(vic);
+        if (!decoded) {
+          return false;
+        }
+        if (decoded->first.resolution == target) {
+          selected.push_back(block[index]);
+        }
+      }
+      if (selected.empty()) {
+        return true;
+      }
+      if (y420_vdb) {
+        output.push_back(static_cast<std::uint8_t>(0xe0U | (selected.size() + 1U)));
+        output.push_back(0x0eU);
+        output.insert(output.end(), selected.begin(), selected.end());
+      } else {
+        if (std::none_of(selected.begin(), selected.end(), [](std::uint8_t value) {
+              return (value & 0x80U) != 0;
+            })) {
+          selected.front() |= 0x80U;
+        }
+        output.push_back(static_cast<std::uint8_t>(0x40U | selected.size()));
+        output.insert(output.end(), selected.begin(), selected.end());
+      }
+      return true;
+    }
+  }  // namespace
 
   error_category_e classify_errno(int err_no) noexcept {
     switch (err_no) {
@@ -36,25 +284,28 @@ namespace platf::edid {
     }
   }
 
-  const char *error_category_name(error_category_e cat) noexcept {
-    switch (cat) {
-      case error_category_e::not_supported:     return "not_supported";
-      case error_category_e::invalid_argument:  return "invalid_argument";
-      case error_category_e::no_data:           return "no_data";
-      case error_category_e::too_large:         return "too_large";
-      case error_category_e::permission_denied: return "permission_denied";
-      case error_category_e::device_gone:       return "device_gone";
-      case error_category_e::io_error:          return "io_error";
+  const char *error_category_name(error_category_e category) noexcept {
+    switch (category) {
+      case error_category_e::not_supported:
+        return "not_supported";
+      case error_category_e::invalid_argument:
+        return "invalid_argument";
+      case error_category_e::no_data:
+        return "no_data";
+      case error_category_e::too_large:
+        return "too_large";
+      case error_category_e::permission_denied:
+        return "permission_denied";
+      case error_category_e::device_gone:
+        return "device_gone";
+      case error_category_e::io_error:
+        return "io_error";
     }
     return "unknown";
   }
 
-  // -------------------------------------------------------------------------
-  // EDID checksum and parsing
-  // -------------------------------------------------------------------------
-
   std::uint8_t compute_block_checksum(std::span<const std::uint8_t, k_edid_block_size> block) noexcept {
-    return std::accumulate(block.begin(), block.end(), std::uint8_t{0});
+    return std::accumulate(block.begin(), block.end(), std::uint8_t {0});
   }
 
   bool validate_block_checksum(std::span<const std::uint8_t, k_edid_block_size> block) noexcept {
@@ -65,790 +316,335 @@ namespace platf::edid {
     if (edid_data.size() < k_edid_block_size || edid_data.size() % k_edid_block_size != 0) {
       return false;
     }
-    const auto block_count = edid_data.size() / k_edid_block_size;
-    for (std::size_t i = 0; i < block_count; ++i) {
-      auto block = edid_data.subspan(i * k_edid_block_size, k_edid_block_size);
-      std::span<const std::uint8_t, k_edid_block_size> fixed{block.data(), k_edid_block_size};
-      if (!validate_block_checksum(fixed)) {
+    constexpr std::array<std::uint8_t, 8> header {0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00};
+    if (!std::equal(header.begin(), header.end(), edid_data.begin())) {
+      return false;
+    }
+    const auto declared_blocks = static_cast<std::size_t>(edid_data[126]) + 1U;
+    if (declared_blocks > k_max_edid_blocks || edid_data.size() != declared_blocks * k_edid_block_size) {
+      return false;
+    }
+    for (std::size_t index = 0; index < declared_blocks; ++index) {
+      std::span<const std::uint8_t, k_edid_block_size> block {edid_data.data() + index * k_edid_block_size, k_edid_block_size};
+      if (!validate_block_checksum(block)) {
         return false;
       }
     }
     return true;
   }
 
-  std::optional<timing_descriptor_t> parse_timing_descriptor(
-    std::span<const std::uint8_t, 18> desc) noexcept {
-    // Pixel clock in 10 kHz units (little-endian at bytes 0-1)
-    const auto pixel_clock_10khz = static_cast<std::uint16_t>(
-      desc[0] | (desc[1] << 8));
+  std::optional<timing_descriptor_t> parse_timing_descriptor(std::span<const std::uint8_t, 18> descriptor) noexcept {
+    const auto pixel_clock_10khz = static_cast<std::uint16_t>(descriptor[0] | (descriptor[1] << 8U));
     if (pixel_clock_10khz == 0) {
-      // Zero pixel clock means this is a monitor descriptor, not timing.
       return std::nullopt;
     }
-
-    timing_descriptor_t t;
-    t.pixel_clock_khz = static_cast<std::uint32_t>(pixel_clock_10khz) * 10;
-
-    // Horizontal active: lower 8 bits in byte 2, upper 4 bits in byte 4[7:4]
-    t.h_active = static_cast<std::uint16_t>(
-      desc[2] | ((desc[4] >> 4) << 8));
-    // Horizontal blanking: lower 8 bits in byte 3, upper 4 bits in byte 4[3:0]
-    t.h_blanking = static_cast<std::uint16_t>(
-      desc[3] | ((desc[4] & 0x0F) << 8));
-    // Vertical active: lower 8 bits in byte 5, upper 4 bits in byte 7[7:4]
-    t.v_active = static_cast<std::uint16_t>(
-      desc[5] | ((desc[7] >> 4) << 8));
-    // Vertical blanking: lower 8 bits in byte 6, upper 4 bits in byte 7[3:0]
-    t.v_blanking = static_cast<std::uint16_t>(
-      desc[6] | ((desc[7] & 0x0F) << 8));
-
-    return t;
+    return timing_descriptor_t {
+      .pixel_clock_khz = static_cast<std::uint32_t>(pixel_clock_10khz) * 10U,
+      .h_active = static_cast<std::uint16_t>(descriptor[2] | ((descriptor[4] >> 4U) << 8U)),
+      .h_blanking = static_cast<std::uint16_t>(descriptor[3] | ((descriptor[4] & 0x0fU) << 8U)),
+      .v_active = static_cast<std::uint16_t>(descriptor[5] | ((descriptor[7] >> 4U) << 8U)),
+      .v_blanking = static_cast<std::uint16_t>(descriptor[6] | ((descriptor[7] & 0x0fU) << 8U)),
+      .interlaced = (descriptor[17] & 0x80U) != 0,
+    };
   }
 
-  std::vector<timing_descriptor_t> parse_base_block_timings(
-    std::span<const std::uint8_t, k_edid_block_size> base_block) noexcept {
+  std::vector<timing_descriptor_t> parse_base_block_timings(std::span<const std::uint8_t, k_edid_block_size> base_block) noexcept {
     std::vector<timing_descriptor_t> timings;
-    // Four 18-byte descriptor slots start at offset 54 in the base block.
-    for (int i = 0; i < 4; ++i) {
-      const auto offset = 54 + i * 18;
-      if (static_cast<std::uint32_t>(offset + 18) > k_edid_block_size) break;
-      std::span<const std::uint8_t, 18> desc{base_block.data() + offset, 18};
-      if (auto t = parse_timing_descriptor(desc)) {
-        timings.push_back(*t);
+    for (std::size_t offset = 54; offset <= 108; offset += 18) {
+      std::span<const std::uint8_t, 18> descriptor {base_block.data() + offset, 18};
+      if (const auto timing = parse_timing_descriptor(descriptor)) {
+        timings.push_back(*timing);
       }
     }
     return timings;
   }
 
-  std::optional<platf::hdmirx::hdmi_mode_t> timing_to_hdmi_mode(
-    const timing_descriptor_t &timing) noexcept {
-    if (timing.h_active == 0 || timing.v_active == 0 || timing.pixel_clock_khz == 0) {
+  std::optional<platf::hdmirx::hdmi_mode_t> timing_to_hdmi_mode(const timing_descriptor_t &timing) noexcept {
+    const auto h_total = static_cast<std::uint32_t>(timing.h_active) + timing.h_blanking;
+    const auto v_total = static_cast<std::uint32_t>(timing.v_active) + timing.v_blanking;
+    if (timing.pixel_clock_khz == 0 || timing.h_active == 0 || timing.v_active == 0 || h_total == 0 || v_total == 0) {
       return std::nullopt;
     }
-
-    const std::uint32_t h_total = static_cast<std::uint32_t>(timing.h_active) + timing.h_blanking;
-    const std::uint32_t v_total = static_cast<std::uint32_t>(timing.v_active) + timing.v_blanking;
-
-    if (h_total == 0 || v_total == 0) {
-      return std::nullopt;
-    }
-
-    // Refresh rate: pixel_clock_khz * 1000 / (h_total * v_total) Hz
-    // Express as rational to avoid floating point:
-    // numerator = pixel_clock_khz * 1000, denominator = h_total * v_total
-    const auto num = timing.pixel_clock_khz * 1000U;
-    const auto den = h_total * v_total;
-
-    return platf::hdmirx::hdmi_mode_t{
+    return platf::hdmirx::hdmi_mode_t {
       .resolution = {timing.h_active, timing.v_active},
-      .refresh_rate = {num, den},
+      .refresh_rate = {timing.pixel_clock_khz * 1000U, h_total * v_total},
       .verified = true,
     };
   }
 
-  namespace {
-    /** Map the progressive CTA VICs used by common HDMI consoles and displays. */
-    std::optional<platf::hdmirx::hdmi_mode_t> cta_vic_to_hdmi_mode(std::uint8_t vic) noexcept {
-      using platf::hdmirx::hdmi_mode_t;
-      using platf::hdmirx::refresh_rate_t;
-      using platf::hdmirx::resolution_t;
-      const auto mode = [](resolution_t resolution, refresh_rate_t refresh_rate) {
-        return hdmi_mode_t {resolution, refresh_rate, true};
-      };
-      switch (vic) {
-        case 1: return mode({640, 480}, {60, 1});
-        case 2:
-        case 3: return mode({720, 480}, {60, 1});
-        case 4: return mode({1280, 720}, {60, 1});
-        case 16: return mode({1920, 1080}, {60, 1});
-        case 17:
-        case 18: return mode({720, 576}, {50, 1});
-        case 19: return mode({1280, 720}, {50, 1});
-        case 31: return mode({1920, 1080}, {50, 1});
-        case 32: return mode({1920, 1080}, {24, 1});
-        case 33: return mode({1920, 1080}, {25, 1});
-        case 34: return mode({1920, 1080}, {30, 1});
-        case 93: return mode({3840, 2160}, {24, 1});
-        case 94: return mode({3840, 2160}, {25, 1});
-        case 95: return mode({3840, 2160}, {30, 1});
-        case 96: return mode({3840, 2160}, {50, 1});
-        case 97: return mode({3840, 2160}, {60, 1});
-        case 98: return mode({4096, 2160}, {24, 1});
-        case 99: return mode({4096, 2160}, {25, 1});
-        case 100: return mode({4096, 2160}, {30, 1});
-        case 101: return mode({4096, 2160}, {50, 1});
-        case 102: return mode({4096, 2160}, {60, 1});
-        default: return std::nullopt;
+  std::vector<mode_record_t> parse_mode_catalog(std::span<const std::uint8_t> edid_data) noexcept {
+    if (!validate_edid_checksums(edid_data)) {
+      return {};
+    }
+    std::vector<mode_record_t> catalog;
+    const std::span<const std::uint8_t, k_edid_block_size> base {edid_data.data(), k_edid_block_size};
+    for (const auto &timing : k_established_timings) {
+      if ((base[timing.byte] & timing.mask) == 0) {
+        continue;
       }
+      catalog.push_back(mode_record_t {
+        .mode = {timing.resolution, timing.refresh, true},
+        .origin = mode_origin_e::established_timing,
+        .block_index = 0,
+        .byte_offset = timing.byte,
+        .native = false,
+        .y420_only = false,
+        .interlaced = timing.interlaced,
+        .raw_encoding = {timing.mask},
+      });
     }
 
-    bool same_hdmi_mode(const platf::hdmirx::hdmi_mode_t &left, const platf::hdmirx::hdmi_mode_t &right) noexcept {
-      if (left.resolution != right.resolution) {
-        return false;
+    const bool legacy_aspect = base[18] == 1U && base[19] < 3U;
+    for (std::size_t offset = 38; offset < 54; offset += 2) {
+      const auto mode = standard_timing_to_mode(base[offset], base[offset + 1], legacy_aspect);
+      if (!mode) {
+        continue;
       }
-      return static_cast<std::uint64_t>(left.refresh_rate.numerator) * right.refresh_rate.denominator ==
-             static_cast<std::uint64_t>(right.refresh_rate.numerator) * left.refresh_rate.denominator;
+      catalog.push_back(mode_record_t {
+        .mode = *mode,
+        .origin = mode_origin_e::standard_timing,
+        .block_index = 0,
+        .byte_offset = static_cast<std::uint32_t>(offset),
+        .native = false,
+        .y420_only = false,
+        .interlaced = false,
+        .raw_encoding = {base[offset], base[offset + 1]},
+      });
     }
 
-    void append_unique_mode(std::vector<platf::hdmirx::hdmi_mode_t> &modes, const platf::hdmirx::hdmi_mode_t &mode) {
-      if (std::none_of(modes.begin(), modes.end(), [&mode](const auto &candidate) { return same_hdmi_mode(candidate, mode); })) {
-        modes.push_back(mode);
-      }
+    for (std::size_t offset = 54, index = 0; offset <= 108; offset += 18, ++index) {
+      append_dtd_record(catalog, std::span<const std::uint8_t, 18> {base.data() + offset, 18}, mode_origin_e::base_dtd, 0, static_cast<std::uint32_t>(offset), index == 0 && (base[24] & 0x02U) != 0);
     }
 
-    void append_cta_video_modes(std::span<const std::uint8_t, k_edid_block_size> extension,
-                                std::vector<platf::hdmirx::hdmi_mode_t> &modes) {
-      if (extension[0] != 0x02U) {
-        return;
+    const auto block_count = static_cast<std::size_t>(base[126]) + 1U;
+    for (std::size_t block_index = 1; block_index < block_count; ++block_index) {
+      const std::span<const std::uint8_t, k_edid_block_size> extension {edid_data.data() + block_index * k_edid_block_size, k_edid_block_size};
+      if (!valid_cta_data_blocks(extension)) {
+        return {};
       }
-      // A zero DTD offset means this CTA block has no data-block collection.
-      // Treating the zero padding as headers would be harmless but obscures
-      // malformed-extension diagnostics and needlessly scans the whole block.
-      if (extension[2] == 0) {
-        return;
-      }
-      const auto data_end = std::min<std::size_t>(extension[2], 127);
+      const auto data_end = extension[2] == 0 ? std::size_t {4} : static_cast<std::size_t>(extension[2]);
       for (std::size_t offset = 4; offset < data_end;) {
+        const auto header_offset = offset;
         const auto header = extension[offset++];
         const auto tag = header >> 5U;
         const auto length = static_cast<std::size_t>(header & 0x1fU);
-        if (length > data_end - offset) {
-          return;
-        }
-        if (tag == 0x02U) {
-          for (std::size_t index = 0; index < length; ++index) {
-            if (auto mode = cta_vic_to_hdmi_mode(extension[offset + index] & 0x7fU)) {
-              append_unique_mode(modes, *mode);
+        const bool y420_vdb = tag == 0x07U && length > 1U && extension[offset] == 0x0eU;
+        if (tag == 0x02U || y420_vdb) {
+          const auto first = y420_vdb ? std::size_t {1} : std::size_t {0};
+          for (std::size_t index = first; index < length; ++index) {
+            const auto encoded = extension[offset + index];
+            const auto decoded = cta_vic_to_mode(encoded & 0x7fU);
+            if (decoded) {
+              catalog.push_back(mode_record_t {
+                .mode = decoded->first,
+                .origin = y420_vdb ? mode_origin_e::cta_y420_vdb : mode_origin_e::cta_vdb,
+                .block_index = static_cast<std::uint32_t>(block_index),
+                .byte_offset = static_cast<std::uint32_t>(offset + index),
+                .native = !y420_vdb && (encoded & 0x80U) != 0,
+                .y420_only = y420_vdb,
+                .interlaced = decoded->second,
+                .raw_encoding = {encoded},
+              });
             }
           }
-        } else if (tag == 0x07U && length > 1U && extension[offset] == 0x0eU) {
-          // CTA extended tag 0x0e is a YCbCr 4:2:0 Video Data Block. Its
-          // remaining bytes are VICs just like a normal Video Data Block and
-          // can advertise 4K50/60 even when the normal VDB contains only 2K.
-          for (std::size_t index = 1; index < length; ++index) {
-            if (auto mode = cta_vic_to_hdmi_mode(extension[offset + index] & 0x7fU)) {
-              append_unique_mode(modes, *mode);
-            }
-          }
         }
-        offset += length;
+        offset = header_offset + 1U + length;
+      }
+      if (extension[2] != 0) {
+        const auto native_dtd_count = static_cast<std::size_t>(extension[3] & 0x0fU);
+        for (std::size_t offset = data_end, index = 0; offset + 18 <= 127; offset += 18, ++index) {
+          append_dtd_record(catalog, std::span<const std::uint8_t, 18> {extension.data() + offset, 18}, mode_origin_e::cta_dtd, static_cast<std::uint32_t>(block_index), static_cast<std::uint32_t>(offset), index < native_dtd_count);
+        }
       }
     }
-  }  // namespace
+    return catalog;
+  }
 
-  std::vector<platf::hdmirx::hdmi_mode_t> parse_edid_modes(
-    std::span<const std::uint8_t> edid_data) noexcept {
-    if (edid_data.size() < k_edid_block_size) {
-      return {};
-    }
-
-    // A mode set is trusted only when every block declared by the base block is
-    // present and valid. This also prevents selecting from a truncated CTA list.
-    std::span<const std::uint8_t, k_edid_block_size> base{edid_data.data(), k_edid_block_size};
-    if (!validate_block_checksum(base)) {
-      return {};
-    }
-    const auto block_count = static_cast<std::size_t>(base[126]) + 1U;
-    if (block_count > k_max_edid_blocks || edid_data.size() < block_count * k_edid_block_size) {
-      return {};
-    }
-    for (std::size_t index = 1; index < block_count; ++index) {
-      std::span<const std::uint8_t, k_edid_block_size> block {edid_data.data() + index * k_edid_block_size, k_edid_block_size};
-      if (!validate_block_checksum(block)) {
-        return {};
-      }
-    }
-
-    auto timings = parse_base_block_timings(base);
+  std::vector<platf::hdmirx::hdmi_mode_t> parse_edid_modes(std::span<const std::uint8_t> edid_data) noexcept {
     std::vector<platf::hdmirx::hdmi_mode_t> modes;
-    modes.reserve(timings.size());
-    for (const auto &t : timings) {
-      if (auto mode = timing_to_hdmi_mode(t)) {
-        append_unique_mode(modes, *mode);
+    for (const auto &record : parse_mode_catalog(edid_data)) {
+      if (std::none_of(modes.begin(), modes.end(), [&record](const auto &candidate) {
+            return same_mode(candidate, record.mode);
+          })) {
+        modes.push_back(record.mode);
       }
-    }
-    for (std::size_t index = 1; index < block_count; ++index) {
-      std::span<const std::uint8_t, k_edid_block_size> extension {edid_data.data() + index * k_edid_block_size, k_edid_block_size};
-      append_cta_video_modes(extension, modes);
     }
     return modes;
   }
 
-  // -------------------------------------------------------------------------
-  // EDID fixture generation
-  // -------------------------------------------------------------------------
-
-  /**
-   * @brief Write an EDID base-block header (bytes 0-7).
-   *
-   * Standard EDID 1.4 header: 00 FF FF FF FF FF FF 00.
-   */
-  static void write_edid_header(std::vector<std::uint8_t> &block) {
-    block[0] = 0x00;
-    block[1] = 0xFF;
-    block[2] = 0xFF;
-    block[3] = 0xFF;
-    block[4] = 0xFF;
-    block[5] = 0xFF;
-    block[6] = 0xFF;
-    block[7] = 0x00;
-  }
-
-  /**
-   * @brief Write a detailed timing descriptor into an EDID block.
-   *
-   * @param block The EDID block buffer.
-   * @param offset Byte offset within the block (typically 54, 72, 90, or 108).
-   * @param h_active Horizontal active pixels.
-   * @param v_active Vertical active lines.
-   * @param h_blanking Horizontal blanking pixels.
-   * @param v_blanking Vertical blanking lines.
-   * @param pixel_clock_10khz Pixel clock in 10 kHz units.
-   */
-  static void write_timing_descriptor(
-    std::vector<std::uint8_t> &block,
-    std::size_t offset,
-    std::uint16_t h_active,
-    std::uint16_t v_active,
-    std::uint16_t h_blanking,
-    std::uint16_t v_blanking,
-    std::uint16_t pixel_clock_10khz) {
-    // Pixel clock (little-endian, 10kHz units)
-    block[offset + 0] = static_cast<std::uint8_t>(pixel_clock_10khz & 0xFF);
-    block[offset + 1] = static_cast<std::uint8_t>((pixel_clock_10khz >> 8) & 0xFF);
-    // Horizontal active lower 8 bits
-    block[offset + 2] = static_cast<std::uint8_t>(h_active & 0xFF);
-    // Horizontal blanking lower 8 bits
-    block[offset + 3] = static_cast<std::uint8_t>(h_blanking & 0xFF);
-    // Upper nibbles: h_active[11:8] in upper, h_blanking[11:8] in lower
-    block[offset + 4] = static_cast<std::uint8_t>(
-      ((h_active >> 8) << 4) | ((h_blanking >> 8) & 0x0F));
-    // Vertical active lower 8 bits
-    block[offset + 5] = static_cast<std::uint8_t>(v_active & 0xFF);
-    // Vertical blanking lower 8 bits
-    block[offset + 6] = static_cast<std::uint8_t>(v_blanking & 0xFF);
-    // Upper nibbles: v_active[11:8] in upper, v_blanking[11:8] in lower
-    block[offset + 7] = static_cast<std::uint8_t>(
-      ((v_active >> 8) << 4) | ((v_blanking >> 8) & 0x0F));
-    // Remaining bytes (8-17) are sync offsets/widths, set to reasonable defaults.
-    // Byte 8: h_sync_offset lower 8
-    block[offset + 8] = 0x30;
-    // Byte 9: h_sync_pulse_width lower 8
-    block[offset + 9] = 0x20;
-    // Byte 10: v_sync_offset[3:0] | v_sync_pulse_width[3:0]
-    block[offset + 10] = 0x35;
-    // Byte 11: upper bits of sync values
-    block[offset + 11] = 0x00;
-    // Bytes 12-13: horizontal/vertical image size (mm)
-    block[offset + 12] = 0x00;
-    block[offset + 13] = 0x00;
-    // Byte 14: upper nibbles of image size
-    block[offset + 14] = 0x00;
-    // Byte 15: horizontal border
-    block[offset + 15] = 0x00;
-    // Byte 16: vertical border
-    block[offset + 16] = 0x00;
-    // Byte 17: flags (non-interlaced, normal display, digital separate sync)
-    block[offset + 17] = 0x1E;
-  }
-
-  /**
-   * @brief Fix the checksum byte of an EDID block.
-   *
-   * Sets byte 127 so that the sum of all 128 bytes is 0 mod 256.
-   */
-  static void fix_checksum(std::span<std::uint8_t, k_edid_block_size> block) {
-    std::uint8_t sum = 0;
-    for (std::size_t i = 0; i < 127; ++i) {
-      sum += block[i];
-    }
-    block[127] = static_cast<std::uint8_t>(256 - sum);
-  }
-
-  std::vector<std::uint8_t> generate_edid_base_block(
-    std::uint16_t h_active,
-    std::uint16_t v_active,
-    std::uint16_t h_blanking,
-    std::uint16_t v_blanking,
-    std::uint16_t pixel_clock_10khz) noexcept {
-    std::vector<std::uint8_t> block(k_edid_block_size, 0);
-
-    write_edid_header(block);
-
-    // Manufacturer ID (bytes 8-9): "SUN" encoded
-    block[8] = 0x4E;   // S=19, U=21 -> (19<<2)|(21>>3) = 0x4E
-    block[9] = 0xAE;   // U=21, N=14 -> ((21&7)<<5)|14 = 0xAE
-    // Product code (bytes 10-11)
-    block[10] = 0x01;
-    block[11] = 0x00;
-    // Serial (bytes 12-15)
-    block[12] = 0x01;
-    block[13] = 0x00;
-    block[14] = 0x00;
-    block[15] = 0x00;
-    // Week, Year (bytes 16-17)
-    block[16] = 0x01;
-    block[17] = 0x1F;  // 2021
-    // EDID version 1.4 (bytes 18-19)
-    block[18] = 0x01;
-    block[19] = 0x04;
-    // Basic display parameters (byte 20): digital input, 8 bpc
-    block[20] = 0xA5;
-    // Max H/V image size in cm (bytes 21-22)
-    block[21] = 0x00;
-    block[22] = 0x00;
-    // Gamma (byte 23)
-    block[23] = 0x78;  // 2.2
-    // Feature support (byte 24)
-    block[24] = 0x06;
-    // Chromaticity (bytes 25-34): all zeros for minimal fixture
-    // Established timings (bytes 35-37): none
-    // Standard timings (bytes 38-53): unused (0101 pattern)
-    for (int i = 38; i < 54; i += 2) {
-      block[i] = 0x01;
-      block[i + 1] = 0x01;
-    }
-
-    // First detailed timing descriptor at offset 54
-    write_timing_descriptor(block, 54, h_active, v_active, h_blanking, v_blanking, pixel_clock_10khz);
-
-    // Number of extensions (byte 126)
-    block[126] = 0;
-
-    // Fix checksum at byte 127
-    fix_checksum(std::span<std::uint8_t, k_edid_block_size>{block.data(), k_edid_block_size});
-
-    return block;
-  }
-
-  std::vector<std::uint8_t> with_cta_lpcm_audio_extension(
-    std::span<const std::uint8_t> base_edid,
-    std::uint8_t native_cta_vic) {
-    if (base_edid.size() != k_edid_block_size) {
-      return {};
-    }
-
-    std::span<const std::uint8_t, k_edid_block_size> base{base_edid.data(), k_edid_block_size};
-    if (!validate_block_checksum(base)) {
-      return {};
-    }
-
-    std::vector<std::uint8_t> edid;
-    edid.reserve(k_edid_block_size * 2U);
-    edid.insert(edid.end(), base_edid.begin(), base_edid.end());
-    edid.resize(k_edid_block_size * 2U, 0);
-
-    auto base_block = std::span<std::uint8_t, k_edid_block_size>{edid.data(), k_edid_block_size};
-    base_block[126] = 1;  // One CTA-861 extension follows the base block.
-    fix_checksum(base_block);
-
-    auto extension = std::span<std::uint8_t, k_edid_block_size>{edid.data() + k_edid_block_size, k_edid_block_size};
-    extension[0] = 0x02;  // CTA-861 extension tag.
-    extension[1] = 0x03;  // CTA-861 revision 3.
-    extension[2] = native_cta_vic == 0 ? 18 : 20;  // Data-block collection end.
-    extension[3] = 0x40;  // Basic audio is supported.
-    auto offset = std::size_t{4};
-    if (native_cta_vic != 0) {
-      extension[offset++] = 0x41;  // Video data block with one descriptor.
-      extension[offset++] = native_cta_vic | 0x80U;  // Mark the mode native.
-    }
-    extension[offset++] = 0x23;  // Audio data block with three payload bytes.
-    extension[offset++] = 0x09;  // LPCM, two channels.
-    extension[offset++] = 0x07;  // 32, 44.1, and 48 kHz.
-    extension[offset++] = 0x07;  // 16, 20, and 24-bit samples.
-    extension[offset++] = 0x83;  // Speaker allocation block with three payload bytes.
-    extension[offset++] = 0x01;  // Front left and front right speakers.
-    offset += 2;  // The remaining speaker-allocation payload bytes are zero.
-    extension[offset++] = 0x65;  // HDMI vendor-specific data block, five bytes.
-    extension[offset++] = 0x03;  // HDMI licensing OUI, least significant byte.
-    extension[offset++] = 0x0c;
-    extension[offset++] = 0x00;
-    extension[offset++] = 0x10;  // Physical address 1.0.0.0.
-    extension[offset++] = 0x00;
-
-    fix_checksum(extension);
-    return edid;
-  }
-
-  std::vector<std::uint8_t> make_720p_edid() noexcept {
-    // 1280x720@60Hz: pixel clock 74.25 MHz = 7425 * 10kHz
-    // H: 1280 active + 370 blanking = 1650 total
-    // V: 720 active + 30 blanking = 750 total
-    return generate_edid_base_block(1280, 720, 370, 30, 7425);
-  }
-
-  std::vector<std::uint8_t> make_1080p_edid() noexcept {
-    // 1920x1080@60Hz: pixel clock 148.5 MHz = 14850 * 10kHz
-    // H: 1920 active + 280 blanking = 2200 total
-    // V: 1080 active + 45 blanking = 1125 total
-    return generate_edid_base_block(1920, 1080, 280, 45, 14850);
-  }
-
-  std::vector<std::uint8_t> make_1440p_edid() noexcept {
-    // 2560x1440@60Hz: pixel clock 241.5 MHz = 24150 * 10kHz
-    // H: 2560 active + 160 blanking = 2720 total
-    // V: 1440 active + 49 blanking = 1489 total
-    return generate_edid_base_block(2560, 1440, 160, 49, 24150);
-  }
-
-  std::vector<std::uint8_t> make_2160p_edid() noexcept {
-    // 3840x2160@30Hz: pixel clock 297 MHz = 29700 * 10kHz
-    // H: 3840 active + 560 blanking = 4400 total
-    // V: 2160 active + 90 blanking = 2250 total
-    return generate_edid_base_block(3840, 2160, 560, 90, 29700);
-  }
-
-  std::vector<std::uint8_t> restrict_edid_to_resolution(
+  std::vector<std::uint8_t> project_edid_to_resolution(
     std::span<const std::uint8_t> source_edid,
-    const platf::hdmirx::resolution_t &target) noexcept {
-    if (!validate_edid_checksums(source_edid)) {
-      return {};
-    }
-    const auto source_modes = parse_edid_modes(source_edid);
-    if (std::none_of(source_modes.begin(), source_modes.end(), [&target](const auto &mode) {
-          return mode.resolution == target;
+    const platf::hdmirx::resolution_t &target
+  ) noexcept {
+    const auto catalog = parse_mode_catalog(source_edid);
+    if (catalog.empty() || std::none_of(catalog.begin(), catalog.end(), [&target](const auto &record) {
+          return record.mode.resolution == target;
         })) {
       return {};
     }
-
-    std::vector<std::uint8_t> target_base;
-    if (target == platf::hdmirx::resolution_t {1280, 720}) {
-      target_base = make_720p_edid();
-    } else if (target == platf::hdmirx::resolution_t {1920, 1080}) {
-      target_base = make_1080p_edid();
-    } else if (target == platf::hdmirx::resolution_t {2560, 1440}) {
-      target_base = make_1440p_edid();
-    } else if (target == platf::hdmirx::resolution_t {3840, 2160}) {
-      target_base = make_2160p_edid();
-    } else {
-      return {};
-    }
-
     const auto block_count = static_cast<std::size_t>(source_edid[126]) + 1U;
-    if (block_count > k_max_edid_blocks || source_edid.size() != block_count * k_edid_block_size) {
-      return {};
-    }
-    std::vector<std::uint8_t> restricted(source_edid.begin(), source_edid.end());
-    auto base = std::span<std::uint8_t, k_edid_block_size> {restricted.data(), k_edid_block_size};
-
-    // Keep the real receiver identity and monitor descriptors, but make the
-    // selected timing the only base-block video mode and mark it preferred.
-    base[24] |= 0x02U;
-    base[35] = 0;
-    base[36] = 0;
-    base[37] = 0;
-    for (std::size_t offset = 38; offset < 54; offset += 2) {
-      base[offset] = 0x01;
-      base[offset + 1] = 0x01;
-    }
-    std::copy_n(target_base.begin() + 54, 18, base.begin() + 54);
-    for (std::size_t offset = 72; offset <= 108; offset += 18) {
-      if (base[offset] != 0 || base[offset + 1] != 0) {
-        std::fill_n(base.begin() + offset, 18, std::uint8_t {0});
+    for (std::size_t index = 1; index < block_count; ++index) {
+      if (source_edid[index * k_edid_block_size] != 0x02U) {
+        return {};
       }
+    }
+
+    std::vector<std::uint8_t> projected(source_edid.begin(), source_edid.end());
+    auto base = std::span<std::uint8_t, k_edid_block_size> {projected.data(), k_edid_block_size};
+    for (const auto &timing : k_established_timings) {
+      if (timing.resolution != target) {
+        base[timing.byte] &= static_cast<std::uint8_t>(~timing.mask);
+      }
+    }
+    for (std::size_t offset = 38; offset < 54; offset += 2) {
+      const auto mode = standard_timing_to_mode(base[offset], base[offset + 1], base[18] == 1U && base[19] < 3U);
+      if (mode && mode->resolution != target) {
+        base[offset] = 0x01U;
+        base[offset + 1] = 0x01U;
+      }
+    }
+
+    std::vector<std::array<std::uint8_t, 18>> base_target_dtds;
+    std::vector<std::array<std::uint8_t, 18>> monitor_descriptors;
+    for (std::size_t offset = 54; offset <= 108; offset += 18) {
+      std::array<std::uint8_t, 18> raw {};
+      std::copy_n(base.begin() + offset, raw.size(), raw.begin());
+      const auto timing = parse_timing_descriptor(std::span<const std::uint8_t, 18> {raw.data(), raw.size()});
+      if (!timing) {
+        if (std::any_of(raw.begin(), raw.end(), [](std::uint8_t value) {
+              return value != 0;
+            })) {
+          monitor_descriptors.push_back(raw);
+        }
+      } else if (timing->h_active == target.width && timing->v_active == target.height) {
+        base_target_dtds.push_back(raw);
+      }
+    }
+    std::fill(base.begin() + 54, base.begin() + 126, std::uint8_t {0});
+    auto descriptor_offset = std::size_t {54};
+    for (const auto &raw : base_target_dtds) {
+      if (descriptor_offset > 108) {
+        break;
+      }
+      std::copy(raw.begin(), raw.end(), base.begin() + descriptor_offset);
+      descriptor_offset += raw.size();
+    }
+    for (const auto &raw : monitor_descriptors) {
+      if (descriptor_offset > 108) {
+        break;
+      }
+      std::copy(raw.begin(), raw.end(), base.begin() + descriptor_offset);
+      descriptor_offset += raw.size();
+    }
+    if (base_target_dtds.empty()) {
+      base[24] &= static_cast<std::uint8_t>(~0x02U);
+    } else {
+      base[24] |= 0x02U;
     }
     fix_checksum(base);
 
-    const auto target_dtd = std::span<const std::uint8_t, 18> {target_base.data() + 54, 18};
     for (std::size_t block_index = 1; block_index < block_count; ++block_index) {
-      auto extension = std::span<std::uint8_t, k_edid_block_size> {
-        restricted.data() + block_index * k_edid_block_size,
-        k_edid_block_size
-      };
-      if (extension[0] != 0x02U) {
-        continue;
-      }
-
-      const auto data_end = extension[2] == 0 ? std::size_t {4} : std::min<std::size_t>(extension[2], 127);
-      if (data_end < 4) {
+      const std::span<const std::uint8_t, k_edid_block_size> source {source_edid.data() + block_index * k_edid_block_size, k_edid_block_size};
+      if (!valid_cta_data_blocks(source)) {
         return {};
       }
+      const auto data_end = source[2] == 0 ? std::size_t {4} : static_cast<std::size_t>(source[2]);
       std::vector<std::uint8_t> data_blocks;
       for (std::size_t offset = 4; offset < data_end;) {
-        const auto header = extension[offset++];
-        const auto tag = header >> 5U;
-        const auto length = static_cast<std::size_t>(header & 0x1fU);
-        if (length > data_end - offset) {
+        const auto length = static_cast<std::size_t>(source[offset] & 0x1fU);
+        const auto block_size = length + 1U;
+        if (!append_projected_cta_block(source.subspan(offset, block_size), target, data_blocks)) {
           return {};
         }
-        const bool y420_video_block = tag == 0x07U && length > 1U && extension[offset] == 0x0eU;
-        const bool y420_capability_map = tag == 0x07U && length > 0U && extension[offset] == 0x0fU;
-        if (tag != 0x02U && !y420_video_block && !y420_capability_map) {
-          data_blocks.push_back(header);
-          data_blocks.insert(data_blocks.end(), extension.begin() + offset, extension.begin() + offset + length);
-          offset += length;
-          continue;
-        }
-
-        // A YCbCr 4:2:0 Capability Map indexes the original normal VDB. Once
-        // that VDB is filtered and reordered, retaining the map would attach
-        // 4:2:0 capability to unrelated modes. Dedicated Y420 video blocks
-        // below retain any target-specific 4:2:0 VICs without stale indexes.
-        if (y420_capability_map) {
-          offset += length;
-          continue;
-        }
-
-        std::vector<std::uint8_t> target_svds;
-        const auto first_vic = y420_video_block ? std::size_t {1} : std::size_t {0};
-        for (std::size_t index = first_vic; index < length; ++index) {
-          const auto vic = static_cast<std::uint8_t>(extension[offset + index] & 0x7fU);
-          if (const auto mode = cta_vic_to_hdmi_mode(vic); mode && mode->resolution == target) {
-            target_svds.push_back(vic);
-          }
-        }
-        if (!target_svds.empty()) {
-          if (y420_video_block) {
-            data_blocks.push_back(static_cast<std::uint8_t>(0xe0U | (target_svds.size() + 1U)));
-            data_blocks.push_back(0x0eU);
-            data_blocks.insert(data_blocks.end(), target_svds.begin(), target_svds.end());
-          } else {
-            const auto preferred = std::max_element(target_svds.begin(), target_svds.end(), [](std::uint8_t left, std::uint8_t right) {
-              const auto left_mode = cta_vic_to_hdmi_mode(left);
-              const auto right_mode = cta_vic_to_hdmi_mode(right);
-              return static_cast<std::uint64_t>(left_mode->refresh_rate.numerator) * right_mode->refresh_rate.denominator <
-                     static_cast<std::uint64_t>(right_mode->refresh_rate.numerator) * left_mode->refresh_rate.denominator;
-            });
-            data_blocks.push_back(static_cast<std::uint8_t>(0x40U | target_svds.size()));
-            for (const auto vic : target_svds) {
-              data_blocks.push_back(static_cast<std::uint8_t>(vic | (vic == *preferred ? 0x80U : 0U)));
-            }
-          }
-        }
-        offset += length;
+        offset += block_size;
       }
 
-      if (4U + data_blocks.size() >= 127U) {
+      std::vector<std::array<std::uint8_t, 18>> target_dtds;
+      if (source[2] != 0) {
+        for (std::size_t offset = data_end; offset + 18 <= 127; offset += 18) {
+          std::array<std::uint8_t, 18> raw {};
+          std::copy_n(source.begin() + offset, raw.size(), raw.begin());
+          const auto timing = parse_timing_descriptor(std::span<const std::uint8_t, 18> {raw.data(), raw.size()});
+          if (timing && timing->h_active == target.width && timing->v_active == target.height) {
+            target_dtds.push_back(raw);
+          }
+        }
+      }
+
+      const auto dtd_offset = 4U + data_blocks.size();
+      if (dtd_offset + target_dtds.size() * 18U > 127U) {
         return {};
       }
       std::array<std::uint8_t, k_edid_block_size> rewritten {};
-      rewritten[0] = extension[0];
-      rewritten[1] = extension[1];
-      rewritten[3] = extension[3] & 0xf0U;
+      rewritten[0] = 0x02U;
+      rewritten[1] = source[1];
+      rewritten[3] = static_cast<std::uint8_t>((source[3] & 0xf0U) | std::min<std::size_t>(target_dtds.size(), 15U));
       std::copy(data_blocks.begin(), data_blocks.end(), rewritten.begin() + 4);
-      const auto dtd_offset = 4U + data_blocks.size();
-      rewritten[2] = static_cast<std::uint8_t>(dtd_offset);
-      if (dtd_offset + target_dtd.size() <= 127U) {
-        std::copy(target_dtd.begin(), target_dtd.end(), rewritten.begin() + dtd_offset);
-        rewritten[3] |= 0x01U;
+      auto output_offset = dtd_offset;
+      for (const auto &raw : target_dtds) {
+        std::copy(raw.begin(), raw.end(), rewritten.begin() + output_offset);
+        output_offset += raw.size();
       }
+      rewritten[2] = data_blocks.empty() && target_dtds.empty() ? 0U : static_cast<std::uint8_t>(dtd_offset);
       fix_checksum(std::span<std::uint8_t, k_edid_block_size> {rewritten.data(), rewritten.size()});
-      std::copy(rewritten.begin(), rewritten.end(), extension.begin());
+      std::copy(rewritten.begin(), rewritten.end(), projected.begin() + block_index * k_edid_block_size);
     }
 
-    return validate_edid_checksums(restricted) ? restricted : std::vector<std::uint8_t> {};
+    if (!validate_edid_checksums(projected)) {
+      return {};
+    }
+    const auto projected_catalog = parse_mode_catalog(projected);
+    if (projected_catalog.empty() || std::any_of(projected_catalog.begin(), projected_catalog.end(), [&target](const auto &record) {
+          return record.mode.resolution != target;
+        })) {
+      return {};
+    }
+    return projected;
   }
 
-  std::vector<std::uint8_t> make_bad_checksum_edid() noexcept {
-    auto edid = make_1080p_edid();
-    // Corrupt the checksum byte.
-    edid[127] ^= 0xFF;
-    return edid;
-  }
-
-  std::vector<std::uint8_t> make_truncated_edid() noexcept {
-    auto edid = make_1080p_edid();
-    edid.resize(64);
-    return edid;
-  }
-
-  // -------------------------------------------------------------------------
-  // High-level EDID device operations
-  // -------------------------------------------------------------------------
-
-  edid_result_t<std::vector<std::uint8_t>> read_edid(
-    ioctl_backend_t &backend,
-    std::uint32_t pad) {
-    // The base block declares the number of extension blocks at byte 126.
-    // Read it first, then request exactly the complete EDID.  In particular,
-    // never treat a short read of a multi-block EDID as a valid backup: doing
-    // so would make a later restore truncate the device's original EDID.
+  edid_result_t<std::vector<std::uint8_t>> read_edid(ioctl_backend_t &backend, std::uint32_t pad) {
     std::vector<std::uint8_t> base(k_edid_block_size, 0);
-    auto base_result = backend.get_edid(pad, 0, 1,
-                                        std::span<std::uint8_t>{base});
-    if (!base_result.has_value()) {
+    auto base_result = backend.get_edid(pad, 0, 1, base);
+    if (!base_result) {
       return std::unexpected(base_result.error());
     }
-    if (base_result.value() == 0) {
-      return std::unexpected(edid_error_t{
-        .category = error_category_e::no_data,
-        .raw_errno = ENODATA,
-        .message = "read returned zero blocks",
-      });
+    if (*base_result != 1U) {
+      return std::unexpected(edid_error_t {error_category_e::io_error, EIO, "base EDID read returned an unexpected block count"});
     }
-    if (base_result.value() != 1) {
-      return std::unexpected(edid_error_t{
-        .category = error_category_e::io_error,
-        .raw_errno = EIO,
-        .message = "base EDID read returned an unexpected block count",
-      });
-    }
-
     const auto block_count = static_cast<std::uint32_t>(base[126]) + 1U;
     if (block_count > k_max_edid_blocks) {
-      return std::unexpected(edid_error_t{
-        .category = error_category_e::too_large,
-        .raw_errno = E2BIG,
-        .message = "EDID extension count exceeds supported maximum",
-      });
+      return std::unexpected(edid_error_t {error_category_e::too_large, E2BIG, "EDID extension count exceeds supported maximum"});
     }
-    if (block_count == 1) {
+    if (block_count == 1U) {
       return base;
     }
-
-    std::vector<std::uint8_t> buffer(static_cast<std::size_t>(block_count) * k_edid_block_size, 0);
-    auto result = backend.get_edid(pad, 0, block_count,
-                                   std::span<std::uint8_t>{buffer});
-    if (!result.has_value()) {
+    std::vector<std::uint8_t> complete(static_cast<std::size_t>(block_count) * k_edid_block_size, 0);
+    auto result = backend.get_edid(pad, 0, block_count, complete);
+    if (!result) {
       return std::unexpected(result.error());
     }
-    if (result.value() != block_count) {
-      return std::unexpected(edid_error_t{
-        .category = error_category_e::io_error,
-        .raw_errno = EIO,
-        .message = "incomplete multi-block EDID read; original was not saved",
-      });
+    if (*result != block_count) {
+      return std::unexpected(edid_error_t {error_category_e::io_error, EIO, "incomplete multi-block EDID read"});
     }
-
-    return buffer;
+    return complete;
   }
 
-  edid_result_t<std::uint32_t> write_edid(
-    ioctl_backend_t &backend,
-    std::uint32_t pad,
-    std::span<const std::uint8_t> data) {
+  edid_result_t<std::uint32_t> write_edid(ioctl_backend_t &backend, std::uint32_t pad, std::span<const std::uint8_t> data) {
     if (data.empty() || data.size() % k_edid_block_size != 0) {
-      return std::unexpected(edid_error_t{
-        .category = error_category_e::invalid_argument,
-        .raw_errno = EINVAL,
-        .message = "EDID data size is not a multiple of 128 bytes",
-      });
+      return std::unexpected(edid_error_t {error_category_e::invalid_argument, EINVAL, "EDID data size is not a multiple of 128 bytes"});
     }
-
     const auto block_count = static_cast<std::uint32_t>(data.size() / k_edid_block_size);
     if (block_count > k_max_edid_blocks) {
-      return std::unexpected(edid_error_t{
-        .category = error_category_e::too_large,
-        .raw_errno = E2BIG,
-        .message = "EDID exceeds maximum block count",
-      });
+      return std::unexpected(edid_error_t {error_category_e::too_large, E2BIG, "EDID exceeds maximum block count"});
     }
-
     auto result = backend.set_edid(pad, 0, block_count, data);
-    if (!result.has_value()) {
+    if (!result) {
       return std::unexpected(result.error());
     }
-    if (result.value() != block_count) {
-      return std::unexpected(edid_error_t{
-        .category = error_category_e::io_error,
-        .raw_errno = EIO,
-        .message = "partial EDID write; restoration is required",
-      });
+    if (*result != block_count) {
+      return std::unexpected(edid_error_t {error_category_e::io_error, EIO, "partial EDID write"});
     }
     return result;
-  }
-
-  edid_capability_t probe_capabilities(
-    ioctl_backend_t &backend,
-    std::uint32_t pad) {
-    edid_capability_t cap;
-
-    // This must remain a read-only probe.  A write "probe" is unsafe because
-    // it can overwrite an EDID before a complete original is saved.
-    auto read_result = read_edid(backend, pad);
-    if (read_result.has_value()) {
-      cap.readable = true;
-    }
-
-    return cap;
-  }
-
-  // -------------------------------------------------------------------------
-  // RAII session restore guard
-  // -------------------------------------------------------------------------
-
-  edid_restore_guard_t::edid_restore_guard_t(
-    ioctl_backend_t &backend,
-    std::uint32_t pad,
-    log_callback_t logger)
-      : backend_(&backend), pad_(pad), logger_(std::move(logger)) {
-    auto result = read_edid(backend, pad);
-    if (result.has_value()) {
-      saved_edid_ = std::move(result.value());
-      armed_ = true;
-      log("EDID restore guard armed: saved " + std::to_string(saved_edid_.size()) + " bytes");
-    } else {
-      log("EDID restore guard disarmed: read failed (" +
-          std::string(error_category_name(result.error().category)) +
-          "): " + result.error().message);
-    }
-  }
-
-  edid_restore_guard_t::edid_restore_guard_t(edid_restore_guard_t &&other) noexcept
-      : backend_(other.backend_),
-        pad_(other.pad_),
-        saved_edid_(std::move(other.saved_edid_)),
-        armed_(other.armed_),
-        logger_(std::move(other.logger_)) {
-    other.armed_ = false;
-    other.backend_ = nullptr;
-  }
-
-  edid_restore_guard_t &edid_restore_guard_t::operator=(edid_restore_guard_t &&other) noexcept {
-    if (this != &other) {
-      restore();
-      backend_ = other.backend_;
-      pad_ = other.pad_;
-      saved_edid_ = std::move(other.saved_edid_);
-      armed_ = other.armed_;
-      logger_ = std::move(other.logger_);
-      other.armed_ = false;
-      other.backend_ = nullptr;
-    }
-    return *this;
-  }
-
-  edid_restore_guard_t::~edid_restore_guard_t() {
-    restore();
-  }
-
-  bool edid_restore_guard_t::restore() noexcept {
-    if (!armed_) {
-      return true;
-    }
-
-    try {
-      auto result = write_edid(*backend_, pad_,
-                               std::span<const std::uint8_t>{saved_edid_});
-      if (result.has_value()) {
-        armed_ = false;
-        log("EDID restore succeeded");
-        return true;
-      } else {
-        log("EDID restore failed (" +
-            std::string(error_category_name(result.error().category)) +
-            "): " + result.error().message);
-        // Keep armed_ true so destructor can try again.
-        return false;
-      }
-    } catch (...) {
-      log("EDID restore threw an unexpected exception");
-      return false;
-    }
-  }
-
-  bool edid_restore_guard_t::is_armed() const noexcept {
-    return armed_;
-  }
-
-  const std::vector<std::uint8_t> &edid_restore_guard_t::saved_edid() const noexcept {
-    return saved_edid_;
-  }
-
-  void edid_restore_guard_t::log(const std::string &msg) const {
-    if (logger_) {
-      logger_(msg);
-    }
   }
 
 }  // namespace platf::edid

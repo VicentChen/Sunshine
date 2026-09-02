@@ -1490,11 +1490,17 @@ namespace video {
    * @param display_name Display name.
    * @param config Configuration values to apply.
    */
-  void reset_display(std::shared_ptr<platf::display_t> &disp, const platf::mem_type_e &type, const std::string &display_name, const config_t &config) {
+  void reset_display(
+    std::shared_ptr<platf::display_t> &disp,
+    const platf::mem_type_e &type,
+    const std::string &display_name,
+    const config_t &config,
+    platf::display_purpose_e purpose = platf::display_purpose_e::stream
+  ) {
     // We try this twice, in case we still get an error on reinitialization
     for (int x = 0; x < 2; ++x) {
       disp.reset();
-      disp = platf::display(type, display_name, config);
+      disp = platf::display(type, display_name, config, purpose);
       if (disp) {
         break;
       }
@@ -4187,7 +4193,7 @@ namespace video {
     config_t config_autoselect {1920, 1080, 60, 6000, 1000, 1, 0, 1, 0, 0, 0};
 
     // If the encoder isn't supported at all (not even H.264), bail early
-    reset_display(disp, encoder.platform_formats->dev_type, output_name, config_autoselect);
+    reset_display(disp, encoder.platform_formats->dev_type, output_name, config_autoselect, platf::display_purpose_e::encoder_probe);
     if (!disp) {
       return false;
     }
@@ -4279,8 +4285,7 @@ namespace video {
     {
       auto test_yuv444 = [&](auto &flag_map, auto video_format) {
         const config_t config = {1920, 1080, 60, 6000, 1000, 1, 0, 1, video_format, 0, 1};
-
-        reset_display(disp, encoder.platform_formats->dev_type, output_name, config);
+        reset_display(disp, encoder.platform_formats->dev_type, output_name, config, platf::display_purpose_e::encoder_probe);
         if (!disp) {
           return;
         }
@@ -4299,8 +4304,7 @@ namespace video {
 
       auto test_yuv420_hdr = [&](auto &flag_map, auto video_format) {
         const config_t config = {1920, 1080, 60, 6000, 1000, 1, 0, 3, video_format, 1, 0};
-
-        reset_display(disp, encoder.platform_formats->dev_type, output_name, config);
+        reset_display(disp, encoder.platform_formats->dev_type, output_name, config, platf::display_purpose_e::encoder_probe);
         if (!disp) {
           return;
         }
@@ -4319,8 +4323,7 @@ namespace video {
 
       auto test_yuv444_hdr = [&](auto &flag_map, auto video_format) {
         const config_t config = {1920, 1080, 60, 6000, 1000, 1, 0, 3, video_format, 1, 1};
-
-        reset_display(disp, encoder.platform_formats->dev_type, output_name, config);
+        reset_display(disp, encoder.platform_formats->dev_type, output_name, config, platf::display_purpose_e::encoder_probe);
         if (!disp) {
           return;
         }

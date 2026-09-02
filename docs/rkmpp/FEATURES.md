@@ -9,8 +9,9 @@
 - HDMI RX 捕获会阻塞等待首帧，然后非阻塞丢弃积压旧帧并选择最新完整帧；主动 freshness drop、驱动丢帧和捕获年龄分别统计，避免信号恢复后继续编码过期画面。
 - 直通路径按捕获 generation 与 buffer index 缓存 MPP 输入导入，RGA 路径按固定 target slot 缓存；fd 数值不作为跨重开身份，source change、encoder reconfigure 和 teardown 会使对应缓存失效。
 - RGA 转换只保留一个可复用的 NV12 目标 DMA-BUF；初始化阶段未编码的占位输入会在下一次转换前释放，正常编码完成也走同一清理路径。1080p 与 4K 精确输入均已验证进入直通编码；RGA fallback 的 DMA-BUF smoke 连续三轮后 FD 数保持不变，长时间 4K fallback 稳定性仍未单独验收。
-- 支持从 base DTD、CTA Video Data Block 与 YCbCr 4:2:0 Video Data Block 解析逐行扫描模式，并在 HDMI 输入尺寸不匹配时选择最接近且可精确生成的模式写入 EDID、请求链路重新协商。受限 EDID 保留接收器的音频、HDMI VSDB 与 HDMI Forum VSDB，但会同步过滤普通和 4:2:0 视频块，避免目标为 1080p 时仍通过 Y420 VIC 96/97 宣告 4K50/60；失效的 4:2:0 capability map 会被删除。RK3588 的 `VIDIOC_S_EDID` 已自行完成 HPD 周期，因此不再追加会干扰它的 soft-reset。当前输入已匹配目标尺寸时跳过 EDID 与视频 RGA，会话结束时恢复原 EDID，并由驱动重新协商。上游不接受 EDID 或最终尺寸仍不匹配时才回退到 RGA，后续观察到匹配输入会自动切回直通编码。
-- 支持 HDMI 拔插、信号丢失和模式变化后的重新检测与重建；协商或短暂无信号期间可输出绿色占位帧，避免会话立即断开。
+- HDMI RX 视频数据面采用 live-first 规则：首个有效 dequeue 帧立即进入编码，尺寸与 Moonlight 一致时直通 RKMPP，不一致时从第一帧使用 RGA；EDID 状态、640x480 timing、Xbox 状态和 source change 都不能门禁真实帧。绿色占位帧只在当前确实取不到 HDMI 帧时产生，source change 仅负责 capture queue 和 generation 恢复。
+- 进程级 EDID 控制器独占写权限，encoder probe 严格只读。能力探测和正式编码会话初始化都使用目标尺寸的合成占位输入验证 RKMPP/RGA，不依赖当时能否 dequeue HDMI 帧；只有 capture loop 能发布真实 HDMI 帧。控制器从校验有效的原生 EDID 解析 Established Timing、Standard Timing、base/CTA DTD、CTA VDB 和 Y420 VDB，选择最接近 Moonlight 请求的原生模式，再通过复制并过滤原生编码生成投影；生产路径不再包含固定分辨率 EDID 模板。投影保留接收器身份及仍有效的音频、speaker allocation、HDMI VSDB/HF-VSDB 等能力，删除其他分辨率及失效的 Y420 capability map，并重新解析验证结果。
+- EDID 事务是幂等且有界的：当前实际输入已匹配时不读取或写入 EDID，目标字节已安装时零写入，新目标正常路径最多一次写入并逐字节 readback；source change、Xbox wake、640x480 和会话析构都不能触发重写或恢复。原生 EDID 与最后应用投影原子持久化，使进程重启后仍能辨认基线；异常写入只允许一次原生恢复，失败不会阻塞实际输入经 RGA 串流。
 - 直通、RGA 创建和运行时 reconfigure 共用同一套 MPP 配置构造，Moonlight 请求的帧率、分数帧率、码率和 GOP 不再在直通路径静默回落到默认值。
 - 编码输出使用调用方提供的 8 MiB MPP packet buffer，并由 `encoded_packet_t` 持有到网络消费者释放，不额外复制到 `std::vector`。普通 P 帧会跳过不必要的 Annex-B IDR 扫描。
 - Web UI 可选择 `HDMI RX (Rockchip)` 和 `Rockchip MPP`，并配置延迟统计、低延迟实验和关闭重编码实验选项。旧 MPP palette OSD、`rkmpp_profile_overlay` 配置项及 Web UI 开关已经删除；性能采样由 `rkmpp_profile` 独立控制，显示统一由 Vulkan UI 负责。

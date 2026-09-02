@@ -88,6 +88,8 @@ set(_RKMPP_PLATFORM_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/hdmirx.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/edid.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/edid.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/hdmirx_edid_controller.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/hdmirx_edid_controller.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/input_state_machine.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/input_state_machine.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/ui_controller.h"

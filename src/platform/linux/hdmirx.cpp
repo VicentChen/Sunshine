@@ -6,6 +6,7 @@
 
 #include "src/logging.h"
 #include "src/platform/linux/edid.h"
+#include "src/platform/linux/hdmirx_edid_controller.h"
 #include "src/platform/linux/input_state_machine.h"
 #include "src/platform/linux/rkmpp.h"
 #include "src/video.h"
@@ -754,7 +755,6 @@ namespace platf {
         }
         return {};
       }
-
     };
 
     /**
@@ -795,72 +795,36 @@ namespace platf {
 
     class hdmirx_display_t final: public display_t {
     public:
-      explicit hdmirx_display_t(const video::config_t &config):
+      hdmirx_display_t(const video::config_t &config, display_purpose_e purpose):
           capture_(hdmirx::hdmirx_capture_t::open()),
           backend_(capture_.fd()),
-          negotiator_(backend_, sm_, 0),
-          moonlight_resolution_ {static_cast<uint32_t>(config.width), static_cast<uint32_t>(config.height)} {
+          moonlight_resolution_ {static_cast<std::uint32_t>(config.width), static_cast<std::uint32_t>(config.height)},
+          moonlight_refresh_ {static_cast<std::uint32_t>(config.framerateX100 > 0 ? config.framerateX100 : config.framerate * 100), 100},
+          purpose_(purpose) {
         const auto &format = capture_.format();
         width = logical_width = env_width = env_logical_width = static_cast<int>(format.width);
         height = logical_height = env_height = env_logical_height = static_cast<int>(format.height);
-
-        // read modes from EDID
-        std::vector<platf::hdmirx::hdmi_mode_t> modes;
-        auto orig_edid = platf::edid::read_edid(backend_, 0);
-        if (orig_edid) {
-          modes = platf::edid::parse_edid_modes(*orig_edid);
-        }
-        negotiator_.start_negotiation(moonlight_resolution_, modes, actual_input_resolution());
       }
 
-      ~hdmirx_display_t() {
-        negotiator_.end_session();
+      ~hdmirx_display_t() override {
+        sm_.enter_shutdown();
       }
 
       capture_e capture(const push_captured_image_cb_t &push, const pull_free_image_cb_t &pull, bool *) override {
         try {
           while (true) {
-            if (!settle_capture_state()) {
-              std::shared_ptr<img_t> image;
-              if (!pull(image) || !image) {
-                return capture_e::interrupted;
+            if (!recover_capture_queue()) {
+              if (const auto stop = push_placeholder(push, pull)) {
+                return *stop;
               }
-              auto rx_image = std::dynamic_pointer_cast<hdmirx::hdmirx_img_t>(image);
-              if (!rx_image) {
-                return capture_e::error;
-              }
-              // Never reuse a previously dequeued HDMI frame while the input is
-              // negotiating or absent. The encode side will RGA-fill its own
-              // target-sized DMA-BUF with deterministic NV12 green.
-              rx_image->frame.reset();
-              rx_image->capture_format.reset();
-              rx_image->placeholder = true;
-              rx_image->request_idr = sm_.consume_idr_request();
-              rx_image->frame_timestamp = std::chrono::steady_clock::now();
-              populate_connection_status(*rx_image);
-              if (config::video.rkmpp_profile) {
-                rx_image->frame_profile.emplace();
-                rx_image->frame_profile->kind = video::frame_profile_kind_e::placeholder;
-              } else {
-                rx_image->frame_profile.reset();
-              }
-              if (!push(std::move(image), true)) {
-                return capture_e::ok;
-              }
-              if (!sm_.wait_for_interval()) {
-                return capture_e::interrupted;
-              }
+              apply_edid_target_once(std::nullopt);
               continue;
-            }
-            std::shared_ptr<img_t> image;
-            if (!pull(image) || !image) {
-              return capture_e::interrupted;
             }
             std::optional<hdmirx::captured_frame_t> frame;
             try {
               frame.emplace(capture_.dequeue(std::chrono::seconds(2)));
             } catch (const hdmirx::source_change_error_t &error) {
-              sm_.enter_source_change(error.what());
+              sm_.enter_reconfiguring(error.what());
               recovery_pending_ = true;
               BOOST_LOG(info) << "HDMI RX source changed; waiting for frame leases before reopening";
               continue;
@@ -870,17 +834,27 @@ namespace platf {
               }
               // A link loss can arrive without SOURCE_CHANGE. Treat it as a
               // recoverable no-signal transition and re-query on the next turn.
-              sm_.enter_source_change(error.what());
               sm_.enter_no_signal(error.what());
               recovery_pending_ = true;
+              if (const auto stop = push_placeholder(push, pull)) {
+                return *stop;
+              }
+              apply_edid_target_once(std::nullopt);
               continue;
+            }
+            const auto format = capture_.format();
+            const hdmirx::resolution_t actual {format.width, format.height};
+            sm_.enter_streaming(hdmirx::needs_conversion(actual, moonlight_resolution_));
+            std::shared_ptr<img_t> image;
+            if (!pull(image) || !image) {
+              return capture_e::interrupted;
             }
             auto rx_image = std::dynamic_pointer_cast<hdmirx::hdmirx_img_t>(image);
             if (!rx_image) {
               return capture_e::error;
             }
             rx_image->frame = std::make_shared<hdmirx::captured_frame_t>(std::move(*frame));
-            rx_image->capture_format = capture_.format();
+            rx_image->capture_format = format;
             rx_image->placeholder = false;
             rx_image->request_idr = sm_.consume_idr_request();
             rx_image->frame_timestamp = rx_image->frame->timestamp();
@@ -903,6 +877,7 @@ namespace platf {
             if (!push(std::move(image), true)) {
               return capture_e::ok;
             }
+            apply_edid_target_once(actual);
           }
         } catch (const std::exception &e) {
           BOOST_LOG(error) << "HDMI RX capture failed: " << e.what();
@@ -919,49 +894,11 @@ namespace platf {
         if (!rx_image) {
           return -1;
         }
-        try {
-          if (!settle_capture_state()) {
-            rx_image->frame.reset();
-            rx_image->capture_format.reset();
-            rx_image->placeholder = true;
-            rx_image->request_idr = sm_.consume_idr_request();
-            rx_image->frame_timestamp = std::chrono::steady_clock::now();
-            populate_connection_status(*rx_image);
-            if (config::video.rkmpp_profile) {
-              rx_image->frame_profile.emplace();
-              rx_image->frame_profile->kind = video::frame_profile_kind_e::placeholder;
-            } else {
-              rx_image->frame_profile.reset();
-            }
-            return 0;
-          }
-          // Probe with a real RX frame; this path never calls VIDIOC_S_FMT.
-          rx_image->frame = std::make_shared<hdmirx::captured_frame_t>(capture_.dequeue(std::chrono::seconds(2)));
-          rx_image->capture_format = capture_.format();
-          rx_image->placeholder = false;
-          rx_image->request_idr = sm_.consume_idr_request();
-          rx_image->frame_timestamp = rx_image->frame->timestamp();
-          populate_connection_status(*rx_image);
-          if (config::video.rkmpp_profile) {
-            rx_image->frame_profile.emplace();
-            rx_image->frame_profile->kind = video::frame_profile_kind_e::captured;
-            rx_image->frame_profile->capture_sequence = rx_image->frame->sequence();
-            rx_image->frame_profile->capture_timestamp_flags = rx_image->frame->timestamp_flags();
-            rx_image->frame_profile->freshness_drops = rx_image->frame->freshness_drops();
-            rx_image->frame_profile->hdmirx_width = rx_image->capture_format->width;
-            rx_image->frame_profile->hdmirx_height = rx_image->capture_format->height;
-            rx_image->frame_profile->moonlight_width = moonlight_resolution_.width;
-            rx_image->frame_profile->moonlight_height = moonlight_resolution_.height;
-            rx_image->frame_profile->capture = rx_image->frame->timestamp();
-            rx_image->frame_profile->dequeued = rx_image->frame->dequeue_timestamp();
-          } else {
-            rx_image->frame_profile.reset();
-          }
+        if (hdmirx::uses_synthetic_bootstrap_frame(purpose_)) {
+          populate_placeholder(*rx_image);
           return 0;
-        } catch (const std::exception &e) {
-          BOOST_LOG(error) << "HDMI RX probe frame failed: " << e.what();
-          return -1;
         }
+        return -1;
       }
 
       std::unique_ptr<rkmpp_encode_device_t> make_rkmpp_encode_device() override {
@@ -980,7 +917,9 @@ namespace platf {
         image.moonlight_width = moonlight_resolution_.width;
         image.moonlight_height = moonlight_resolution_.height;
         std::optional<hdmirx::resolution_t> input;
-        if (image.connection_state == input_sm::state_e::negotiating || input_sm::is_streaming_state(image.connection_state)) {
+        if (image.capture_format) {
+          input = hdmirx::resolution_t {image.capture_format->width, image.capture_format->height};
+        } else if (input_sm::is_streaming_state(image.connection_state)) {
           input = actual_input_resolution();
         }
         image.input_width = input ? input->width : 0;
@@ -995,53 +934,95 @@ namespace platf {
         return hdmirx::resolution_t {timings->bt.width, timings->bt.height};
       }
 
-      bool settle_capture_state() {
+      /** @brief Rebuild only the V4L2 queue after a source event. */
+      bool recover_capture_queue() {
         if (recovery_pending_) {
           if (!capture_.recover_after_source_change()) {
             return false;
           }
           backend_.reset_fd(capture_.fd());
           recovery_pending_ = false;
-        }
-
-        const auto actual = actual_input_resolution();
-        if (!actual) {
-          sm_.enter_no_signal("HDMI RX has no valid DV timings");
-          if (capture_.refresh_timings()) {
-            // A fresh timing may have a new queue layout; rebuild before use.
-            recovery_pending_ = true;
+          if (const auto refreshed = actual_input_resolution()) {
+            BOOST_LOG(info) << "HDMI RX capture reopened with fresh timing " << refreshed->width << 'x' << refreshed->height;
           }
-          return false;
         }
+        return true;
+      }
 
-        switch (sm_.state()) {
-          case input_sm::state_e::starting:
-          case input_sm::state_e::no_signal:
-          case input_sm::state_e::source_change:
-            sm_.enter_negotiating("HDMI RX timings observed");
-            break;
-          default:
-            break;
+      /** @brief Populate a deterministic placeholder only when no real frame exists. */
+      void populate_placeholder(hdmirx::hdmirx_img_t &image) {
+        image.frame.reset();
+        image.capture_format.reset();
+        image.placeholder = true;
+        image.request_idr = sm_.consume_idr_request();
+        image.frame_timestamp = std::chrono::steady_clock::now();
+        populate_connection_status(image);
+        if (config::video.rkmpp_profile) {
+          image.frame_profile.emplace();
+          image.frame_profile->kind = video::frame_profile_kind_e::placeholder;
+        } else {
+          image.frame_profile.reset();
         }
-        if (sm_.state() == input_sm::state_e::negotiating) {
-          return negotiator_.check_lock(actual);
+      }
+
+      /**
+       * @brief Push one no-signal placeholder and preserve interruptible pacing.
+       *
+       * @param push Captured-image consumer.
+       * @param pull Free-image provider.
+       * @return Stop status, or nullopt when capture should continue.
+       */
+      std::optional<capture_e> push_placeholder(const push_captured_image_cb_t &push, const pull_free_image_cb_t &pull) {
+        std::shared_ptr<img_t> image;
+        if (!pull(image) || !image) {
+          return capture_e::interrupted;
         }
-        return input_sm::is_streaming_state(sm_.state());
+        auto rx_image = std::dynamic_pointer_cast<hdmirx::hdmirx_img_t>(image);
+        if (!rx_image) {
+          return capture_e::error;
+        }
+        populate_placeholder(*rx_image);
+        if (!push(std::move(image), true)) {
+          return capture_e::ok;
+        }
+        if (!sm_.wait_for_interval()) {
+          return capture_e::interrupted;
+        }
+        return std::nullopt;
+      }
+
+      /** @brief Run the independent EDID transaction at most once per display. */
+      void apply_edid_target_once(std::optional<hdmirx::resolution_t> current_input) {
+        if (purpose_ != display_purpose_e::stream || edid_target_attempted_) {
+          return;
+        }
+        edid_target_attempted_ = true;
+        const auto result = hdmirx::process_edid_controller().apply_target(backend_, 0, moonlight_resolution_, moonlight_refresh_, current_input);
+        if (result.selected_mode) {
+          BOOST_LOG(info) << "HDMI RX native EDID selected " << result.selected_mode->resolution.width << 'x'
+                          << result.selected_mode->resolution.height << " for Moonlight "
+                          << moonlight_resolution_.width << 'x' << moonlight_resolution_.height
+                          << ": " << result.message;
+        } else {
+          BOOST_LOG(info) << "HDMI RX EDID control: " << result.message;
+        }
       }
 
       hdmirx::hdmirx_capture_t capture_;
       real_ioctl_backend_t backend_;
       platf::input_sm::state_machine_t sm_;
-      platf::hdmirx::session_negotiator_t negotiator_;
       hdmirx::resolution_t moonlight_resolution_;  ///< Moonlight-requested coded resolution for the active session.
+      hdmirx::refresh_rate_t moonlight_refresh_;  ///< Moonlight-requested refresh rate.
+      display_purpose_e purpose_;  ///< Distinguishes streaming from read-only probes.
       bool recovery_pending_ {};
+      bool edid_target_attempted_ {};  ///< Prevents source events from reapplying EDID.
     };
 
   }  // namespace
 
-  std::shared_ptr<display_t> hdmirx_display(const video::config_t &config) {
+  std::shared_ptr<display_t> hdmirx_display(const video::config_t &config, display_purpose_e purpose) {
     try {
-      return std::make_shared<hdmirx_display_t>(config);
+      return std::make_shared<hdmirx_display_t>(config, purpose);
     } catch (const std::exception &e) {
       BOOST_LOG(error) << "Unable to open HDMI RX capture: " << e.what();
       return nullptr;

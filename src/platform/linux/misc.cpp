@@ -1271,11 +1271,16 @@ namespace platf {
     return true;
   }
 
-  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
+  std::shared_ptr<display_t> display(
+    mem_type_e hwdevice_type,
+    const std::string &display_name,
+    const video::config_t &config,
+    display_purpose_e purpose
+  ) {
 #ifdef SUNSHINE_BUILD_RKMPP
     if (sources[source::HDMIRX] && hwdevice_type == mem_type_e::rkmpp) {
       if (display_name != "HDMI RX") { BOOST_LOG(error) << "hdmirx accepts only the HDMI RX display"; return nullptr; }
-      return hdmirx_display(config);
+      return hdmirx_display(config, purpose);
     }
 #endif
     // Keep KMS as first element to check before dropping CAP_SYS_ADMIN
