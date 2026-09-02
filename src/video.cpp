@@ -1991,20 +1991,26 @@ namespace video {
    * buffer and copies the cached panel into the leased frame itself.
    */
   class rkmpp_vulkan_ui_session_t {
+    struct surface_t;
+
   public:
-    rkmpp_vulkan_ui_session_t():
+    rkmpp_vulkan_ui_session_t(std::uint32_t output_width, std::uint32_t output_height):
+        metrics_(platf::vulkan_ui::make_layout_metrics(output_width, output_height)),
         backend_(platf::rga::make_backend()),
         allocator_(platf::rga::make_cma_dma_allocator()) {
       if (!backend_ || !allocator_) {
         throw std::runtime_error("Vulkan UI failed to initialize RGA resources");
       }
-      source_ = platf::rga::target_buffer_t::allocate_bgr888(*backend_, *allocator_, panel_width, panel_height);
+      standard_surface_ = make_surface(metrics_.standard_panel);
+      profile_surface_ = make_surface(metrics_.profile_panel);
   #ifdef SUNSHINE_BUILD_VULKAN
-      const auto &layout = source_.layout();
-      renderer_ = platf::vulkan_ui::renderer_t::create(layout.dma_buf_fd, layout.allocation_size, layout.width, layout.height, layout.stride);
-      BOOST_LOG(info) << "RKMPP Vulkan UI initialized on " << renderer_->device_name()
-                      << ": hidden until Start is held and Select/Back is pressed; panel="
-                      << panel_width << 'x' << panel_height << " ROI=bottom-center margin=" << panel_margin;
+      BOOST_LOG(info) << "RKMPP Vulkan UI initialized on " << standard_surface_->renderer->device_name()
+                      << ": hidden until Start is held and Select/Back is pressed; standard="
+                      << metrics_.standard_panel.width << 'x' << metrics_.standard_panel.height
+                      << " profile=" << metrics_.profile_panel.width << 'x' << metrics_.profile_panel.height
+                      << " body-font=" << metrics_.body_font_pixels
+                      << " title-font=" << metrics_.title_font_pixels
+                      << " ROI=bottom-center margin=" << metrics_.panel_margin;
   #else
       throw std::runtime_error("Sunshine was built without Vulkan UI support");
   #endif
@@ -2031,16 +2037,17 @@ namespace video {
 
     /** @brief Render a changed visible snapshot and cover one imported NV12 fallback destination. */
     bool compose_into(platf::rga::imported_buffer_t &destination, platf::hdmirx::hdmirx_img_t &image) {
-      if (!prepare_visible_panel(image)) {
+      auto *surface = prepare_visible_panel(image);
+      if (!surface) {
         return false;
       }
       if (image.frame_profile) {
         image.frame_profile->ui_compose_begin = std::chrono::steady_clock::now();
       }
 #ifdef SUNSHINE_BUILD_VULKAN
-      (void) renderer_->publish();
+      (void) surface->renderer->publish();
 #endif
-      compose_visible_into(destination);
+      compose_visible_into(destination, *surface);
       if (image.frame_profile) {
         image.frame_profile->ui_compose_end = std::chrono::steady_clock::now();
       }
@@ -2048,25 +2055,26 @@ namespace video {
     }
 
     /** @brief Cover the already-rendered visible panel into an imported NV12 destination. */
-    void compose_visible_into(platf::rga::imported_buffer_t &destination) {
+    void compose_visible_into(platf::rga::imported_buffer_t &destination, surface_t &surface) {
       const auto &layout = destination.layout();
+      const auto &panel = surface.panel;
       if (layout.format != platf::rga::pixel_format_e::nv12 || (layout.width & 1U) != 0 || (layout.height & 1U) != 0) {
         throw std::runtime_error("Vulkan UI requires an even-sized NV12 destination");
       }
-      if (layout.width < panel_width || layout.height < panel_height + panel_margin) {
+      if (layout.width < panel.width || layout.height < panel.height + metrics_.panel_margin) {
         throw std::runtime_error("Vulkan UI ROI exceeds the destination frame");
       }
       const auto allocation_rows = static_cast<std::uint64_t>(layout.height) + layout.height / 2U;
       if (layout.stride < layout.width || allocation_rows > std::numeric_limits<std::uint64_t>::max() / layout.stride || layout.allocation_size < allocation_rows * layout.stride) {
         throw std::runtime_error("Vulkan UI destination layout is invalid");
       }
-      const auto panel_left = ((layout.width - panel_width) / 2U) & ~1U;
-      const auto panel_top = layout.height - panel_height - panel_margin;
+      const auto panel_left = ((layout.width - panel.width) / 2U) & ~1U;
+      const auto panel_top = layout.height - panel.height - metrics_.panel_margin;
       platf::rga::process(
-        source_.rga_buffer(),
-        {0, 0, panel_width, panel_height},
+        surface.source.rga_buffer(),
+        {0, 0, panel.width, panel.height},
         destination,
-        {panel_left, panel_top, panel_width, panel_height},
+        {panel_left, panel_top, panel.width, panel.height},
         platf::rga::color_space_e::rgb_to_yuv_bt709_limited
       );
       ++frames_composed_;
@@ -2077,7 +2085,8 @@ namespace video {
 
     /** @brief Synchronously use Vulkan to cover a direct BGR capture DMA-BUF when visible. */
     bool compose(platf::hdmirx::hdmirx_img_t &image) {
-      if (!prepare_visible_panel(image)) {
+      auto *surface = prepare_visible_panel(image);
+      if (!surface) {
         return false;
       }
       if (!image.frame || !image.capture_format || image.frame->planes().size() != 1 || image.capture_format->planes.size() != 1) {
@@ -2114,7 +2123,7 @@ namespace video {
       if (image.frame_profile) {
         image.frame_profile->ui_compose_begin = std::chrono::steady_clock::now();
       }
-      if (renderer_->cover_bgr888({
+      if (surface->renderer->cover_bgr888({
             .dma_buf_fd = plane.dma_buf_fd,
             .allocation_size = plane.allocation_size,
             .width = format.width,
@@ -2122,7 +2131,7 @@ namespace video {
             .stride = plane.bytesperline,
             .generation = generation,
             .slot = index
-          }, panel_margin)) {
+          }, metrics_.panel_margin)) {
         ++imported_slots_;
         BOOST_LOG(info) << "RKMPP Vulkan UI imported BGR capture slot=" << index
                         << " fd=" << plane.dma_buf_fd
@@ -2142,6 +2151,39 @@ namespace video {
     }
 
   private:
+    /** @brief One page-family surface with matching RGA and Vulkan resources. */
+    struct surface_t {
+      platf::vulkan_ui::panel_layout_t panel;
+      platf::rga::target_buffer_t source;
+  #ifdef SUNSHINE_BUILD_VULKAN
+      std::unique_ptr<platf::vulkan_ui::renderer_t> renderer;
+  #endif
+    };
+
+    /** @brief Allocate one stable page-family surface for this encoded output. */
+    std::unique_ptr<surface_t> make_surface(const platf::vulkan_ui::panel_layout_t &panel) {
+      auto surface = std::make_unique<surface_t>();
+      surface->panel = panel;
+      surface->source = platf::rga::target_buffer_t::allocate_bgr888(*backend_, *allocator_, panel.width, panel.height);
+  #ifdef SUNSHINE_BUILD_VULKAN
+      const auto &layout = surface->source.layout();
+      surface->renderer = platf::vulkan_ui::renderer_t::create(
+        layout.dma_buf_fd,
+        layout.allocation_size,
+        layout.width,
+        layout.height,
+        layout.stride,
+        metrics_
+      );
+  #endif
+      return surface;
+    }
+
+    /** @brief Select the wide Profile surface without changing its information topology. */
+    surface_t &surface_for_page(platf::ui::page_e page) noexcept {
+      return page == platf::ui::page_e::profile ? *profile_surface_ : *standard_surface_;
+    }
+
     /** @brief Convert one collector metric to the renderer-independent UI form. */
     static platf::ui::profile_metric_status_t make_profile_metric(const frame_profile_metric_snapshot_t &metric) noexcept {
       return {
@@ -2186,7 +2228,7 @@ namespace video {
     }
 
     /** @brief Render the current controller snapshot once and report visibility. */
-    bool prepare_visible_panel(platf::hdmirx::hdmirx_img_t &image) {
+    surface_t *prepare_visible_panel(platf::hdmirx::hdmirx_img_t &image) {
       auto &controller = platf::ui::global_controller();
       const auto now = platf::ui::controller_t::clock_t::now();
       if (!last_gamepad_poll_ || now - *last_gamepad_poll_ >= 100ms) {
@@ -2233,12 +2275,13 @@ namespace video {
       }
       const auto snapshot = controller.snapshot();
       if (!snapshot.visible) {
-        return false;
+        return nullptr;
       }
   #ifdef SUNSHINE_BUILD_VULKAN
-      const auto model = platf::vulkan_ui::make_render_model(panel_width, panel_height, snapshot);
+      auto &surface = surface_for_page(snapshot.page);
+      const auto model = platf::vulkan_ui::make_render_model(surface.panel.width, surface.panel.height, snapshot);
       const auto ui_render_begin = std::chrono::steady_clock::now();
-      if (renderer_->render(model)) {
+      if (surface.renderer->render(model)) {
         if (image.frame_profile) {
           image.frame_profile->ui_render_begin = ui_render_begin;
           image.frame_profile->ui_render_end = std::chrono::steady_clock::now();
@@ -2247,22 +2290,17 @@ namespace video {
                         << " page=" << static_cast<unsigned int>(snapshot.page)
                         << " focus=" << static_cast<unsigned int>(snapshot.focus);
       }
-      return true;
+      return &surface;
   #else
-      return false;
+      return nullptr;
   #endif
     }
 
-    static constexpr std::uint32_t panel_margin = 32;
-    static constexpr std::uint32_t panel_width = 960;
-    static constexpr std::uint32_t panel_height = 180;
-
+    platf::vulkan_ui::layout_metrics_t metrics_;
     std::unique_ptr<platf::rga::backend_t> backend_;
     std::unique_ptr<platf::rga::dma_allocator_t> allocator_;
-    platf::rga::target_buffer_t source_;
-  #ifdef SUNSHINE_BUILD_VULKAN
-    std::unique_ptr<platf::vulkan_ui::renderer_t> renderer_;
-  #endif
+    std::unique_ptr<surface_t> standard_surface_;
+    std::unique_ptr<surface_t> profile_surface_;
     std::optional<std::uint64_t> capture_generation_;
     input::xbox_remote_status_t gamepad_status_;  ///< Last sanitized gamepad lifecycle poll.
     std::optional<std::chrono::steady_clock::time_point> last_gamepad_poll_;  ///< Limits lifecycle polling on the frame path.
@@ -2285,7 +2323,7 @@ namespace video {
         video_format_(config.videoFormat) {
       if (!vulkan_ui_ && ::config::video.vulkan_ui) {
         try {
-          vulkan_ui_ = std::make_shared<rkmpp_vulkan_ui_session_t>();
+          vulkan_ui_ = std::make_shared<rkmpp_vulkan_ui_session_t>(coded_width, coded_height);
         } catch (const std::exception &e) {
           BOOST_LOG(error) << "RKMPP Vulkan UI initialization failed in RGA path; continuing without overlay: " << e.what();
         }
@@ -2606,7 +2644,10 @@ namespace video {
       }
       if (config::video.vulkan_ui) {
         try {
-          vulkan_ui_ = std::make_shared<rkmpp_vulkan_ui_session_t>();
+          vulkan_ui_ = std::make_shared<rkmpp_vulkan_ui_session_t>(
+            static_cast<std::uint32_t>(config.width),
+            static_cast<std::uint32_t>(config.height)
+          );
         } catch (const std::exception &e) {
           BOOST_LOG(error) << "RKMPP Vulkan UI initialization failed; continuing without overlay: " << e.what();
         }

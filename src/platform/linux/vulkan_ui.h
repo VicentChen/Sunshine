@@ -23,6 +23,28 @@ namespace platf::vulkan_ui {
     float alpha {1.0F};
   };
 
+  /** @brief One opaque UI surface size selected for a page family. */
+  struct panel_layout_t {
+    std::uint32_t width {};
+    std::uint32_t height {};
+  };
+
+  /** @brief Resolution-derived sizes shared by the model, renderer, and ROI compositor. */
+  struct layout_metrics_t {
+    panel_layout_t standard_panel;  ///< Main menu and connection-status surface.
+    panel_layout_t profile_panel;  ///< Wide, low surface preserving the Profile topology.
+    std::uint32_t panel_margin {};  ///< Bottom safe-area margin in output pixels.
+    float scale {};  ///< Linear scale relative to 1920x1080.
+    float body_font_pixels {};
+    float title_font_pixels {};
+    float window_padding_x {};
+    float window_padding_y {};
+    float item_spacing_y {};
+    float timeline_label_width {};
+    float timeline_axis_height {};
+    float timeline_min_lane_height {};
+  };
+
   /**
    * @brief Renderer-independent UI snapshot.
    *
@@ -91,6 +113,12 @@ namespace platf::vulkan_ui {
    */
   std::optional<std::string> validate_render_model(const render_model_t &model);
 
+  /** @brief Derive adaptive UI surfaces and typography from the encoded Moonlight output. */
+  layout_metrics_t make_layout_metrics(std::uint32_t output_width, std::uint32_t output_height);
+
+  /** @brief Select the surface family for one rendered page. */
+  panel_layout_t panel_for_page(const layout_metrics_t &metrics, platf::ui::page_e page) noexcept;
+
   /**
    * @brief Build one renderer-independent Dear ImGui modal-page snapshot.
    *
@@ -132,7 +160,14 @@ namespace platf::vulkan_ui {
      * @return Initialized long-lived renderer.
      * @throws std::runtime_error When Vulkan or DMA-BUF import fails.
      */
-    static std::unique_ptr<renderer_t> create(int dma_buf_fd, std::uint64_t allocation_size, std::uint32_t width, std::uint32_t height, std::uint32_t stride);
+    static std::unique_ptr<renderer_t> create(
+      int dma_buf_fd,
+      std::uint64_t allocation_size,
+      std::uint32_t width,
+      std::uint32_t height,
+      std::uint32_t stride,
+      const layout_metrics_t &metrics
+    );
 
     /**
      * @brief Render a changed snapshot and synchronously release it to RGA.

@@ -38,10 +38,48 @@ namespace {
     EXPECT_TRUE(platf::vulkan_ui::validate_render_model(model));
   }
 
-  TEST(VulkanUiModel, RejectsPanelsTooSmallForTheStaticLayout) {
-    const platf::ui::snapshot_t snapshot {.visible = true, .modal = true};
-    EXPECT_THROW(platf::vulkan_ui::make_render_model(959, 180, snapshot), std::runtime_error);
-    EXPECT_THROW(platf::vulkan_ui::make_render_model(960, 179, snapshot), std::runtime_error);
+  TEST(VulkanUiLayout, Scales1080pAnd4kAtTheSameRelativeSize) {
+    const auto hd = platf::vulkan_ui::make_layout_metrics(1920, 1080);
+    EXPECT_EQ(hd.standard_panel.width, 1280U);
+    EXPECT_EQ(hd.standard_panel.height, 720U);
+    EXPECT_EQ(hd.profile_panel.width, 1440U);
+    EXPECT_EQ(hd.profile_panel.height, 360U);
+    EXPECT_EQ(hd.panel_margin, 36U);
+    EXPECT_FLOAT_EQ(hd.body_font_pixels, 28.0F);
+    EXPECT_FLOAT_EQ(hd.title_font_pixels, 36.0F);
+
+    const auto uhd = platf::vulkan_ui::make_layout_metrics(3840, 2160);
+    EXPECT_EQ(uhd.standard_panel.width, 2560U);
+    EXPECT_EQ(uhd.standard_panel.height, 1440U);
+    EXPECT_EQ(uhd.profile_panel.width, 2880U);
+    EXPECT_EQ(uhd.profile_panel.height, 720U);
+    EXPECT_EQ(uhd.panel_margin, 72U);
+    EXPECT_FLOAT_EQ(uhd.body_font_pixels, 56.0F);
+    EXPECT_FLOAT_EQ(uhd.title_font_pixels, 72.0F);
+  }
+
+  TEST(VulkanUiLayout, UsesTheLimitingAxisAndPreservesProfileTopology) {
+    const auto ultrawide = platf::vulkan_ui::make_layout_metrics(2560, 1080);
+    EXPECT_EQ(ultrawide.standard_panel.width, 1280U);
+    EXPECT_EQ(ultrawide.standard_panel.height, 720U);
+    EXPECT_EQ(ultrawide.profile_panel.width, 1440U);
+    EXPECT_EQ(ultrawide.profile_panel.height, 360U);
+    EXPECT_EQ(
+      platf::vulkan_ui::panel_for_page(ultrawide, platf::ui::page_e::main_menu).height,
+      ultrawide.standard_panel.height
+    );
+    EXPECT_EQ(
+      platf::vulkan_ui::panel_for_page(ultrawide, platf::ui::page_e::profile).height,
+      ultrawide.profile_panel.height
+    );
+
+    const auto hd720 = platf::vulkan_ui::make_layout_metrics(1280, 720);
+    EXPECT_EQ(hd720.standard_panel.width, 852U);
+    EXPECT_EQ(hd720.standard_panel.height, 480U);
+    EXPECT_EQ(hd720.profile_panel.width, 960U);
+    EXPECT_EQ(hd720.profile_panel.height, 240U);
+    EXPECT_EQ(hd720.panel_margin, 24U);
+    EXPECT_THROW(platf::vulkan_ui::make_layout_metrics(1024, 576), std::runtime_error);
   }
 
   TEST(VulkanUiDmaBuf, PlacesPackedBgrPanelAtBottomCenter) {
@@ -54,10 +92,16 @@ namespace {
       .generation = 4,
       .slot = 2
     };
-    const auto region = platf::vulkan_ui::make_bgr888_copy_region(target, 960, 180, 32);
-    EXPECT_EQ(region.panel_left, 480U);
-    EXPECT_EQ(region.panel_top, 868U);
-    EXPECT_EQ(region.buffer_offset, 5'001'120U);
+    const auto metrics = platf::vulkan_ui::make_layout_metrics(1920, 1080);
+    const auto region = platf::vulkan_ui::make_bgr888_copy_region(
+      target,
+      metrics.standard_panel.width,
+      metrics.standard_panel.height,
+      metrics.panel_margin
+    );
+    EXPECT_EQ(region.panel_left, 320U);
+    EXPECT_EQ(region.panel_top, 324U);
+    EXPECT_EQ(region.buffer_offset, 1'867'200U);
     EXPECT_EQ(region.buffer_row_length, 1920U);
     EXPECT_EQ(region.buffer_image_height, 1080U);
     EXPECT_EQ(region.buffer_offset % 4U, 0U);

@@ -13,6 +13,10 @@
   当前应用选择的手柄输出链路都已就绪，连接状态才自动隐藏。
 - 正式 UI 首个版本提供“连接状态”、“Profile”和“退出 UI”三个入口。
 - Profile HUD 迁移为 UI 系统中的一个页面，不再作为独立的固定 OSD 实现。
+- UI 以 Moonlight 编码输出尺寸为缩放基准，在 1080p 与 4K 下保持一致的相对占屏比例和
+  可读字号；不再把所有会话固定为 `960x180`、默认 ImGui 字体。
+- 除 Profile 外，主菜单、连接状态以及后续选项页统一采用从上到下的单列布局；Profile
+  保留当前 Timeline、execution lane 和指标网格的信息结构。
 - UI 使用 Vulkan 在 GPU 上生成不透明 BGR 内容。BGR888 直通时由 Vulkan 将 ROI 直接写入当前 HDMI RX DMA-BUF；只有视频本身已进入 NV12 RGA fallback 时，才由 RGA 覆盖转换后的目标。
 
 本计划不要求半透明效果。生产路径不得为 alpha blend 读取目标视频区域，也不得复制整帧 HDMI 图像。
@@ -353,6 +357,124 @@ Sunshine controller event
 6. 删除旧固定 Profile HUD 对 640x176 palette bitmap 的 UI 职责；迁移验收完成前，旧 MPP OSD
    暂时作为回退后端。确认 Vulkan UI 后端稳定后，再单独计划移除旧实现。
 
+## 阶段 8：分辨率自适应、可读性与垂直布局
+
+### 当前实施状态（2026-09-02）
+
+- 已加入纯 CPU `layout_metrics`，以 Moonlight 编码输出为唯一缩放基准；1080p 精确生成普通页
+  `1280x720`、Profile `1440x360`、正文 28 px、标题 36 px，4K 对应全部线性尺寸 2 倍。
+  720p 与超宽输出使用限制轴缩放，正文低于 18 px 的输出会在创建 UI 前明确拒绝。
+- UI session 现在按编码配置一次性建立普通页与 Profile 两类稳定 BGR/Vulkan surface；HDMI input
+  timing 或 source change 不参与尺寸选择。两类 surface 共用同一套 margin、字体和几何 metrics，
+  direct-BGR 与 NV12 RGA ROI 都使用当前页面的真实 panel 尺寸。
+- ImGui 显式使用内置矢量字体分别生成正文和标题字号，不使用 `FontGlobalScale` 放大 13 px 位图。
+  window padding、item spacing、Timeline label/axis/lane 和条形标签阈值均已从固定像素迁移到 metrics。
+- 主菜单已按“连接状态 -> Profile -> 退出 UI”改为单列全宽卡片，连接状态四项改为单列 label/value
+  行；Up/Down 继续沿 focus index 移动，Left/Right 只报告导航事件、不再改变主菜单 focus。
+- Profile 仍保留标题字段、Timeline 五条 execution lane、相对时间条和 4 列 completed-window 指标
+  网格；只采用新的宽低 surface、矢量字号、换行和缩放后的几何常量。
+- 新增布局与导航测试后，`test_sunshine_rkmpp` 为 **223/223 PASS**；`git diff --check` 通过，
+  `scripts/build-rkmpp.sh` prepared-cache 构建成功链接 `sunshine`、三个模块测试目标和 Xbox probe，
+  最终退出码为 0。
+- 已在 ROCK 5B+ 重启到本轮构建；运行中 `/proc/<pid>/exe` 与磁盘二进制 SHA-256 均为
+  `2482ef47d00f64e053a51ca81c4b99c0d1222672b88217b0100fcb6aff15da2d`，47984/47989/47990/48010
+  均由新进程监听。启动 smoke 同时确认 H.264/HEVC Vulkan UI 与首个 DMA-BUF 合成成功。
+- 已用 macOS Moonlight 6.1.0 完成 1080p 与 4K 短会话截图验收。1080p 日志为普通页
+  `1280x720`、Profile `1440x360`、正文/标题 `28/36`；4K 为 `2560x1440`、`2880x720`、
+  `56/72`。同一 Moonlight 窗口中两档连接状态 panel 和文字保持相同视觉比例，连接状态四项按
+  `VIDEO -> GAMEPAD -> MOONLIGHT -> HDMI INPUT` 从上到下完整显示，无裁切、重叠或 ROI 越界。
+- Xbox Remote Play 实机验收已按完整 lifecycle 等待，而不是在启动初期提前判定：日志实际经过
+  authentication、discovery、wake、provisioning、transport 和 handshake，最终进入
+  `state=ready stage=ready`。在真实 Xbox 视频和已完成 5 秒统计窗口上，分别取得 4K 与 1080p
+  Profile modal 截图；两档均完整显示 FRAME/RX EOF/SEND/SPANS/MISSING/INVALID 标题和 Capture、
+  RGA、Vulkan UI、MPP、Network 五条 Timeline lane，视觉占屏比例一致且文字可读。
+- 4K completed window 记录 `captured=189`、`dropped_samples=0`；1080p 稳态窗口记录
+  `captured=300`、`rga_bypass=300`、`freshness_drops=0`、`dropped_samples=0`。现场无可由 macOS
+  Computer Use 合成的物理手柄事件，因此截图使用了仅在临时二进制中存在的一次性 Profile 预览入口；
+  该入口仍通过正式 controller policy 执行 Start+Back、Down 和确认导航，不伪造 Profile 数据。
+- 两档会话退出后均记录 `CLIENT DISCONNECTED` 与 Vulkan UI teardown。临时预览进程、二进制和源码
+  hook 已删除，正式 `src/video.cpp` 和 `build-rkmpp-review/sunshine` 已恢复；Moonlight 已恢复原始 4K
+  与关闭“Force gamepad #1 always connected”的设置并退出。真实物理手柄输入透传与扩大 ROI 的相对
+  性能门限仍保留为后续实机验收项。
+
+### 当前问题与边界（2026-09-02）
+
+- UI session 目前固定分配 `960x180` BGR panel，1080p 时占画面约 `50% x 16.7%`，4K 时只占
+  `25% x 8.3%`，所以同一 UI 在 4K 下会缩小一半。
+- ImGui 当前使用默认字体图集，没有按编码分辨率选择实际像素字号；窗口 padding、卡片高度、
+  Timeline label width 等也都是固定像素值。
+- 主菜单使用 3 列，连接状态使用 4 列，视觉方向与线性 focus 顺序不一致；controller 当前还会让
+  上下左右四个方向都循环同一条 focus 链。
+- 本阶段只改变 UI panel、字体、布局和相应导航语义，不改变连接完成条件、action、输入 owner、
+  neutral cleanup、Profile 数据源、Timeline stage/lane、统计口径或视频缩放策略。
+- “Profile 保持现状”指保留当前标题信息、Timeline 五条 execution lane、相对时间含义和统计
+  网格结构；Profile 仍采用适合时间线的横向布局，但会使用共同的分辨率缩放和可读字号。
+
+### 自适应尺寸模型
+
+1. 新增与 Vulkan 资源无关的 `ui_layout_metrics`，输入使用 Moonlight 编码输出宽高，而不是当前
+   HDMI 输入 timing。所有 panel 尺寸、safe margin、字号、padding、row height 和 Timeline
+   几何都由同一份 immutable metrics 产生，renderer 与 ROI copy 不各自重复计算。
+2. 以 `1920x1080` 为设计基准，缩放因子取
+   `min(output_width / 1920, output_height / 1080)`；非 16:9 输出再受可用宽高、安全边距和
+   BGR/NV12 对齐约束限制，最终尺寸向下做必要的偶数/字节对齐，禁止越出编码画面。
+3. 第一版目标如下；它们是实现和截图验收基线，不使用 `FontGlobalScale` 放大低分辨率字形，
+   而是按目标像素大小生成字体图集：
+
+   | Moonlight 输出 | 主菜单/连接状态 panel | Profile panel | 正文字号 | 标题字号 | 外边距 |
+   | --- | --- | --- | --- | --- | --- |
+   | 1920x1080 | 1280x720 | 1440x360 | 28 px | 36 px | 36 px |
+   | 3840x2160 | 2560x1440 | 2880x720 | 56 px | 72 px | 72 px |
+
+   这样 1080p 与 4K 的相对占屏比例一致；相比当前 `960x180`，普通页面有足够高度容纳单列内容，
+   Profile 则继续保持宽而低的时间线形态。
+4. UI session 应从编码配置取得稳定目标尺寸，或在首次拿到完整 Moonlight 尺寸后延迟创建资源；
+   同一 session 的 HDMI source change 不应因为输入 timing 短暂变化而反复重建 UI。若编码输出尺寸
+   确实变化，等待当前 Vulkan/RGA/MPP 使用结束后再原子替换 panel、font atlas 和相关 import cache。
+5. 对低于设计基准或非标准宽高比使用同一算法缩小，且设置“内容能完整显示”的下限检查；无法满足
+   最小 panel/字号时关闭本会话 UI 并记录明确错误，不能裁切、越界或影响基本编码路径。
+
+### 页面布局与导航
+
+1. 建立可复用的垂直 list/card primitive。主菜单固定按“连接状态 -> Profile -> 退出 UI”从上到下
+   排列，每项占一整行；focus index 和 action 映射保持 `0/1/2`，避免把视觉重排变成 action 重排。
+2. 连接状态按“视频 -> 手柄 -> Moonlight -> HDMI 输入”从上到下排列，每行左侧为状态名，右侧为
+   当前值；failure kind 或较长 stage 在行内换行/截断规则必须明确，不允许挤压相邻选项。
+3. 普通设置页的默认规则也是单列自上而下；只有页面明确声明为 data visualization 时才允许网格或
+   横向布局。Profile 是本阶段唯一例外：保留 Timeline 和 completed-window 指标的现有横向结构。
+4. 主菜单导航改为 D-pad/左摇杆“上、下”沿可见顺序移动；左、右在主菜单不改变 focus，避免界面
+   已经垂直但导航仍暗示横向。确认、返回、组合键开关、输入截获和退出后的 neutral cleanup 不变。
+5. 标题、正文、辅助文字、卡片 padding、行间距和 focus border 使用 metrics 中的语义 token；不得
+   在各页面继续散落 `20`、`14`、`74`、`82` 等只适用于 `960x180` 的固定像素常量。
+
+### 分阶段实施与验收
+
+1. **布局模型（纯 CPU）**：实现 metrics 与 1080p/4K/非 16:9 边界计算，先用单元测试确认 panel、
+   字号、safe margin、ROI 对齐和越界拒绝，不接触 Vulkan 或手柄状态机。
+2. **资源生命周期**：让 BGR panel、Vulkan framebuffer、font atlas、RGA source 和 direct-BGR ROI
+   使用同一 metrics；验证一次 session 只按输出尺寸创建，source change 不造成资源抖动。
+3. **普通页面垂直化**：迁移主菜单和连接状态，调整 Up/Down 导航语义；确认 focus 高亮、action index、
+   自动连接状态非模态行为以及“退出 UI”均与现有逻辑一致。
+4. **Profile 兼容适配**：只把固定像素几何替换为 metrics，并保持标题字段、lane 顺序、条形相对位置、
+   metric 顺序和数据语义不变；使用同一 snapshot 对比改造前后 Timeline geometry 的归一化结果。
+5. **离线验证**：运行 `git diff --check`，构建并只运行 `test_sunshine_rkmpp`；不运行上游
+   `test_sunshine`。任何实机画面结论都不能由单元测试或构建成功代替。
+6. **实机短验收**：在另行获得部署/重启授权后，分别用 Moonlight 1080p 与 4K 截图验证主菜单、
+   连接状态和 Profile；每档完成一次打开、上下导航、进入/返回、退出 UI 与输入恢复，不增加耐久测试。
+
+本阶段完成必须同时满足：
+
+- 1080p 与 4K 截图中，普通页面和 Profile 的相对占屏比例一致，4K 不再显示为 1080p 的一半；
+  正文分别使用 28 px 与 56 px 目标字形，标题分别使用 36 px 与 72 px 目标字形。
+- 主菜单三个入口和连接状态四项均从上到下排列；Up/Down 与视觉顺序一致，Left/Right 不改变主菜单
+  focus，确认和返回仍触发原 action。
+- 普通页面在 safe area 内完整显示，没有文字裁切、卡片重叠或 ROI 越界；较长状态值有稳定的换行
+  或截断表现。
+- Profile 的信息结构、lane/metric 顺序、相对时间和 completed-window 统计语义不变；字体可读，
+  Timeline 条形与标签没有裁切或错位。
+- UI 隐藏时仍无额外 Vulkan/RGA UI 工作；静态 UI 仍复用缓存；尺寸变化或失败路径不会泄漏
+  DMA-BUF/Vulkan/RGA 资源，也不会阻止 V4L2 buffer 归还或基本编码继续。
+
 ## 测试与验证
 
 ### 离线测试
@@ -362,6 +484,9 @@ Sunshine controller event
 - 连接完成组合条件的全部边界：仅视频 ready、仅手柄 ready、两者 ready 和任一链路重新断开。
 - 自动连接状态从 placeholder 开始显示、两者 ready 后隐藏、断线后重新出现，且始终不截获输入。
 - 主菜单页面切换和“退出 UI”确认后的关闭与 neutral cleanup。
+- 1080p、4K 与至少一个非 16:9 输入的 layout metrics、字体像素尺寸、safe margin、对齐与越界拒绝。
+- 主菜单和连接状态的单列顺序，以及 Up/Down 移动、Left/Right 不移动 focus 的边界。
+- Profile 改造前后归一化 Timeline geometry、lane/metric 顺序和统计 snapshot 语义保持一致。
 - UI 打开/关闭时的 input interception。
 - NV12 ROI 的对齐、范围、stride、offset 和 allocation 校验。
 - frame holder 在 RGA 与 MPP 完成前保持有效。
@@ -380,16 +505,19 @@ Sunshine controller event
 3. 首个绿色 placeholder 帧即显示连接状态；视频或手柄任一未 ready 时持续显示，两者 ready 后
    自动隐藏，并在任一链路断开后自动重新出现。
 4. 主菜单、“连接状态”页面、“Profile”页面和“退出 UI”的导航、显示与隐藏。
-5. UI dirty 更新和高频手柄导航。
-6. Moonlight -> Sunshine -> Xbox 输入截获、退出 UI 后恢复以及无 stuck button。
-7. HDMI source change、无信号、手柄重连、Moonlight 重连和 Sunshine teardown。
-8. 记录 UI 隐藏/显示时的 RGA、MPP、端到端延迟以及队列等待，不用单次样本代替稳定性结论。
+5. 1080p 与 4K 分别截图确认相对尺寸、字号、单列布局和 Profile 兼容性。
+6. UI dirty 更新和高频手柄导航。
+7. Moonlight -> Sunshine -> Xbox 输入截获、退出 UI 后恢复以及无 stuck button。
+8. HDMI source change、无信号、手柄重连、Moonlight 重连和 Sunshine teardown。
+9. 记录 UI 隐藏/显示时的 RGA、MPP、端到端延迟以及队列等待，不用单次样本代替稳定性结论。
 
 ## 性能验收
 
 - UI 隐藏时，视频路径没有额外 Vulkan submission 或 RGA UI operation。
 - UI 静态显示时，Vulkan 不重复渲染；仅对每个编码帧执行 panel ROI 覆盖。
 - UI 更新不产生完整 4K RGBA surface 或完整视频帧副本。
+- 4K 只按 2 倍线性尺寸扩大 panel，不得因面积扩大而在每个视频帧重建 font atlas、framebuffer
+  或 import cache；这些资源只在 session/输出尺寸变化时创建。
 - UI 合成不会使 capture queue 长期饥饿或导致 MPP 超时。
 - 以关闭 UI 的同配置基线为对照，报告 RGA、MPP 和 host latency 的 p50/p95/p99；性能门限在获得 Gate 4 基线后确定。
 
@@ -412,6 +540,7 @@ Sunshine controller event
 - 连接状态从首个绿色 placeholder 帧持续显示到视频与手柄同时 ready，并能在连接丢失后
   自动重新出现；连接完成后无需用户操作即可自动隐藏。
 - 正式 UI 包含“连接状态”、“Profile”和可用的“退出 UI”入口。
+- 1080p/4K UI 的相对尺寸和字号通过截图验收；普通页面为垂直单列，Profile 保持现有信息结构。
 - 至少一个 Sunshine action 能执行并将真实结果反馈到 UI。
 - Profile HUD 已作为 UI page 工作，旧固定 OSD 的保留或移除状态有明确记录。
 - RKMPP 专用测试通过，性能数据和已知限制已记录。

@@ -191,16 +191,8 @@ namespace platf::ui {
       }
     } else if ((pressed & navigation_left) != 0) {
       result.navigation = navigation_e::left;
-      if (page_ == page_e::main_menu) {
-        focus_ = static_cast<std::uint8_t>((focus_ + item_count_ - 1U) % item_count_);
-        ++revision_;
-      }
     } else if ((pressed & navigation_right) != 0) {
       result.navigation = navigation_e::right;
-      if (page_ == page_e::main_menu) {
-        focus_ = static_cast<std::uint8_t>((focus_ + 1U) % item_count_);
-        ++revision_;
-      }
     } else if ((pressed & navigation_confirm) != 0) {
       result.navigation = navigation_e::confirm;
       if (page_ == page_e::main_menu) {

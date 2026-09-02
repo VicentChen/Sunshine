@@ -161,23 +161,40 @@ namespace platf::vulkan_ui {
              color.alpha == 1.0F;
     }
 
-    /**
-     * @brief Draw one opaque card in the current fixed-layout page.
-     *
-     * @param id Stable Dear ImGui child identifier.
-     * @param label Card heading.
-     * @param description Card value or action hint.
-     * @param focused Whether to draw the modal focus highlight.
-     */
-    void draw_menu_card(const char *id, const char *label, const char *description, bool focused, float height = 74.0F) {
+    /** @brief Draw one opaque full-width menu card. */
+    void draw_menu_card(const char *id, const char *label, const char *description, bool focused, float height) {
       const auto card = focused ? ImVec4 {0.055F, 0.330F, 0.720F, 1.0F} : ImVec4 {0.075F, 0.095F, 0.130F, 1.0F};
       ImGui::PushStyleColor(ImGuiCol_ChildBg, card);
       ImGui::BeginChild(id, ImVec2 {0.0F, height}, ImGuiChildFlags_Borders);
       ImGui::TextUnformatted(label);
       ImGui::Spacing();
-      ImGui::TextUnformatted(description);
+      ImGui::TextWrapped("%s", description);
       ImGui::EndChild();
       ImGui::PopStyleColor();
+    }
+
+    /** @brief Draw one full-width connection-status row with label and value columns. */
+    void draw_status_row(const char *id, const char *label, const char *value, float height) {
+      ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4 {0.075F, 0.095F, 0.130F, 1.0F});
+      ImGui::BeginChild(id, ImVec2 {0.0F, height}, ImGuiChildFlags_Borders);
+      if (ImGui::BeginTable("status-row", 2, ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthStretch, 0.32F);
+        ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 0.68F);
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(label);
+        ImGui::TableNextColumn();
+        ImGui::TextWrapped("%s", value);
+        ImGui::EndTable();
+      }
+      ImGui::EndChild();
+      ImGui::PopStyleColor();
+    }
+
+    /** @brief Compute equal-height vertical rows in the remaining content area. */
+    float vertical_row_height(std::size_t count, const layout_metrics_t &metrics) {
+      const auto available = ImGui::GetContentRegionAvail().y;
+      const auto gaps = count > 0 ? metrics.item_spacing_y * static_cast<float>(count - 1U) : 0.0F;
+      return count == 0 ? 0.0F : std::max(metrics.body_font_pixels * 2.75F, (available - gaps) / static_cast<float>(count));
     }
 
     /**
@@ -245,17 +262,15 @@ namespace platf::vulkan_ui {
     }
 
     /** @brief Draw recent completed spans on stable resource lanes. */
-    void draw_profile_timeline(const platf::ui::profile_status_t &profile) {
+    void draw_profile_timeline(const platf::ui::profile_status_t &profile, const layout_metrics_t &metrics) {
       const auto geometry = make_timeline_geometry(profile.timeline);
       const auto origin = ImGui::GetCursorScreenPos();
       const auto available = ImGui::GetContentRegionAvail();
-      constexpr float label_width = 82.0F;
-      constexpr float axis_height = 14.0F;
       constexpr std::array lane_names {"CAPTURE", "RGA", "VULKAN UI", "MPP", "NETWORK"};
-      const auto chart_left = origin.x + label_width;
-      const auto chart_width = std::max(1.0F, available.x - label_width);
-      const auto chart_top = origin.y + axis_height;
-      const auto lane_height = std::max(16.0F, (available.y - axis_height) / static_cast<float>(lane_names.size()));
+      const auto chart_left = origin.x + metrics.timeline_label_width;
+      const auto chart_width = std::max(1.0F, available.x - metrics.timeline_label_width);
+      const auto chart_top = origin.y + metrics.timeline_axis_height;
+      const auto lane_height = std::max(metrics.timeline_min_lane_height, (available.y - metrics.timeline_axis_height) / static_cast<float>(lane_names.size()));
       const auto chart_height = lane_height * lane_names.size();
       auto *draw = ImGui::GetWindowDrawList();
 
@@ -266,7 +281,7 @@ namespace platf::vulkan_ui {
           {chart_left + chart_width, top + lane_height - 1.0F},
           lane % 2U == 0U ? IM_COL32(21, 29, 43, 255) : IM_COL32(25, 35, 51, 255)
         );
-        draw->AddText({origin.x, top + 2.0F}, IM_COL32(185, 202, 225, 255), lane_names[lane]);
+        draw->AddText({origin.x, top + 2.0F * metrics.scale}, IM_COL32(185, 202, 225, 255), lane_names[lane]);
       }
       for (int tick = 0; tick <= 4; ++tick) {
         const auto ratio = static_cast<float>(tick) / 4.0F;
@@ -275,7 +290,7 @@ namespace platf::vulkan_ui {
         const auto tick_us = geometry.view_start_us + static_cast<std::int64_t>((geometry.view_end_us - geometry.view_start_us) * ratio);
         char label[32] {};
         std::snprintf(label, sizeof(label), "%.0f ms", tick_us / 1000.0);
-        draw->AddText({x + 2.0F, origin.y}, IM_COL32(145, 160, 180, 210), label);
+        draw->AddText({x + 2.0F * metrics.scale, origin.y}, IM_COL32(145, 160, 180, 210), label);
       }
       const auto view_duration = std::max<std::int64_t>(1, geometry.view_end_us - geometry.view_start_us);
       for (std::size_t index = 0; index < profile.timeline.frame_count; ++index) {
@@ -291,17 +306,17 @@ namespace platf::vulkan_ui {
         const auto &bar = geometry.bars[index];
         const auto lane = static_cast<std::size_t>(bar.lane);
         const auto top = chart_top + lane_height * static_cast<float>(lane);
-        const auto half_height = std::max(5.0F, (lane_height - 5.0F) / 2.0F);
+        const auto half_height = std::max(5.0F * metrics.scale, (lane_height - 5.0F * metrics.scale) / 2.0F);
         const auto track = static_cast<float>(static_cast<std::uint64_t>(bar.frame_index) & 1U);
-        const auto y0 = top + 2.0F + track * half_height;
-        const auto y1 = std::min(top + lane_height - 2.0F, y0 + half_height - 1.0F);
+        const auto y0 = top + 2.0F * metrics.scale + track * half_height;
+        const auto y1 = std::min(top + lane_height - 2.0F * metrics.scale, y0 + half_height - metrics.scale);
         const auto x0 = chart_left + chart_width * bar.left;
-        const auto x1 = std::max(x0 + 1.5F, chart_left + chart_width * bar.right);
-        draw->AddRectFilled({x0, y0}, {x1, y1}, timeline_stage_color(bar.stage), 2.0F);
+        const auto x1 = std::max(x0 + 1.5F * metrics.scale, chart_left + chart_width * bar.right);
+        draw->AddRectFilled({x0, y0}, {x1, y1}, timeline_stage_color(bar.stage), 2.0F * metrics.scale);
         if (bar.frame_index == geometry.latest_frame_index) {
-          draw->AddRect({x0, y0}, {x1, y1}, IM_COL32(245, 250, 255, 245), 2.0F);
+          draw->AddRect({x0, y0}, {x1, y1}, IM_COL32(245, 250, 255, 245), 2.0F * metrics.scale);
         }
-        if (x1 - x0 >= 58.0F) {
+        if (x1 - x0 >= 58.0F * metrics.scale) {
           char label[64] {};
           std::snprintf(
             label,
@@ -312,14 +327,14 @@ namespace platf::vulkan_ui {
             bar.start_us / 1000.0,
             bar.end_us / 1000.0
           );
-          draw->AddText({x0 + 3.0F, y0}, IM_COL32(250, 252, 255, 255), label);
+          draw->AddText({x0 + 3.0F * metrics.scale, y0}, IM_COL32(250, 252, 255, 255), label);
         }
       }
-      ImGui::Dummy({available.x, axis_height + chart_height});
+      ImGui::Dummy({available.x, metrics.timeline_axis_height + chart_height});
     }
 
     /** @brief Build the current modal page entirely through Dear ImGui. */
-    void build_modal_imgui_page(const render_model_t &model) {
+    void build_modal_imgui_page(const render_model_t &model, const layout_metrics_t &metrics, ImFont *title_font) {
       auto &io = ImGui::GetIO();
       io.DisplaySize = {static_cast<float>(model.width), static_cast<float>(model.height)};
       ImGui_ImplVulkan_NewFrame();
@@ -330,7 +345,8 @@ namespace platf::vulkan_ui {
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4 {0.940F, 0.965F, 1.0F, 1.0F});
       ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0F);
       ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0F);
-      ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2 {20.0F, 14.0F});
+      ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2 {metrics.window_padding_x, metrics.window_padding_y});
+      ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2 {metrics.item_spacing_y, metrics.item_spacing_y});
       ImGui::SetNextWindowPos({0.0F, 0.0F});
       ImGui::SetNextWindowSize(io.DisplaySize);
       constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
@@ -339,7 +355,7 @@ namespace platf::vulkan_ui {
       ImGui::Begin("Sunshine Vulkan UI", nullptr, flags);
       if (model.page == platf::ui::page_e::profile && model.profile.timeline.frame_count != 0) {
         const auto &latest = model.profile.timeline.frames[model.profile.timeline.frame_count - 1U];
-        ImGui::Text(
+        ImGui::TextWrapped(
           "Profile Timeline  FRAME %lld  RX EOF +0.0 ms  SEND +%.1f ms  SPANS %u  MISSING 0x%03x  INVALID 0x%03x",
           static_cast<long long>(latest.frame_index),
           latest.end_us / 1000.0,
@@ -348,7 +364,7 @@ namespace platf::vulkan_ui {
           latest.invalid_stage_mask
         );
       } else if (model.page == platf::ui::page_e::profile && model.profile.available) {
-        ImGui::Text(
+        ImGui::TextWrapped(
           "Profile Statistics  C %u  P %u  R %u  BYPASS %u  FRESH-DROP %llu  SAMPLE-DROP %u  %ux%u -> %ux%u",
           model.profile.captured_frames,
           model.profile.placeholder_frames,
@@ -362,36 +378,32 @@ namespace platf::vulkan_ui {
           model.profile.moonlight_height
         );
       } else {
+        ImGui::PushFont(title_font, metrics.title_font_pixels);
         ImGui::TextUnformatted(model.page == platf::ui::page_e::main_menu ? "Sunshine" : model.page == platf::ui::page_e::connection_status ? "Connection Status" : "Profile");
+        ImGui::PopFont();
       }
       ImGui::Separator();
       if (model.page == platf::ui::page_e::main_menu) {
-        if (ImGui::BeginTable("main-menu", 3, ImGuiTableFlags_SizingStretchSame)) {
-          constexpr std::array<const char *, 3> labels {"CONNECTION", "PROFILE", "EXIT UI"};
-          constexpr std::array<const char *, 3> descriptions {"VIEW STATUS", "VIEW METRICS", "CLOSE OVERLAY"};
-          for (std::size_t index = 0; index < labels.size(); ++index) {
-            ImGui::TableNextColumn();
-            draw_menu_card(labels[index], labels[index], descriptions[index], index == model.focus);
-          }
-          ImGui::EndTable();
+        constexpr std::array<const char *, 3> labels {"CONNECTION", "PROFILE", "EXIT UI"};
+        constexpr std::array<const char *, 3> descriptions {"VIEW STATUS", "VIEW METRICS", "CLOSE OVERLAY"};
+        const auto row_height = vertical_row_height(labels.size(), metrics);
+        for (std::size_t index = 0; index < labels.size(); ++index) {
+          draw_menu_card(labels[index], labels[index], descriptions[index], index == model.focus, row_height);
         }
       } else if (model.page == platf::ui::page_e::connection_status) {
-        if (ImGui::BeginTable("connection-status", 4, ImGuiTableFlags_SizingStretchSame)) {
-          const auto &gamepad = gamepad_status_text(model.connection);
-          const auto moonlight = resolution_text(model.connection.moonlight_width, model.connection.moonlight_height);
-          const auto input = resolution_text(model.connection.input_width, model.connection.input_height);
-          const std::array labels {"VIDEO", "GAMEPAD", "MOONLIGHT", "HDMI INPUT"};
-          const std::array values {model.connection.video_state.c_str(), gamepad.c_str(), moonlight.c_str(), input.c_str()};
-          for (std::size_t index = 0; index < labels.size(); ++index) {
-            ImGui::TableNextColumn();
-            draw_menu_card(labels[index], labels[index], values[index], false);
-          }
-          ImGui::EndTable();
+        const auto &gamepad = gamepad_status_text(model.connection);
+        const auto moonlight = resolution_text(model.connection.moonlight_width, model.connection.moonlight_height);
+        const auto input = resolution_text(model.connection.input_width, model.connection.input_height);
+        const std::array labels {"VIDEO", "GAMEPAD", "MOONLIGHT", "HDMI INPUT"};
+        const std::array values {model.connection.video_state.c_str(), gamepad.c_str(), moonlight.c_str(), input.c_str()};
+        const auto row_height = vertical_row_height(labels.size(), metrics);
+        for (std::size_t index = 0; index < labels.size(); ++index) {
+          draw_status_row(labels[index], labels[index], values[index], row_height);
         }
       } else if (model.profile.timeline.frame_count != 0) {
-        draw_profile_timeline(model.profile);
+        draw_profile_timeline(model.profile, metrics);
       } else if (!model.profile.available) {
-        draw_menu_card("profile-waiting", "COLLECTING", "WAITING FOR FIRST 5S WINDOW", false);
+        draw_menu_card("profile-waiting", "COLLECTING", "WAITING FOR FIRST 5S WINDOW", false, ImGui::GetContentRegionAvail().y);
       } else if (ImGui::BeginTable("profile-metrics", 4, ImGuiTableFlags_SizingStretchSame)) {
         constexpr std::array labels {
           "RX EOF-DQ",
@@ -403,15 +415,17 @@ namespace platf::vulkan_ui {
           "HOST-PACKET",
           "HOST-SEND"
         };
+        const auto available_height = ImGui::GetContentRegionAvail().y;
+        const auto card_height = std::max(metrics.body_font_pixels * 2.75F, (available_height - metrics.item_spacing_y) / 2.0F);
         for (std::size_t index = 0; index < labels.size(); ++index) {
           const auto description = profile_metric_text(model.profile.metrics[index]);
           ImGui::TableNextColumn();
-          draw_menu_card(labels[index], labels[index], description.c_str(), false, 58.0F);
+          draw_menu_card(labels[index], labels[index], description.c_str(), false, card_height);
         }
         ImGui::EndTable();
       }
       ImGui::End();
-      ImGui::PopStyleVar(3);
+      ImGui::PopStyleVar(4);
       ImGui::PopStyleColor(2);
       ImGui::Render();
     }
@@ -500,6 +514,50 @@ namespace platf::vulkan_ui {
     return geometry;
   }
 
+  layout_metrics_t make_layout_metrics(std::uint32_t output_width, std::uint32_t output_height) {
+    if (output_width == 0 || output_height == 0) {
+      throw std::runtime_error("Vulkan UI output dimensions must be nonzero");
+    }
+    const auto scale = std::min(
+      static_cast<float>(output_width) / 1920.0F,
+      static_cast<float>(output_height) / 1080.0F
+    );
+    if (!std::isfinite(scale) || 28.0F * scale < 18.0F) {
+      throw std::runtime_error("Vulkan UI output is too small for readable adaptive content");
+    }
+    const auto even_pixels = [](float value) {
+      const auto pixels = static_cast<std::uint32_t>(std::floor(value));
+      return pixels & ~1U;
+    };
+    layout_metrics_t metrics {
+      .standard_panel = {even_pixels(1280.0F * scale), even_pixels(720.0F * scale)},
+      .profile_panel = {even_pixels(1440.0F * scale), even_pixels(360.0F * scale)},
+      .panel_margin = even_pixels(36.0F * scale),
+      .scale = scale,
+      .body_font_pixels = 28.0F * scale,
+      .title_font_pixels = 36.0F * scale,
+      .window_padding_x = 32.0F * scale,
+      .window_padding_y = 28.0F * scale,
+      .item_spacing_y = 16.0F * scale,
+      .timeline_label_width = 150.0F * scale,
+      .timeline_axis_height = 32.0F * scale,
+      .timeline_min_lane_height = 36.0F * scale
+    };
+    const auto fits = [output_width, output_height, &metrics](const panel_layout_t &panel) {
+      return panel.width != 0 && panel.height != 0 &&
+             panel.width <= output_width && panel.height <= output_height &&
+             metrics.panel_margin <= output_height - panel.height;
+    };
+    if (!fits(metrics.standard_panel) || !fits(metrics.profile_panel)) {
+      throw std::runtime_error("Vulkan UI adaptive panel exceeds the encoded output safe area");
+    }
+    return metrics;
+  }
+
+  panel_layout_t panel_for_page(const layout_metrics_t &metrics, platf::ui::page_e page) noexcept {
+    return page == platf::ui::page_e::profile ? metrics.profile_panel : metrics.standard_panel;
+  }
+
   std::optional<std::string> validate_render_model(const render_model_t &model) {
     if (model.width == 0 || model.height == 0 || model.revision == 0) {
       return "Vulkan UI model dimensions and revision must be nonzero";
@@ -541,9 +599,6 @@ namespace platf::vulkan_ui {
   }
 
   render_model_t make_render_model(std::uint32_t width, std::uint32_t height, const platf::ui::snapshot_t &snapshot) {
-    if (width < 960 || height < 180) {
-      throw std::runtime_error("Vulkan UI modal page requires at least a 960x180 panel");
-    }
     const color_t background {0.025F, 0.035F, 0.060F, 1.0F};
     render_model_t model {width, height, snapshot.revision, background, snapshot.page, snapshot.focus, snapshot.connection, snapshot.profile};
     if (const auto error = validate_render_model(model)) {
@@ -554,12 +609,20 @@ namespace platf::vulkan_ui {
 
   class renderer_t::impl_t {
   public:
-    impl_t(int dma_buf_fd, std::uint64_t allocation_size, std::uint32_t width, std::uint32_t height, std::uint32_t stride):
+    impl_t(
+      int dma_buf_fd,
+      std::uint64_t allocation_size,
+      std::uint32_t width,
+      std::uint32_t height,
+      std::uint32_t stride,
+      const layout_metrics_t &metrics
+    ):
         width_(width),
         height_(height),
         stride_(stride),
-        allocation_size_(allocation_size) {
-      if (dma_buf_fd < 0 || width == 0 || height == 0 || stride < static_cast<std::uint64_t>(width) * 3U || stride % 3U != 0 || allocation_size < static_cast<std::uint64_t>(stride) * height) {
+        allocation_size_(allocation_size),
+        metrics_(metrics) {
+      if (dma_buf_fd < 0 || width == 0 || height == 0 || stride < static_cast<std::uint64_t>(width) * 3U || stride % 3U != 0 || allocation_size < static_cast<std::uint64_t>(stride) * height || metrics.body_font_pixels <= 0.0F || metrics.title_font_pixels <= 0.0F) {
         throw std::runtime_error("Vulkan UI DMA-BUF layout is invalid");
       }
       try {
@@ -585,7 +648,7 @@ namespace platf::vulkan_ui {
         return false;
       }
       ImGui::SetCurrentContext(imgui_context_);
-      build_modal_imgui_page(model);
+      build_modal_imgui_page(model, metrics_, title_font_);
 
       require_vk(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX), "vkWaitForFences(Vulkan UI)");
       require_vk(vkResetFences(device_, 1, &fence_), "vkResetFences(Vulkan UI)");
@@ -961,6 +1024,16 @@ namespace platf::vulkan_ui {
       io.IniFilename = nullptr;
       io.LogFilename = nullptr;
       io.DisplaySize = {static_cast<float>(width_), static_cast<float>(height_)};
+      ImFontConfig body_font_config;
+      body_font_config.SizePixels = metrics_.body_font_pixels;
+      body_font_ = io.Fonts->AddFontDefaultVector(&body_font_config);
+      ImFontConfig title_font_config;
+      title_font_config.SizePixels = metrics_.title_font_pixels;
+      title_font_ = io.Fonts->AddFontDefaultVector(&title_font_config);
+      if (!body_font_ || !title_font_) {
+        throw std::runtime_error("Vulkan UI adaptive font creation failed");
+      }
+      io.FontDefault = body_font_;
       ImGui::StyleColorsDark();
       ImGui_ImplVulkan_InitInfo imgui_info {};
       imgui_info.ApiVersion = VK_API_VERSION_1_1;
@@ -1031,6 +1104,7 @@ namespace platf::vulkan_ui {
     std::uint32_t height_ {};
     std::uint32_t stride_ {};
     std::uint64_t allocation_size_ {};
+    layout_metrics_t metrics_;
     std::uint64_t rendered_revision_ {};
     std::uint64_t published_revision_ {};
     std::string device_name_;
@@ -1050,6 +1124,8 @@ namespace platf::vulkan_ui {
     VkCommandBuffer command_ {VK_NULL_HANDLE};
     VkFence fence_ {VK_NULL_HANDLE};
     ImGuiContext *imgui_context_ {};
+    ImFont *body_font_ {};
+    ImFont *title_font_ {};
     bool imgui_ready_ {};
     std::unordered_map<std::uint32_t, imported_capture_target_t> capture_targets_;
     std::optional<std::uint64_t> capture_generation_;
@@ -1060,8 +1136,15 @@ namespace platf::vulkan_ui {
 
   renderer_t::~renderer_t() = default;
 
-  std::unique_ptr<renderer_t> renderer_t::create(int dma_buf_fd, std::uint64_t allocation_size, std::uint32_t width, std::uint32_t height, std::uint32_t stride) {
-    return std::unique_ptr<renderer_t>(new renderer_t(std::make_unique<impl_t>(dma_buf_fd, allocation_size, width, height, stride)));
+  std::unique_ptr<renderer_t> renderer_t::create(
+    int dma_buf_fd,
+    std::uint64_t allocation_size,
+    std::uint32_t width,
+    std::uint32_t height,
+    std::uint32_t stride,
+    const layout_metrics_t &metrics
+  ) {
+    return std::unique_ptr<renderer_t>(new renderer_t(std::make_unique<impl_t>(dma_buf_fd, allocation_size, width, height, stride, metrics)));
   }
 
   bool renderer_t::render(const render_model_t &model) {

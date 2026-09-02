@@ -116,14 +116,17 @@ namespace {
     EXPECT_EQ(update(ui, 1, 4101ms, platf::DPAD_UP).navigation, navigation_e::none);
     EXPECT_EQ(update(ui, 1, 4102ms).navigation, navigation_e::none);
     EXPECT_EQ(update(ui, 1, 4103ms, platf::DPAD_RIGHT).navigation, navigation_e::right);
-    EXPECT_EQ(ui.snapshot().focus, 0);
+    EXPECT_EQ(ui.snapshot().focus, 2);
     EXPECT_EQ(update(ui, 1, 4104ms).navigation, navigation_e::none);
-    const auto confirm = update(ui, 1, 4105ms, platf::A);
+    EXPECT_EQ(update(ui, 1, 4105ms, platf::DPAD_DOWN).navigation, navigation_e::down);
+    EXPECT_EQ(ui.snapshot().focus, 0);
+    EXPECT_EQ(update(ui, 1, 4106ms).navigation, navigation_e::none);
+    const auto confirm = update(ui, 1, 4107ms, platf::A);
     EXPECT_EQ(confirm.navigation, navigation_e::confirm);
     EXPECT_EQ(confirm.action, action_e::none);
     EXPECT_EQ(ui.snapshot().page, page_e::connection_status);
-    EXPECT_EQ(update(ui, 1, 4106ms).navigation, navigation_e::none);
-    EXPECT_EQ(update(ui, 1, 4107ms, platf::BACK).navigation, navigation_e::back);
+    EXPECT_EQ(update(ui, 1, 4108ms).navigation, navigation_e::none);
+    EXPECT_EQ(update(ui, 1, 4109ms, platf::BACK).navigation, navigation_e::back);
     EXPECT_EQ(ui.snapshot().page, page_e::main_menu);
   }
 
@@ -132,7 +135,7 @@ namespace {
     open(ui);
 
     EXPECT_EQ(ui.snapshot().page, page_e::main_menu);
-    EXPECT_EQ(update(ui, 0, 4000ms, platf::DPAD_RIGHT).navigation, navigation_e::right);
+    EXPECT_EQ(update(ui, 0, 4000ms, platf::DPAD_DOWN).navigation, navigation_e::down);
     EXPECT_EQ(ui.snapshot().focus, 1);
     EXPECT_EQ(update(ui, 0, 4001ms).navigation, navigation_e::none);
     EXPECT_EQ(update(ui, 0, 4002ms, platf::A).navigation, navigation_e::confirm);
@@ -143,7 +146,7 @@ namespace {
     EXPECT_EQ(update(ui, 0, 4004ms, platf::BACK).navigation, navigation_e::back);
     EXPECT_EQ(ui.snapshot().page, page_e::main_menu);
     EXPECT_EQ(update(ui, 0, 4005ms).navigation, navigation_e::none);
-    EXPECT_EQ(update(ui, 0, 4006ms, platf::DPAD_RIGHT).navigation, navigation_e::right);
+    EXPECT_EQ(update(ui, 0, 4006ms, platf::DPAD_DOWN).navigation, navigation_e::down);
     EXPECT_EQ(ui.snapshot().focus, 2);
     EXPECT_EQ(update(ui, 0, 4007ms).navigation, navigation_e::none);
 
@@ -274,7 +277,7 @@ namespace {
     EXPECT_EQ(ui.snapshot().profile.captured_frames, 150U);
 
     open(ui);
-    EXPECT_EQ(update(ui, 0, 4000ms, platf::DPAD_RIGHT).navigation, navigation_e::right);
+    EXPECT_EQ(update(ui, 0, 4000ms, platf::DPAD_DOWN).navigation, navigation_e::down);
     EXPECT_EQ(update(ui, 0, 4001ms).navigation, navigation_e::none);
     EXPECT_EQ(update(ui, 0, 4002ms, platf::A).navigation, navigation_e::confirm);
     ASSERT_EQ(ui.snapshot().page, page_e::profile);
@@ -296,21 +299,22 @@ namespace {
     EXPECT_EQ(ui.snapshot().profile.timeline.frames[0].frame_index, 17);
   }
 
-  TEST(UiController, LeftStickUsesHysteresisAndPublishesChangedFocusRevision) {
+  TEST(UiController, VerticalStickUsesHysteresisWhileHorizontalNavigationKeepsFocus) {
     platf::ui::controller_t ui;
     open(ui);
     const auto initial = ui.snapshot();
 
     EXPECT_EQ(update(ui, 0, 4000ms, 0, 17000, 0).navigation, navigation_e::right);
     const auto first = ui.snapshot();
-    EXPECT_EQ(first.focus, 1);
-    EXPECT_GT(first.revision, initial.revision);
+    EXPECT_EQ(first.focus, 0);
+    EXPECT_EQ(first.revision, initial.revision);
     EXPECT_EQ(update(ui, 0, 4001ms, 0, 9000, 0).navigation, navigation_e::none);
     EXPECT_EQ(update(ui, 0, 4002ms, 0, 7000, 0).navigation, navigation_e::none);
     EXPECT_EQ(update(ui, 0, 4003ms, 0, 17000, 0).navigation, navigation_e::right);
-    EXPECT_EQ(ui.snapshot().focus, 2);
+    EXPECT_EQ(ui.snapshot().focus, 0);
     EXPECT_EQ(update(ui, 0, 4004ms, 0, 0, 17000).navigation, navigation_e::up);
-    EXPECT_EQ(ui.snapshot().focus, 1);
+    EXPECT_EQ(ui.snapshot().focus, 2);
+    EXPECT_GT(ui.snapshot().revision, initial.revision);
   }
 
   TEST(UiController, OwnerDisconnectHidesUiAndRequiresCleanup) {
@@ -330,7 +334,7 @@ namespace {
   TEST(UiController, ResetClearsModalStateWithoutChangingFocus) {
     platf::ui::controller_t ui;
     open(ui);
-    update(ui, 0, 4000ms, platf::DPAD_RIGHT);
+    update(ui, 0, 4000ms, platf::DPAD_DOWN);
     ASSERT_EQ(ui.snapshot().focus, 1);
     ui.reset();
     EXPECT_FALSE(ui.visible());
