@@ -201,7 +201,6 @@ Bridge 会依次尝试已保存的 Switch；若它们均不可用，会回退到
 | --- | --- | --- | --- |
 | Enable Vulkan UI | `vulkan_ui` | `enabled` | Vulkan UI 唯一总控；关闭后跳过全部 Vulkan UI 渲染和 HDMI RX 合成。 |
 | Profile HDMI RX and RKMPP Latency | `rkmpp_profile` | `disabled` | 采集 HDMI RX、RGA、MPP、封包和发送阶段的有界延迟统计，并周期性写入日志。 |
-| Show RKMPP Latency Overlay | `rkmpp_profile_overlay` | `disabled` | 把最新统计通过 MPP OSD 烧录到 Moonlight 画面；同时启用统计采集。 |
 | RKMPP Low-Delay Experiment | `rkmpp_low_delay` | `disabled` | 启用 MPP low-delay 实验配置。现有 A/B 没有证明它优于默认值，因此保持关闭。 |
 | Disable RKMPP Re-encode Experiment | `rkmpp_disable_reencode` | `disabled` | 将 MPP rate-control 重编码次数设为零。现有 A/B 的尾延迟更差，因此保持关闭。 |
 
@@ -213,7 +212,6 @@ capture = hdmirx
 encoder = rkmpp
 vulkan_ui = enabled
 rkmpp_profile = enabled
-rkmpp_profile_overlay = enabled
 rkmpp_low_delay = disabled
 rkmpp_disable_reencode = disabled
 ~~~
@@ -223,8 +221,8 @@ rkmpp_disable_reencode = disabled
 `vulkan_ui` 是 Vulkan UI 的唯一总控，默认启用。UI 初始隐藏；按住
 先按住 `Start`，再点按 `Back/Select` 即可立即打开或关闭，触发后需要完全释放组合键。Start
 会先作为 UI 修饰键被截获；如果没有继续按 Select，松开 Start 时会向当前应用补发一次普通点击。
-Dear ImGui 通过官方 Vulkan renderer backend 在 960x180 的 optimal-tiled BGR image 中绘制
-当前诊断页面。BGR888 直通时，Vulkan 按 capture generation 与 slot 缓存 buffer import，并把
+Dear ImGui 通过官方 Vulkan renderer backend 在按输出分辨率和 UI 大小档位自适应的 BGR surface 中绘制
+当前页面。BGR888 直通时，Vulkan 按 capture generation 与 slot 缓存 buffer import，并把
 面板直接 copy 到当前 HDMI RX DMA-BUF 底部居中、距下边缘 32 像素的 ROI；这条路径不经过
 RGA，也不做 CPU 像素复制。视频本身已进入 RGA fallback 时，Vulkan 才把变化后的面板发布到
 共享 BGR DMA-BUF，再由 RGA 转换并覆盖 NV12 target。页面状态不变时不会重复提交 ImGui
@@ -234,13 +232,12 @@ RGA，也不做 CPU 像素复制。视频本身已进入 RGA fallback 时，Vulk
 vulkan_ui = enabled
 ~~~
 
-Gate 4 已通过真实 4K HDMI RX/Moonlight 画面和 4 个 capture slot 连续轮转验证。阶段 5
-也已通过真实 Moonlight 画面复验：首个会话能显示，页面方向、文字和横向布局均正常。
-当前可见内容已经由 ImGui 绘制，但仍只是三个状态项组成的诊断页，不代表设置项、动作按钮
-等完整 ImGui UI 已完成。打开 UI 的手柄是 owner；UI 可见时全部手柄输入都会被截获，只有
-owner 能用 D-pad 或左摇杆移动三项焦点。A 与 Back 当前只产生控制器导航事件，尚未绑定
-Sunshine action。owner 断开或输入状态重置会关闭 UI 并执行中立状态清理。Vulkan 初始化、
-模型校验、Vulkan DMA-BUF import/copy 或 fallback RGA 失败时，Sunshine 会在当前会话中关闭 UI 并继续基本编码。
+打开 UI 的手柄是 owner；UI 可见时全部手柄输入都会被截获，只有 owner 能用 D-pad 或左摇杆
+移动焦点，A 进入或确认，Back 返回或关闭。Profile 使用较矮的固定视窗，平均 Timeline、最新帧
+和 completed-window 指标可以上下滚动；Event 名称前的色块与对应时间条同色。owner 断开或输入
+状态重置会关闭 UI 并执行中立状态清理。切换 UI 大小会在新 surface 全部创建成功后才替换当前
+surface；失败时保留最后可用页面。其他 Vulkan 初始化、模型校验、DMA-BUF import/copy 或
+fallback RGA 失败时，Sunshine 会在当前会话中关闭 UI 并继续基本编码。
 若需临时绕过所有 Vulkan UI 路径，可将唯一总控设置为 `vulkan_ui = disabled`。
 
 ## RGA 视频缩放与格式转换

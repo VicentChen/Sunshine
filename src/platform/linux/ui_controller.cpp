@@ -182,11 +182,23 @@ namespace platf::ui {
       if (page_ == page_e::main_menu) {
         focus_ = static_cast<std::uint8_t>((focus_ + item_count_ - 1U) % item_count_);
         ++revision_;
+      } else if (page_ == page_e::ui_size) {
+        ui_size_focus_ = static_cast<std::uint8_t>((ui_size_focus_ + ui_size_item_count_ - 1U) % ui_size_item_count_);
+        ++revision_;
+      } else if (page_ == page_e::profile && profile_scroll_steps_ != 0) {
+        --profile_scroll_steps_;
+        ++revision_;
       }
     } else if ((pressed & navigation_down) != 0) {
       result.navigation = navigation_e::down;
       if (page_ == page_e::main_menu) {
         focus_ = static_cast<std::uint8_t>((focus_ + 1U) % item_count_);
+        ++revision_;
+      } else if (page_ == page_e::ui_size) {
+        ui_size_focus_ = static_cast<std::uint8_t>((ui_size_focus_ + 1U) % ui_size_item_count_);
+        ++revision_;
+      } else if (page_ == page_e::profile && profile_scroll_steps_ < profile_scroll_step_limit) {
+        ++profile_scroll_steps_;
         ++revision_;
       }
     } else if ((pressed & navigation_left) != 0) {
@@ -201,6 +213,11 @@ namespace platf::ui {
           ++revision_;
         } else if (focus_ == 1) {
           page_ = page_e::profile;
+          profile_scroll_steps_ = 0;
+          ++revision_;
+        } else if (focus_ == 2) {
+          page_ = page_e::ui_size;
+          ui_size_focus_ = static_cast<std::uint8_t>(ui_size_);
           ++revision_;
         } else {
           visible_ = false;
@@ -211,6 +228,12 @@ namespace platf::ui {
           result.visibility_changed = true;
           result.visible = false;
           result.action = action_e::close_modal;
+        }
+      } else if (page_ == page_e::ui_size) {
+        const auto selected = static_cast<ui_size_e>(ui_size_focus_);
+        if (ui_size_ != selected) {
+          ui_size_ = selected;
+          ++revision_;
         }
       }
     } else if ((pressed & navigation_back) != 0) {
@@ -273,6 +296,7 @@ namespace platf::ui {
     release_controller_.reset();
     release_chord_ = 0;
     page_ = page_e::main_menu;
+    profile_scroll_steps_ = 0;
     if (visible_) {
       visible_ = false;
       ++revision_;
@@ -283,7 +307,18 @@ namespace platf::ui {
     std::lock_guard lock {mutex_};
     const bool automatic = connection_initialized_ && !connection_settled_;
     const auto page = visible_ || !automatic ? page_ : page_e::connection_status;
-    return {visible_ || automatic, visible_, page, focus_, connection_, profile_, revision_};
+    return {
+      .visible = visible_ || automatic,
+      .modal = visible_,
+      .page = page,
+      .focus = focus_,
+      .connection = connection_,
+      .profile = profile_,
+      .ui_size = ui_size_,
+      .ui_size_focus = ui_size_focus_,
+      .profile_scroll_steps = profile_scroll_steps_,
+      .revision = revision_
+    };
   }
 
   void controller_t::update_connection(connection_status_t status, const clock_t::time_point now) {

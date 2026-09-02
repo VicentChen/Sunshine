@@ -4,8 +4,6 @@
  */
 #ifdef SUNSHINE_BUILD_RKMPP
 
-  #include <algorithm>
-  #include <array>
   #include <gtest/gtest.h>
   #include <limits>
   #include <src/platform/linux/rkmpp.h>
@@ -200,48 +198,6 @@ namespace {
     EXPECT_TRUE(platf::rkmpp::detail::output_is_idr(true, h264_idr.data(), h264_idr.size(), platf::rkmpp::codec_e::h264));
     EXPECT_TRUE(platf::rkmpp::detail::output_is_idr(true, h265_idr.data(), h265_idr.size(), platf::rkmpp::codec_e::h265));
     EXPECT_FALSE(platf::rkmpp::detail::output_is_idr(true, non_idr.data(), non_idr.size(), platf::rkmpp::codec_e::h264));
-  }
-
-  TEST(RkmppOsdRegion, ValidatesMacroblockAlignmentBoundsAndStorage) {
-    std::array<std::uint8_t, 256U * 64U> pixels {};
-    auto region = platf::rkmpp::osd_region_t {0, 0, 256, 64, pixels};
-    EXPECT_EQ(platf::rkmpp::validate_osd_region(region, 1920, 1080), platf::rkmpp::osd_region_status_e::ok);
-
-    region.x = 1;
-    EXPECT_EQ(platf::rkmpp::validate_osd_region(region, 1920, 1080), platf::rkmpp::osd_region_status_e::unaligned);
-    region.x = 1792;
-    EXPECT_EQ(platf::rkmpp::validate_osd_region(region, 1920, 1080), platf::rkmpp::osd_region_status_e::outside_frame);
-    region = {0, 0, 0, 64, {}};
-    EXPECT_EQ(platf::rkmpp::validate_osd_region(region, 1920, 1080), platf::rkmpp::osd_region_status_e::empty);
-    region = {0, 0, 256, 64, std::span<const std::uint8_t> {pixels}.first(pixels.size() - 1U)};
-    EXPECT_EQ(platf::rkmpp::validate_osd_region(region, 1920, 1080), platf::rkmpp::osd_region_status_e::size_mismatch);
-  }
-
-  TEST(RkmppOsdBitmap, RendersWaitingAndSnapshotTextIntoFixedStorage) {
-    platf::rkmpp::frame_profile_overlay_bitmap_t bitmap;
-    EXPECT_EQ(bitmap.pixels().size(), static_cast<std::size_t>(platf::rkmpp::frame_profile_overlay_bitmap_t::width) * platf::rkmpp::frame_profile_overlay_bitmap_t::height);
-    EXPECT_GT(std::count(bitmap.pixels().begin(), bitmap.pixels().end(), std::uint8_t {0}), 100);
-    EXPECT_GT(std::count(bitmap.pixels().begin(), bitmap.pixels().end(), std::uint8_t {7}), 0);
-
-    bitmap.render_status("XBOX REMOTE PLAY", "AUTHENTICATING");
-    EXPECT_GT(std::count(bitmap.pixels().begin(), bitmap.pixels().end(), std::uint8_t {7}), 0);
-    EXPECT_GT(std::count(bitmap.pixels().begin(), bitmap.pixels().end(), std::uint8_t {5}), 0);
-
-    video::frame_profile_snapshot_t snapshot;
-    snapshot.captured_frames = 300;
-    snapshot.hdmirx_width = 1920;
-    snapshot.hdmirx_height = 1080;
-    snapshot.moonlight_width = 1920;
-    snapshot.moonlight_height = 1080;
-    for (auto &metric : snapshot.metrics) {
-      metric.count = 300;
-      metric.p50_us = 1'000;
-      metric.p95_us = 2'000;
-      metric.p99_us = 3'000;
-    }
-    bitmap.render(snapshot);
-    EXPECT_GT(std::count(bitmap.pixels().begin(), bitmap.pixels().end(), std::uint8_t {7}), 100);
-    EXPECT_GT(std::count(bitmap.pixels().begin(), bitmap.pixels().end(), std::uint8_t {5}), 0);
   }
 
   TEST(RkmppInputFrame, HolderKeepsProducerAliveUntilSynchronousConsumerDropsItsCopy) {

@@ -20,6 +20,7 @@ namespace {
   using navigation_e = platf::ui::navigation_e;
   using action_e = platf::ui::action_e;
   using page_e = platf::ui::page_e;
+  using ui_size_e = platf::ui::ui_size_e;
   constexpr std::uint32_t start_back = platf::START | platf::BACK;
 
   /** @brief Send one test controller state at an offset from the zero epoch. */
@@ -112,11 +113,11 @@ namespace {
     EXPECT_TRUE(update(ui, 2, 4000ms, platf::A).consume);
     EXPECT_EQ(update(ui, 2, 4001ms, platf::A).navigation, navigation_e::none);
     EXPECT_EQ(update(ui, 1, 4100ms, platf::DPAD_UP).navigation, navigation_e::up);
-    EXPECT_EQ(ui.snapshot().focus, 2);
+    EXPECT_EQ(ui.snapshot().focus, 3);
     EXPECT_EQ(update(ui, 1, 4101ms, platf::DPAD_UP).navigation, navigation_e::none);
     EXPECT_EQ(update(ui, 1, 4102ms).navigation, navigation_e::none);
     EXPECT_EQ(update(ui, 1, 4103ms, platf::DPAD_RIGHT).navigation, navigation_e::right);
-    EXPECT_EQ(ui.snapshot().focus, 2);
+    EXPECT_EQ(ui.snapshot().focus, 3);
     EXPECT_EQ(update(ui, 1, 4104ms).navigation, navigation_e::none);
     EXPECT_EQ(update(ui, 1, 4105ms, platf::DPAD_DOWN).navigation, navigation_e::down);
     EXPECT_EQ(ui.snapshot().focus, 0);
@@ -130,7 +131,7 @@ namespace {
     EXPECT_EQ(ui.snapshot().page, page_e::main_menu);
   }
 
-  TEST(UiController, MainMenuOpensPagesAndExitActionClosesModal) {
+  TEST(UiController, MainMenuOpensPagesSizeSettingsAndExitActionClosesModal) {
     platf::ui::controller_t ui;
     open(ui);
 
@@ -150,7 +151,23 @@ namespace {
     EXPECT_EQ(ui.snapshot().focus, 2);
     EXPECT_EQ(update(ui, 0, 4007ms).navigation, navigation_e::none);
 
-    const auto closed = update(ui, 0, 4008ms, platf::A);
+    EXPECT_EQ(update(ui, 0, 4008ms, platf::A).navigation, navigation_e::confirm);
+    ASSERT_EQ(ui.snapshot().page, page_e::ui_size);
+    EXPECT_EQ(ui.snapshot().ui_size, ui_size_e::standard);
+    EXPECT_EQ(ui.snapshot().ui_size_focus, 1);
+    EXPECT_EQ(update(ui, 0, 4009ms, platf::DPAD_DOWN).navigation, navigation_e::down);
+    EXPECT_EQ(ui.snapshot().ui_size_focus, 2);
+    EXPECT_EQ(update(ui, 0, 4010ms).navigation, navigation_e::none);
+    EXPECT_EQ(update(ui, 0, 4011ms, platf::A).navigation, navigation_e::confirm);
+    EXPECT_EQ(ui.snapshot().ui_size, ui_size_e::large);
+    EXPECT_EQ(update(ui, 0, 4012ms, platf::BACK).navigation, navigation_e::back);
+    EXPECT_EQ(ui.snapshot().page, page_e::main_menu);
+    EXPECT_EQ(update(ui, 0, 4013ms).navigation, navigation_e::none);
+    EXPECT_EQ(update(ui, 0, 4014ms, platf::DPAD_DOWN).navigation, navigation_e::down);
+    EXPECT_EQ(ui.snapshot().focus, 3);
+    EXPECT_EQ(update(ui, 0, 4015ms).navigation, navigation_e::none);
+
+    const auto closed = update(ui, 0, 4016ms, platf::A);
     EXPECT_EQ(closed.navigation, navigation_e::confirm);
     EXPECT_EQ(closed.action, action_e::close_modal);
     EXPECT_TRUE(closed.visibility_changed);
@@ -250,12 +267,7 @@ namespace {
     EXPECT_EQ(update(ui, 0, 4000ms, platf::A).navigation, navigation_e::confirm);
     ASSERT_EQ(ui.snapshot().page, page_e::connection_status);
 
-    ui.update_connection({
-      .video_state = "streaming_direct",
-      .gamepad_state = "ready",
-      .video_ready = true,
-      .gamepad_ready = true
-    });
+    ui.update_connection({.video_state = "streaming_direct", .gamepad_state = "ready", .video_ready = true, .gamepad_ready = true});
     EXPECT_TRUE(ui.snapshot().visible);
     EXPECT_TRUE(ui.snapshot().modal);
     EXPECT_EQ(ui.snapshot().page, page_e::connection_status);
@@ -299,6 +311,36 @@ namespace {
     EXPECT_EQ(ui.snapshot().profile.timeline.frames[0].frame_index, 17);
   }
 
+  TEST(UiController, ProfileUsesBoundedVerticalControllerScrolling) {
+    platf::ui::controller_t ui;
+    open(ui);
+    EXPECT_EQ(update(ui, 0, 4000ms, platf::DPAD_DOWN).navigation, navigation_e::down);
+    EXPECT_EQ(update(ui, 0, 4001ms).navigation, navigation_e::none);
+    EXPECT_EQ(update(ui, 0, 4002ms, platf::A).navigation, navigation_e::confirm);
+    ASSERT_EQ(ui.snapshot().page, page_e::profile);
+    EXPECT_EQ(ui.snapshot().profile_scroll_steps, 0U);
+
+    const auto initial_revision = ui.snapshot().revision;
+    EXPECT_EQ(update(ui, 0, 4003ms).navigation, navigation_e::none);
+    EXPECT_EQ(update(ui, 0, 4004ms, platf::DPAD_DOWN).navigation, navigation_e::down);
+    EXPECT_EQ(ui.snapshot().profile_scroll_steps, 1U);
+    EXPECT_GT(ui.snapshot().revision, initial_revision);
+    EXPECT_EQ(update(ui, 0, 4005ms).navigation, navigation_e::none);
+    EXPECT_EQ(update(ui, 0, 4006ms, platf::DPAD_UP).navigation, navigation_e::up);
+    EXPECT_EQ(ui.snapshot().profile_scroll_steps, 0U);
+
+    EXPECT_EQ(update(ui, 0, 4007ms).navigation, navigation_e::none);
+    EXPECT_EQ(update(ui, 0, 4008ms, platf::DPAD_UP).navigation, navigation_e::up);
+    EXPECT_EQ(ui.snapshot().profile_scroll_steps, 0U);
+
+    for (std::uint32_t index = 0; index < platf::ui::profile_scroll_step_limit + 2U; ++index) {
+      const auto offset = std::chrono::milliseconds {5000 + static_cast<int>(index) * 2};
+      EXPECT_EQ(update(ui, 0, offset).navigation, navigation_e::none);
+      EXPECT_EQ(update(ui, 0, offset + 1ms, platf::DPAD_DOWN).navigation, navigation_e::down);
+    }
+    EXPECT_EQ(ui.snapshot().profile_scroll_steps, platf::ui::profile_scroll_step_limit);
+  }
+
   TEST(UiController, VerticalStickUsesHysteresisWhileHorizontalNavigationKeepsFocus) {
     platf::ui::controller_t ui;
     open(ui);
@@ -313,7 +355,7 @@ namespace {
     EXPECT_EQ(update(ui, 0, 4003ms, 0, 17000, 0).navigation, navigation_e::right);
     EXPECT_EQ(ui.snapshot().focus, 0);
     EXPECT_EQ(update(ui, 0, 4004ms, 0, 0, 17000).navigation, navigation_e::up);
-    EXPECT_EQ(ui.snapshot().focus, 2);
+    EXPECT_EQ(ui.snapshot().focus, 3);
     EXPECT_GT(ui.snapshot().revision, initial.revision);
   }
 

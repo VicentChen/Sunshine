@@ -30,10 +30,20 @@ namespace platf::ui {
 
   /** @brief Modal pages rendered by the RKMPP Vulkan UI. */
   enum class page_e {
-    main_menu,  ///< Main menu containing the three first-version entries.
+    main_menu,  ///< Main menu containing the four first-version entries.
     connection_status,  ///< Read-only connection status page.
-    profile  ///< Read-only frame profile page.
+    profile,  ///< Read-only frame profile page.
+    ui_size  ///< User-selectable UI size page.
   };
+
+  /** @brief User-selectable UI scale while preserving output-resolution adaptation. */
+  enum class ui_size_e : std::uint8_t {
+    compact,  ///< 85% of the resolution-adaptive baseline.
+    standard,  ///< 100% of the resolution-adaptive baseline.
+    large  ///< 120% of the resolution-adaptive baseline.
+  };
+
+  inline constexpr std::uint16_t profile_scroll_step_limit = 32;  ///< Maximum controller-selected Profile scroll step.
 
   /** @brief Explicit action requested by one modal UI update. */
   enum class action_e {
@@ -49,6 +59,7 @@ namespace platf::ui {
     std::string failure_kind;  ///< Fixed selected-output failure policy.
     std::uint32_t moonlight_width {};  ///< Requested Moonlight video width.
     std::uint32_t moonlight_height {};  ///< Requested Moonlight video height.
+    std::uint32_t moonlight_fps_x100 {};  ///< Requested Moonlight video rate in hundredths of a frame per second.
     std::uint32_t input_width {};  ///< Current HDMI input width, or zero when unknown.
     std::uint32_t input_height {};  ///< Current HDMI input height, or zero when unknown.
     bool video_ready {};  ///< HDMI RX is streaming direct or through RGA.
@@ -131,9 +142,12 @@ namespace platf::ui {
     bool visible {};  ///< Whether either automatic or modal UI should be composed.
     bool modal {};  ///< Whether a controller-owned modal page is open.
     page_e page {page_e::main_menu};  ///< Page currently presented by the modal UI.
-    std::uint8_t focus {};  ///< Focused item in the three-entry main menu.
+    std::uint8_t focus {};  ///< Focused item in the four-entry main menu.
     connection_status_t connection;  ///< Sanitized readiness data for the connection page.
     profile_status_t profile;  ///< Latest completed-window metrics for the Profile page.
+    ui_size_e ui_size {ui_size_e::standard};  ///< Current user-selected size tier.
+    std::uint8_t ui_size_focus {static_cast<std::uint8_t>(ui_size_e::standard)};  ///< Focused size tier on the settings page.
+    std::uint16_t profile_scroll_steps {};  ///< Controller-selected vertical offset for the scrollable Profile viewport.
     std::uint64_t revision {1};  ///< Monotonic render revision.
   };
 
@@ -206,7 +220,8 @@ namespace platf::ui {
     static constexpr std::chrono::seconds ready_hold_time_ {3};  ///< Stable full-link interval before automatic UI dismissal.
     static constexpr std::int16_t axis_press_ = 16000;  ///< Analog navigation press threshold.
     static constexpr std::int16_t axis_release_ = 8000;  ///< Analog navigation release threshold.
-    static constexpr std::uint8_t item_count_ = 3;  ///< Items in the first-version main menu.
+    static constexpr std::uint8_t item_count_ = 4;  ///< Items in the first-version main menu.
+    static constexpr std::uint8_t ui_size_item_count_ = 3;  ///< Available UI size tiers.
 
     /** @brief Convert one analog axis into a stable negative, neutral, or positive direction. */
     static std::int8_t axis_direction(std::int16_t value, std::int8_t previous) noexcept;
@@ -222,6 +237,9 @@ namespace platf::ui {
     bool visible_ {};  ///< Current modal visibility.
     page_e page_ {page_e::main_menu};  ///< Current modal page.
     std::uint8_t focus_ {};  ///< Focused item in the first-version main menu.
+    ui_size_e ui_size_ {ui_size_e::standard};  ///< User-selected resolution-relative size tier.
+    std::uint8_t ui_size_focus_ {static_cast<std::uint8_t>(ui_size_e::standard)};  ///< Focused UI size tier.
+    std::uint16_t profile_scroll_steps_ {};  ///< Current controller-selected Profile scroll step.
     connection_status_t connection_;  ///< Latest sanitized connection state.
     profile_status_t profile_;  ///< Latest completed profile window.
     bool connection_initialized_ {};  ///< Whether a video frame has published connection state.

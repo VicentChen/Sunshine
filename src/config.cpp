@@ -793,7 +793,6 @@ namespace config {
     0,  // max_bitrate
     0,  // minimum_fps_target (0 = framerate)
     false,  // rkmpp_profile
-    false,  // rkmpp_profile_overlay
     false,  // rkmpp_low_delay
     false,  // rkmpp_disable_reencode
     true  // vulkan_ui
@@ -1707,13 +1706,9 @@ namespace config {
     int_f(vars, "max_bitrate", video.max_bitrate);
     double_between_f(vars, "minimum_fps_target", video.minimum_fps_target, {0.0, 1000.0});
     bool_f(vars, "rkmpp_profile", video.rkmpp_profile);
-    bool_f(vars, "rkmpp_profile_overlay", video.rkmpp_profile_overlay);
     bool_f(vars, "rkmpp_low_delay", video.rkmpp_low_delay);
     bool_f(vars, "rkmpp_disable_reencode", video.rkmpp_disable_reencode);
     bool_f(vars, "vulkan_ui", video.vulkan_ui);
-    if (video.rkmpp_profile_overlay) {
-      video.rkmpp_profile = true;
-    }
 
     path_f(vars, "pkey", nvhttp.pkey);
     path_f(vars, "cert", nvhttp.cert);

@@ -408,8 +408,6 @@
     "vulkan_ui_desc": "Master switch for the RKMPP Vulkan UI system. Enabled by default; disabling it bypasses all Vulkan UI rendering and HDMI RX composition.",
     "rkmpp_profile": "Profile HDMI RX and RKMPP Latency",
     "rkmpp_profile_desc": "Collect bounded per-frame host latency statistics for HDMI RX capture, optional RGA conversion, RKMPP encoding, packetization, and network submission. The HDMI RX timestamp is currently end-of-frame, so the first metric is RX EOF to dequeue rather than complete signal-input latency.",
-    "rkmpp_profile_overlay": "Show RKMPP Latency Overlay",
-    "rkmpp_profile_overlay_desc": "Burn the latest host latency profile into the encoded video so it is visible in Moonlight. Enabling this option also enables RKMPP profiling.",
     "rkmpp_low_delay": "RKMPP Low-Delay Experiment",
     "rkmpp_low_delay_desc": "Enable the RKMPP base low-delay setting for a controlled latency comparison. Disabled by default.",
     "rkmpp_disable_reencode": "Disable RKMPP Re-encode Experiment",

@@ -27,13 +27,6 @@ const config = ref(props.config)
     ></Checkbox>
 
     <Checkbox class="mb-3"
-              id="rkmpp_profile_overlay"
-              locale-prefix="config"
-              v-model="config.rkmpp_profile_overlay"
-              default="false"
-    ></Checkbox>
-
-    <Checkbox class="mb-3"
               id="rkmpp_low_delay"
               locale-prefix="config"
               v-model="config.rkmpp_low_delay"

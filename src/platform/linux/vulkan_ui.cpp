@@ -161,6 +161,32 @@ namespace platf::vulkan_ui {
              color.alpha == 1.0F;
     }
 
+    /** @brief Return the relative multiplier for one user-visible UI size tier. */
+    float ui_size_multiplier(platf::ui::ui_size_e size) noexcept {
+      switch (size) {
+        case platf::ui::ui_size_e::compact:
+          return 0.85F;
+        case platf::ui::ui_size_e::standard:
+          return 1.0F;
+        case platf::ui::ui_size_e::large:
+          return 1.20F;
+      }
+      return 1.0F;
+    }
+
+    /** @brief Return the stable label for one user-visible UI size tier. */
+    const char *ui_size_label(platf::ui::ui_size_e size) noexcept {
+      switch (size) {
+        case platf::ui::ui_size_e::compact:
+          return "COMPACT  85%";
+        case platf::ui::ui_size_e::standard:
+          return "STANDARD  100%";
+        case platf::ui::ui_size_e::large:
+          return "LARGE  120%";
+      }
+      return "STANDARD  100%";
+    }
+
     /** @brief Draw one opaque full-width menu card. */
     void draw_menu_card(const char *id, const char *label, const char *description, bool focused, float height) {
       const auto card = focused ? ImVec4 {0.055F, 0.330F, 0.720F, 1.0F} : ImVec4 {0.075F, 0.095F, 0.130F, 1.0F};
@@ -206,6 +232,19 @@ namespace platf::vulkan_ui {
      */
     std::string resolution_text(std::uint32_t width, std::uint32_t height) {
       return width != 0 && height != 0 ? std::to_string(width) + "x" + std::to_string(height) : "UNKNOWN";
+    }
+
+    /** @brief Format a requested Moonlight frame rate, retaining fractional rates such as 59.94 FPS. */
+    std::string frame_rate_text(std::uint32_t frames_per_second_x100) {
+      if (frames_per_second_x100 == 0) {
+        return "UNKNOWN";
+      }
+      if (frames_per_second_x100 % 100U == 0) {
+        return std::to_string(frames_per_second_x100 / 100U) + " FPS";
+      }
+      char text[32] {};
+      std::snprintf(text, sizeof(text), "%.2f FPS", frames_per_second_x100 / 100.0);
+      return text;
     }
 
     /**
@@ -261,7 +300,88 @@ namespace platf::vulkan_ui {
       return colors[static_cast<std::size_t>(stage)];
     }
 
-    /** @brief Draw recent completed spans on stable resource lanes. */
+    /** @brief One event label placed below its Timeline bar without overlapping another label. */
+    struct timeline_annotation_t {
+      std::size_t bar_index {};  ///< Index of the bar described by this annotation.
+      std::uint32_t row {};  ///< Zero-based non-overlapping label row within the lane.
+      float left {};  ///< Screen-space left edge of the label.
+      float width {};  ///< Screen-space width of the color marker and label.
+      std::string text;  ///< Complete Event name.
+    };
+
+    /** @brief Label rows and annotations derived for one Timeline section. */
+    struct timeline_annotation_layout_t {
+      std::array<std::uint32_t, static_cast<std::size_t>(video::frame_profile_timeline_lane_e::count)> row_counts {};  ///< Required label rows per lane.
+      std::vector<timeline_annotation_t> annotations;  ///< Event labels in bar-index order.
+    };
+
+    /**
+     * @brief Format one Timeline event label without repeating axis-relative timestamps.
+     *
+     * @param bar Event geometry carrying the stage name.
+     * @return Complete event label.
+     */
+    std::string timeline_annotation_text(const timeline_bar_t &bar) {
+      return std::string {video::frame_profile_timeline_stage_name(bar.stage)};
+    }
+
+    /**
+     * @brief Assign colliding Timeline labels to additional rows while keeping each label below its event.
+     *
+     * @param bars Event bars to annotate.
+     * @param bar_count Number of valid entries in @p bars.
+     * @param chart_left Screen-space left edge of the Timeline chart.
+     * @param chart_width Screen-space width available to labels.
+     * @param gap Minimum horizontal gap between labels sharing one row.
+     * @param font_size Pixel size used to measure and render Event labels.
+     * @return Non-overlapping per-lane annotation layout.
+     */
+    timeline_annotation_layout_t make_timeline_annotation_layout(
+      const timeline_bar_t *bars,
+      std::size_t bar_count,
+      float chart_left,
+      float chart_width,
+      float gap,
+      float font_size
+    ) {
+      timeline_annotation_layout_t layout;
+      std::array<std::vector<std::size_t>, static_cast<std::size_t>(video::frame_profile_timeline_lane_e::count)> lane_bars;
+      for (std::size_t index = 0; index < bar_count; ++index) {
+        lane_bars[static_cast<std::size_t>(bars[index].lane)].push_back(index);
+      }
+      for (auto &indices : lane_bars) {
+        std::sort(indices.begin(), indices.end(), [bars](std::size_t left, std::size_t right) {
+          return bars[left].left + bars[left].right < bars[right].left + bars[right].right;
+        });
+      }
+      const auto chart_right = chart_left + chart_width;
+      const auto marker_size = font_size * 0.65F;
+      const auto marker_gap = font_size * 0.30F;
+      for (std::size_t lane = 0; lane < lane_bars.size(); ++lane) {
+        for (const auto bar_index : lane_bars[lane]) {
+          auto text = timeline_annotation_text(bars[bar_index]);
+          const auto font_scale = font_size / ImGui::GetFontSize();
+          const auto width = std::min(marker_size + marker_gap + ImGui::CalcTextSize(text.c_str()).x * font_scale, chart_width);
+          const auto anchor = chart_left + chart_width * (bars[bar_index].left + bars[bar_index].right) * 0.5F;
+          const auto left = std::clamp(anchor - width * 0.5F, chart_left, chart_right - width);
+          std::uint32_t row = 0;
+          for (;; ++row) {
+            const auto overlaps = std::any_of(layout.annotations.begin(), layout.annotations.end(), [&](const timeline_annotation_t &placed) {
+              return static_cast<std::size_t>(bars[placed.bar_index].lane) == lane && placed.row == row &&
+                     left < placed.left + placed.width + gap && placed.left < left + width + gap;
+            });
+            if (!overlaps) {
+              break;
+            }
+          }
+          layout.row_counts[lane] = std::max(layout.row_counts[lane], row + 1U);
+          layout.annotations.push_back({bar_index, row, left, width, std::move(text)});
+        }
+      }
+      return layout;
+    }
+
+    /** @brief Draw the RX EOF-aligned average first and one latest completed frame second. */
     void draw_profile_timeline(const platf::ui::profile_status_t &profile, const layout_metrics_t &metrics) {
       const auto geometry = make_timeline_geometry(profile.timeline);
       const auto origin = ImGui::GetCursorScreenPos();
@@ -269,68 +389,135 @@ namespace platf::vulkan_ui {
       constexpr std::array lane_names {"CAPTURE", "RGA", "VULKAN UI", "MPP", "NETWORK"};
       const auto chart_left = origin.x + metrics.timeline_label_width;
       const auto chart_width = std::max(1.0F, available.x - metrics.timeline_label_width);
-      const auto chart_top = origin.y + metrics.timeline_axis_height;
-      const auto lane_height = std::max(metrics.timeline_min_lane_height, (available.y - metrics.timeline_axis_height) / static_cast<float>(lane_names.size()));
-      const auto chart_height = lane_height * lane_names.size();
+      const auto section_gap = 18.0F * metrics.scale;
+      const auto title_height = metrics.body_font_pixels + 6.0F * metrics.scale;
+      const auto bar_band_height = metrics.body_font_pixels;
+      const auto annotation_font_size = std::max(18.0F, metrics.body_font_pixels * 0.8F);
+      const auto label_line_height = annotation_font_size + 4.0F * metrics.scale;
+      const auto label_gap = 12.0F * metrics.scale;
       auto *draw = ImGui::GetWindowDrawList();
 
-      for (std::size_t lane = 0; lane < lane_names.size(); ++lane) {
-        const auto top = chart_top + lane_height * static_cast<float>(lane);
-        draw->AddRectFilled(
-          {chart_left, top},
-          {chart_left + chart_width, top + lane_height - 1.0F},
-          lane % 2U == 0U ? IM_COL32(21, 29, 43, 255) : IM_COL32(25, 35, 51, 255)
-        );
-        draw->AddText({origin.x, top + 2.0F * metrics.scale}, IM_COL32(185, 202, 225, 255), lane_names[lane]);
-      }
-      for (int tick = 0; tick <= 4; ++tick) {
-        const auto ratio = static_cast<float>(tick) / 4.0F;
-        const auto x = chart_left + chart_width * ratio;
-        draw->AddLine({x, chart_top}, {x, chart_top + chart_height}, IM_COL32(78, 92, 112, 120));
-        const auto tick_us = geometry.view_start_us + static_cast<std::int64_t>((geometry.view_end_us - geometry.view_start_us) * ratio);
-        char label[32] {};
-        std::snprintf(label, sizeof(label), "%.0f ms", tick_us / 1000.0);
-        draw->AddText({x + 2.0F * metrics.scale, origin.y}, IM_COL32(145, 160, 180, 210), label);
-      }
-      const auto view_duration = std::max<std::int64_t>(1, geometry.view_end_us - geometry.view_start_us);
-      for (std::size_t index = 0; index < profile.timeline.frame_count; ++index) {
-        const auto &frame = profile.timeline.frames[index];
-        if (frame.origin_offset_us < geometry.view_start_us || frame.origin_offset_us > geometry.view_end_us) {
-          continue;
+      const auto marker_size = annotation_font_size * 0.65F;
+      const auto marker_gap = annotation_font_size * 0.30F;
+      const auto draw_section = [&](const char *title, const timeline_bar_t *bars, std::size_t bar_count, std::int64_t view_end_us, float top) {
+        const auto annotations = make_timeline_annotation_layout(bars, bar_count, chart_left, chart_width, label_gap, annotation_font_size);
+        std::array<float, lane_names.size()> lane_tops {};
+        std::array<float, lane_names.size()> lane_heights {};
+        const auto axis_top = top + title_height;
+        const auto chart_top = axis_top + metrics.timeline_axis_height;
+        auto chart_height = 0.0F;
+        for (std::size_t lane = 0; lane < lane_names.size(); ++lane) {
+          lane_tops[lane] = chart_top + chart_height;
+          lane_heights[lane] = bar_band_height + label_line_height * static_cast<float>(annotations.row_counts[lane]);
+          chart_height += lane_heights[lane];
         }
-        const auto ratio = static_cast<float>(frame.origin_offset_us - geometry.view_start_us) / static_cast<float>(view_duration);
-        const auto x = chart_left + chart_width * ratio;
-        draw->AddLine({x, chart_top}, {x, chart_top + chart_height}, IM_COL32(220, 230, 245, 85), 1.0F);
-      }
-      for (std::size_t index = 0; index < geometry.bar_count; ++index) {
-        const auto &bar = geometry.bars[index];
-        const auto lane = static_cast<std::size_t>(bar.lane);
-        const auto top = chart_top + lane_height * static_cast<float>(lane);
-        const auto half_height = std::max(5.0F * metrics.scale, (lane_height - 5.0F * metrics.scale) / 2.0F);
-        const auto track = static_cast<float>(static_cast<std::uint64_t>(bar.frame_index) & 1U);
-        const auto y0 = top + 2.0F * metrics.scale + track * half_height;
-        const auto y1 = std::min(top + lane_height - 2.0F * metrics.scale, y0 + half_height - metrics.scale);
-        const auto x0 = chart_left + chart_width * bar.left;
-        const auto x1 = std::max(x0 + 1.5F * metrics.scale, chart_left + chart_width * bar.right);
-        draw->AddRectFilled({x0, y0}, {x1, y1}, timeline_stage_color(bar.stage), 2.0F * metrics.scale);
-        if (bar.frame_index == geometry.latest_frame_index) {
-          draw->AddRect({x0, y0}, {x1, y1}, IM_COL32(245, 250, 255, 245), 2.0F * metrics.scale);
-        }
-        if (x1 - x0 >= 58.0F * metrics.scale) {
-          char label[64] {};
-          std::snprintf(
-            label,
-            sizeof(label),
-            "%.*s +%.1f-%.1f",
-            static_cast<int>(video::frame_profile_timeline_stage_name(bar.stage).size()),
-            video::frame_profile_timeline_stage_name(bar.stage).data(),
-            bar.start_us / 1000.0,
-            bar.end_us / 1000.0
+
+        draw->AddText({origin.x, top}, IM_COL32(210, 224, 243, 255), title);
+        for (std::size_t lane = 0; lane < lane_names.size(); ++lane) {
+          const auto lane_top = lane_tops[lane];
+          draw->AddRectFilled(
+            {chart_left, lane_top},
+            {chart_left + chart_width, lane_top + lane_heights[lane] - 1.0F},
+            lane % 2U == 0U ? IM_COL32(21, 29, 43, 255) : IM_COL32(25, 35, 51, 255)
           );
-          draw->AddText({x0 + 3.0F * metrics.scale, y0}, IM_COL32(250, 252, 255, 255), label);
+          draw->AddText({origin.x, lane_top + 2.0F * metrics.scale}, IM_COL32(185, 202, 225, 255), lane_names[lane]);
         }
+        for (int tick = 0; tick <= 4; ++tick) {
+          const auto ratio = static_cast<float>(tick) / 4.0F;
+          const auto x = chart_left + chart_width * ratio;
+          char label[32] {};
+          std::snprintf(label, sizeof(label), "+%.1f ms", view_end_us * ratio / 1000.0);
+          const auto label_width = ImGui::CalcTextSize(label).x;
+          const auto label_left = std::clamp(x + 2.0F * metrics.scale, chart_left, chart_left + chart_width - label_width);
+          draw->AddText({label_left, axis_top}, IM_COL32(145, 160, 180, 230), label);
+          draw->AddLine({x, chart_top}, {x, chart_top + chart_height}, IM_COL32(78, 92, 112, 120));
+        }
+        for (std::size_t index = 0; index < bar_count; ++index) {
+          const auto &bar = bars[index];
+          const auto lane = static_cast<std::size_t>(bar.lane);
+          const auto x0 = chart_left + chart_width * bar.left;
+          const auto x1 = std::max(x0 + 2.0F * metrics.scale, chart_left + chart_width * bar.right);
+          const auto y0 = lane_tops[lane] + 4.0F * metrics.scale;
+          const auto y1 = y0 + std::max(6.0F * metrics.scale, bar_band_height - 10.0F * metrics.scale);
+          draw->AddRectFilled({x0, y0}, {x1, y1}, timeline_stage_color(bar.stage), 2.0F * metrics.scale);
+          const auto annotation = std::find_if(annotations.annotations.begin(), annotations.annotations.end(), [index](const timeline_annotation_t &candidate) {
+            return candidate.bar_index == index;
+          });
+          if (annotation == annotations.annotations.end()) {
+            continue;
+          }
+          const auto anchor = chart_left + chart_width * (bar.left + bar.right) * 0.5F;
+          const auto label_y = lane_tops[lane] + bar_band_height + label_line_height * static_cast<float>(annotation->row);
+          draw->AddLine({anchor, y1}, {anchor, label_y - 2.0F * metrics.scale}, timeline_stage_color(bar.stage), 1.5F * metrics.scale);
+          const auto marker_top = label_y + (annotation_font_size - marker_size) * 0.5F;
+          draw->AddRectFilled(
+            {annotation->left, marker_top},
+            {annotation->left + marker_size, marker_top + marker_size},
+            timeline_stage_color(bar.stage),
+            2.0F * metrics.scale
+          );
+          draw->AddText(
+            ImGui::GetFont(),
+            annotation_font_size,
+            {annotation->left + marker_size + marker_gap, label_y},
+            IM_COL32(244, 248, 255, 255),
+            annotation->text.c_str()
+          );
+        }
+        return chart_top + chart_height;
+      };
+
+      char average_title[128] {};
+      std::snprintf(
+        average_title,
+        sizeof(average_title),
+        "AVERAGE FRAME  |  RX EOF RELATIVE  |  SOURCE: %u RECENT FRAMES",
+        geometry.frame_count
+      );
+      auto bottom = draw_section(
+        average_title,
+        geometry.average_bars.data(),
+        geometry.average_bar_count,
+        geometry.average_view_end_us,
+        origin.y
+      );
+      bottom = draw_section(
+        "LATEST FRAME  |  RX EOF RELATIVE",
+        geometry.bars.data(),
+        geometry.bar_count,
+        geometry.view_end_us,
+        bottom + section_gap
+      );
+      ImGui::Dummy({available.x, bottom - origin.y});
+    }
+
+    /** @brief Draw the completed-window percentile cards below the scrollable Timeline. */
+    void draw_profile_metric_cards(const platf::ui::profile_status_t &profile, const layout_metrics_t &metrics) {
+      if (!profile.available) {
+        return;
       }
-      ImGui::Dummy({available.x, metrics.timeline_axis_height + chart_height});
+      ImGui::Spacing();
+      ImGui::SeparatorText("WINDOW STATISTICS");
+      if (!ImGui::BeginTable("profile-metrics", 4, ImGuiTableFlags_SizingStretchSame)) {
+        return;
+      }
+      constexpr std::array labels {
+        "RX EOF-DQ",
+        "CAP QUEUE",
+        "RGA",
+        "MPP ENCODE",
+        "ENC QUEUE",
+        "PACKET-SEND",
+        "HOST-PACKET",
+        "HOST-SEND"
+      };
+      const auto card_height = metrics.body_font_pixels * 4.5F;
+      for (std::size_t index = 0; index < labels.size(); ++index) {
+        const auto description = profile_metric_text(profile.metrics[index]);
+        ImGui::TableNextColumn();
+        draw_menu_card(labels[index], labels[index], description.c_str(), false, card_height);
+      }
+      ImGui::EndTable();
     }
 
     /** @brief Build the current modal page entirely through Dear ImGui. */
@@ -356,7 +543,7 @@ namespace platf::vulkan_ui {
       if (model.page == platf::ui::page_e::profile && model.profile.timeline.frame_count != 0) {
         const auto &latest = model.profile.timeline.frames[model.profile.timeline.frame_count - 1U];
         ImGui::TextWrapped(
-          "Profile Timeline  FRAME %lld  RX EOF +0.0 ms  SEND +%.1f ms  SPANS %u  MISSING 0x%03x  INVALID 0x%03x",
+          "Profile Timeline  LATEST FRAME %lld  RX EOF +0.0 ms  SEND +%.1f ms\nEVENTS %u  MISSING 0x%03x  INVALID 0x%03x  |  UP/DOWN SCROLL",
           static_cast<long long>(latest.frame_index),
           latest.end_us / 1000.0,
           latest.span_count,
@@ -379,13 +566,18 @@ namespace platf::vulkan_ui {
         );
       } else {
         ImGui::PushFont(title_font, metrics.title_font_pixels);
-        ImGui::TextUnformatted(model.page == platf::ui::page_e::main_menu ? "Sunshine" : model.page == platf::ui::page_e::connection_status ? "Connection Status" : "Profile");
+        ImGui::TextUnformatted(
+          model.page == platf::ui::page_e::main_menu         ? "Sunshine" :
+          model.page == platf::ui::page_e::connection_status ? "Connection Status" :
+          model.page == platf::ui::page_e::profile           ? "Profile" :
+                                                               "UI Size"
+        );
         ImGui::PopFont();
       }
       ImGui::Separator();
       if (model.page == platf::ui::page_e::main_menu) {
-        constexpr std::array<const char *, 3> labels {"CONNECTION", "PROFILE", "EXIT UI"};
-        constexpr std::array<const char *, 3> descriptions {"VIEW STATUS", "VIEW METRICS", "CLOSE OVERLAY"};
+        constexpr std::array<const char *, 4> labels {"CONNECTION", "PROFILE", "UI SIZE", "EXIT UI"};
+        const std::array<const char *, 4> descriptions {"VIEW STATUS", "VIEW METRICS", ui_size_label(model.ui_size), "CLOSE OVERLAY"};
         const auto row_height = vertical_row_height(labels.size(), metrics);
         for (std::size_t index = 0; index < labels.size(); ++index) {
           draw_menu_card(labels[index], labels[index], descriptions[index], index == model.focus, row_height);
@@ -393,36 +585,47 @@ namespace platf::vulkan_ui {
       } else if (model.page == platf::ui::page_e::connection_status) {
         const auto &gamepad = gamepad_status_text(model.connection);
         const auto moonlight = resolution_text(model.connection.moonlight_width, model.connection.moonlight_height);
+        const auto frame_rate = frame_rate_text(model.connection.moonlight_fps_x100);
         const auto input = resolution_text(model.connection.input_width, model.connection.input_height);
-        const std::array labels {"VIDEO", "GAMEPAD", "MOONLIGHT", "HDMI INPUT"};
-        const std::array values {model.connection.video_state.c_str(), gamepad.c_str(), moonlight.c_str(), input.c_str()};
+        const std::array labels {"VIDEO", "GAMEPAD", "STREAM FPS", "MOONLIGHT", "HDMI INPUT"};
+        const std::array values {model.connection.video_state.c_str(), gamepad.c_str(), frame_rate.c_str(), moonlight.c_str(), input.c_str()};
         const auto row_height = vertical_row_height(labels.size(), metrics);
         for (std::size_t index = 0; index < labels.size(); ++index) {
           draw_status_row(labels[index], labels[index], values[index], row_height);
         }
-      } else if (model.profile.timeline.frame_count != 0) {
-        draw_profile_timeline(model.profile, metrics);
-      } else if (!model.profile.available) {
-        draw_menu_card("profile-waiting", "COLLECTING", "WAITING FOR FIRST 5S WINDOW", false, ImGui::GetContentRegionAvail().y);
-      } else if (ImGui::BeginTable("profile-metrics", 4, ImGuiTableFlags_SizingStretchSame)) {
-        constexpr std::array labels {
-          "RX EOF-DQ",
-          "CAP QUEUE",
-          "RGA",
-          "MPP ENCODE",
-          "ENC QUEUE",
-          "PACKET-SEND",
-          "HOST-PACKET",
-          "HOST-SEND"
+      } else if (model.page == platf::ui::page_e::ui_size) {
+        constexpr std::array<const char *, 3> labels {"COMPACT", "STANDARD", "LARGE"};
+        constexpr std::array<const char *, 3> descriptions {
+          "85%  MORE GAMEPLAY AREA",
+          "100%  BALANCED DEFAULT",
+          "120%  LARGER TEXT AND PANELS"
         };
-        const auto available_height = ImGui::GetContentRegionAvail().y;
-        const auto card_height = std::max(metrics.body_font_pixels * 2.75F, (available_height - metrics.item_spacing_y) / 2.0F);
+        const auto row_height = vertical_row_height(labels.size(), metrics);
         for (std::size_t index = 0; index < labels.size(); ++index) {
-          const auto description = profile_metric_text(model.profile.metrics[index]);
-          ImGui::TableNextColumn();
-          draw_menu_card(labels[index], labels[index], description.c_str(), false, card_height);
+          const auto selected = index == static_cast<std::size_t>(model.ui_size);
+          const auto description = selected ? std::string {descriptions[index]} + "  SELECTED" : descriptions[index];
+          draw_menu_card(labels[index], labels[index], description.c_str(), index == model.ui_size_focus, row_height);
         }
-        ImGui::EndTable();
+      } else {
+        const auto scroll_y = static_cast<float>(model.profile_scroll_steps) * metrics.body_font_pixels * 3.0F;
+        ImGui::SetNextWindowScroll({-1.0F, scroll_y});
+        const auto child_visible = ImGui::BeginChild(
+          "profile-scroll",
+          {0.0F, 0.0F},
+          ImGuiChildFlags_None,
+          ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_NoInputs
+        );
+        if (child_visible) {
+          if (model.profile.timeline.frame_count != 0) {
+            draw_profile_timeline(model.profile, metrics);
+            draw_profile_metric_cards(model.profile, metrics);
+          } else if (!model.profile.available) {
+            draw_menu_card("profile-waiting", "COLLECTING", "WAITING FOR FIRST 5S WINDOW", false, ImGui::GetContentRegionAvail().y);
+          } else {
+            draw_profile_metric_cards(model.profile, metrics);
+          }
+        }
+        ImGui::EndChild();
       }
       ImGui::End();
       ImGui::PopStyleVar(4);
@@ -482,60 +685,95 @@ namespace platf::vulkan_ui {
       return geometry;
     }
     const auto &latest = timeline.frames[timeline.frame_count - 1U];
-    const auto latest_end = latest.origin_offset_us + latest.end_us;
-    constexpr std::int64_t minimum_window_us = 100000;
-    geometry.view_end_us = std::max<std::int64_t>(minimum_window_us, latest_end);
-    geometry.view_start_us = std::max<std::int64_t>(0, geometry.view_end_us - std::max(minimum_window_us, latest.end_us));
+    constexpr std::int64_t minimum_axis_us = 1000;
+    geometry.frame_count = timeline.frame_count;
+    geometry.view_start_us = 0;
     geometry.latest_frame_index = latest.frame_index;
     geometry.latest_frame_end_us = latest.end_us;
-    const auto view_duration = std::max<std::int64_t>(1, geometry.view_end_us - geometry.view_start_us);
+    std::array<std::int64_t, timeline_geometry_t::bar_capacity> average_start_sum {};
+    std::array<std::int64_t, timeline_geometry_t::bar_capacity> average_duration_sum {};
+    std::array<std::uint32_t, timeline_geometry_t::bar_capacity> average_count {};
+    std::array<video::frame_profile_timeline_lane_e, timeline_geometry_t::bar_capacity> average_lane {};
 
     for (std::size_t frame_index = 0; frame_index < timeline.frame_count; ++frame_index) {
       const auto &frame = timeline.frames[frame_index];
       const auto span_count = std::min<std::size_t>(frame.span_count, frame.spans.size());
       for (std::size_t span_index = 0; span_index < span_count; ++span_index) {
         const auto &span = frame.spans[span_index];
-        const auto absolute_start = frame.origin_offset_us + span.start_us;
-        const auto absolute_end = frame.origin_offset_us + span.end_us;
-        if (absolute_end < geometry.view_start_us || absolute_start > geometry.view_end_us || geometry.bar_count == geometry.bars.size()) {
-          continue;
-        }
-        geometry.bars[geometry.bar_count++] = {
-          .stage = span.stage,
-          .lane = span.lane,
-          .frame_index = frame.frame_index,
-          .start_us = span.start_us,
-          .end_us = span.end_us,
-          .left = std::clamp(static_cast<float>(absolute_start - geometry.view_start_us) / static_cast<float>(view_duration), 0.0F, 1.0F),
-          .right = std::clamp(static_cast<float>(absolute_end - geometry.view_start_us) / static_cast<float>(view_duration), 0.0F, 1.0F)
-        };
+        const auto stage_index = static_cast<std::size_t>(span.stage);
+        average_start_sum[stage_index] += span.start_us;
+        average_duration_sum[stage_index] += span.end_us - span.start_us;
+        ++average_count[stage_index];
+        average_lane[stage_index] = span.lane;
       }
+    }
+    geometry.view_end_us = std::max(minimum_axis_us, latest.end_us);
+    const auto latest_span_count = std::min<std::size_t>(latest.span_count, latest.spans.size());
+    for (std::size_t span_index = 0; span_index < latest_span_count && geometry.bar_count < geometry.bars.size(); ++span_index) {
+      const auto &span = latest.spans[span_index];
+      geometry.view_end_us = std::max(geometry.view_end_us, span.end_us);
+      geometry.bars[geometry.bar_count++] = {
+        .stage = span.stage,
+        .lane = span.lane,
+        .frame_index = latest.frame_index,
+        .start_us = span.start_us,
+        .end_us = span.end_us
+      };
+    }
+    for (std::size_t index = 0; index < geometry.bar_count; ++index) {
+      auto &bar = geometry.bars[index];
+      bar.left = std::clamp(static_cast<float>(bar.start_us) / static_cast<float>(geometry.view_end_us), 0.0F, 1.0F);
+      bar.right = std::clamp(static_cast<float>(bar.end_us) / static_cast<float>(geometry.view_end_us), 0.0F, 1.0F);
+    }
+    for (std::size_t stage_index = 0; stage_index < average_count.size(); ++stage_index) {
+      if (average_count[stage_index] == 0 || geometry.average_bar_count == geometry.average_bars.size()) {
+        continue;
+      }
+      const auto count = static_cast<std::int64_t>(average_count[stage_index]);
+      const auto start_us = average_start_sum[stage_index] / count;
+      const auto end_us = start_us + average_duration_sum[stage_index] / count;
+      geometry.average_bars[geometry.average_bar_count++] = {
+        .stage = static_cast<video::frame_profile_timeline_stage_e>(stage_index),
+        .lane = average_lane[stage_index],
+        .start_us = start_us,
+        .end_us = end_us,
+        .sample_count = average_count[stage_index]
+      };
+      geometry.average_view_end_us = std::max(geometry.average_view_end_us, end_us);
+    }
+    geometry.average_view_end_us = std::max(minimum_axis_us, geometry.average_view_end_us);
+    for (std::size_t index = 0; index < geometry.average_bar_count; ++index) {
+      auto &bar = geometry.average_bars[index];
+      bar.left = std::clamp(static_cast<float>(bar.start_us) / static_cast<float>(geometry.average_view_end_us), 0.0F, 1.0F);
+      bar.right = std::clamp(static_cast<float>(bar.end_us) / static_cast<float>(geometry.average_view_end_us), 0.0F, 1.0F);
     }
     return geometry;
   }
 
-  layout_metrics_t make_layout_metrics(std::uint32_t output_width, std::uint32_t output_height) {
+  layout_metrics_t make_layout_metrics(std::uint32_t output_width, std::uint32_t output_height, const platf::ui::ui_size_e ui_size) {
     if (output_width == 0 || output_height == 0) {
       throw std::runtime_error("Vulkan UI output dimensions must be nonzero");
     }
-    const auto scale = std::min(
+    const auto output_scale = std::min(
       static_cast<float>(output_width) / 1920.0F,
       static_cast<float>(output_height) / 1080.0F
     );
-    if (!std::isfinite(scale) || 28.0F * scale < 18.0F) {
+    if (!std::isfinite(output_scale) || 28.0F * output_scale < 18.0F) {
       throw std::runtime_error("Vulkan UI output is too small for readable adaptive content");
     }
+    const auto scale = output_scale * ui_size_multiplier(ui_size);
     const auto even_pixels = [](float value) {
       const auto pixels = static_cast<std::uint32_t>(std::floor(value));
       return pixels & ~1U;
     };
+    const auto panel_margin = even_pixels(36.0F * scale);
     layout_metrics_t metrics {
       .standard_panel = {even_pixels(1280.0F * scale), even_pixels(720.0F * scale)},
-      .profile_panel = {even_pixels(1440.0F * scale), even_pixels(360.0F * scale)},
-      .panel_margin = even_pixels(36.0F * scale),
+      .profile_panel = {even_pixels(1440.0F * scale), even_pixels(720.0F * scale)},
+      .panel_margin = panel_margin,
       .scale = scale,
-      .body_font_pixels = 28.0F * scale,
-      .title_font_pixels = 36.0F * scale,
+      .body_font_pixels = std::max(18.0F, 28.0F * scale),
+      .title_font_pixels = std::max(24.0F, 36.0F * scale),
       .window_padding_x = 32.0F * scale,
       .window_padding_y = 28.0F * scale,
       .item_spacing_y = 16.0F * scale,
@@ -558,6 +796,19 @@ namespace platf::vulkan_ui {
     return page == platf::ui::page_e::profile ? metrics.profile_panel : metrics.standard_panel;
   }
 
+  std::uint32_t make_bgr888_panel_stride(const std::uint32_t width) {
+    constexpr std::uint64_t pixel_alignment = 64;
+    if (width == 0) {
+      throw std::runtime_error("Vulkan UI panel width must be nonzero");
+    }
+    const auto aligned_width = (static_cast<std::uint64_t>(width) + pixel_alignment - 1U) & ~(pixel_alignment - 1U);
+    const auto stride = aligned_width * 3U;
+    if (stride > std::numeric_limits<std::uint32_t>::max()) {
+      throw std::runtime_error("Vulkan UI BGR888 panel stride exceeds uint32 capacity");
+    }
+    return static_cast<std::uint32_t>(stride);
+  }
+
   std::optional<std::string> validate_render_model(const render_model_t &model) {
     if (model.width == 0 || model.height == 0 || model.revision == 0) {
       return "Vulkan UI model dimensions and revision must be nonzero";
@@ -565,8 +816,14 @@ namespace platf::vulkan_ui {
     if (!valid_color(model.background)) {
       return "Vulkan UI background must be finite, normalized, and opaque";
     }
-    if (model.focus >= 3) {
+    if (model.focus >= 4) {
       return "Vulkan UI focus exceeds the main menu item count";
+    }
+    if (static_cast<std::size_t>(model.ui_size) > static_cast<std::size_t>(platf::ui::ui_size_e::large) || model.ui_size_focus >= 3) {
+      return "Vulkan UI size selection is invalid";
+    }
+    if (model.profile_scroll_steps > platf::ui::profile_scroll_step_limit) {
+      return "Vulkan UI Profile scroll position is invalid";
     }
     if (model.connection.video_state.size() > 64 || model.connection.gamepad_state.size() > 64 || model.connection.gamepad_stage.size() > 64 || model.connection.failure_kind.size() > 64) {
       return "Vulkan UI connection text exceeds the sanitized display bound";
@@ -588,9 +845,7 @@ namespace platf::vulkan_ui {
       previous_origin = frame.origin_offset_us;
       for (std::size_t span_index = 0; span_index < frame.span_count; ++span_index) {
         const auto &span = frame.spans[span_index];
-        if (span.start_us < 0 || span.end_us < span.start_us || span.end_us > frame.end_us ||
-            static_cast<std::size_t>(span.stage) >= static_cast<std::size_t>(video::frame_profile_timeline_stage_e::count) ||
-            static_cast<std::size_t>(span.lane) >= static_cast<std::size_t>(video::frame_profile_timeline_lane_e::count)) {
+        if (span.start_us < 0 || span.end_us < span.start_us || span.end_us > frame.end_us || static_cast<std::size_t>(span.stage) >= static_cast<std::size_t>(video::frame_profile_timeline_stage_e::count) || static_cast<std::size_t>(span.lane) >= static_cast<std::size_t>(video::frame_profile_timeline_lane_e::count)) {
           return "Vulkan UI Timeline span bounds are invalid";
         }
       }
@@ -600,7 +855,19 @@ namespace platf::vulkan_ui {
 
   render_model_t make_render_model(std::uint32_t width, std::uint32_t height, const platf::ui::snapshot_t &snapshot) {
     const color_t background {0.025F, 0.035F, 0.060F, 1.0F};
-    render_model_t model {width, height, snapshot.revision, background, snapshot.page, snapshot.focus, snapshot.connection, snapshot.profile};
+    render_model_t model {
+      width,
+      height,
+      snapshot.revision,
+      background,
+      snapshot.page,
+      snapshot.focus,
+      snapshot.connection,
+      snapshot.profile,
+      snapshot.ui_size,
+      snapshot.ui_size_focus,
+      snapshot.profile_scroll_steps
+    };
     if (const auto error = validate_render_model(model)) {
       throw std::runtime_error(*error);
     }

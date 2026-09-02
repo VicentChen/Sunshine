@@ -11,10 +11,11 @@
 - UI 操作通过明确的 action 接口反映到 Sunshine，而不是直接耦合到绘制代码。
 - 从 Moonlight 会话的首个绿色 placeholder 帧开始自动显示连接状态；只有视频链路和
   当前应用选择的手柄输出链路都已就绪，连接状态才自动隐藏。
-- 正式 UI 首个版本提供“连接状态”、“Profile”和“退出 UI”三个入口。
+- 正式 UI 提供“连接状态”、“Profile”、“UI 大小”和“退出 UI”四个入口；“UI 大小”可在紧凑（85%）、标准（100%）和大号（120%）之间切换。
 - Profile HUD 迁移为 UI 系统中的一个页面，不再作为独立的固定 OSD 实现。
 - UI 以 Moonlight 编码输出尺寸为缩放基准，在 1080p 与 4K 下保持一致的相对占屏比例和
-  可读字号；不再把所有会话固定为 `960x180`、默认 ImGui 字体。
+  可读字号；用户选择的三档大小会在该自适应基准上同时调整面板、字体、留白和时间线，而非把所有会话固定为 `960x180`、默认 ImGui 字体。
+- 连接状态页同时显示 Moonlight 请求的编码分辨率和帧率；帧率保留 `59.94 FPS` 等小数值，未知时明确显示 `UNKNOWN`。
 - 除 Profile 外，主菜单、连接状态以及后续选项页统一采用从上到下的单列布局；Profile
   保留当前 Timeline、execution lane 和指标网格的信息结构。
 - UI 使用 Vulkan 在 GPU 上生成不透明 BGR 内容。BGR888 直通时由 Vulkan 将 ROI 直接写入当前 HDMI RX DMA-BUF；只有视频本身已进入 NV12 RGA fallback 时，才由 RGA 覆盖转换后的目标。
@@ -324,12 +325,18 @@ Sunshine controller event
   preparation/submit/wait、Encoded queue 和 Packetize/send；missing/invalid stage 使用 bit mask 保留，
   不会伪装成零耗时条。
 - 原 5 秒 completed-window snapshot、P50/P95/P99、sample/overflow、placeholder/repeated/captured、
-  RGA bypass 和旧 MPP OSD 回退路径继续保留，不与逐帧 Timeline 混合聚合。Vulkan UI 最多每 100 ms
+  RGA bypass 继续保留，不与逐帧 Timeline 混合聚合。旧 MPP OSD 回退路径、palette bitmap、编码 metadata、
+  配置项和 Web UI 开关已经删除。Vulkan UI 最多每 100 ms
   读取并重绘一次 Timeline revision，数据仍逐个完成帧采集；Profile 页面不可见时不会因 Timeline
   generation 单独增加 render revision。直通帧上的 UI RGA 覆盖单独记录为 `UI COMPOSE`，不再将其
   计入视频转换 `RGA`，变化页面的同步 Vulkan 提交则单独记录为 `UI RENDER`。
-- Timeline/Profile/UI controller 定向测试 **29/29 PASS**，完整 RKMPP 专用测试 **218/218 PASS**；
-  `scripts/build-rkmpp.sh` prepared-cache 构建完成，`sunshine` 及全部模块测试目标成功链接。
+- Profile 已改为与普通页等高的可滚动宽视窗；D-pad/左摇杆上下调整滚动位置，平均 Timeline、
+  最新帧和 completed-window 指标可在同一页面依次查看。Event 标签以前置同色块辨识，内部的
+  per-Event sample count 不再显示。Compact（85%）Profile 的 BGR stride 现按 Vulkan external
+  buffer 要求对齐，尺寸 surface 采用成功后原子替换，失败时保留上一组可用 surface。
+- 本轮 FrameProfile/Timeline/Profile/UI controller 定向测试 **37/37 PASS**；
+  `scripts/build-rkmpp.sh` prepared-cache 构建完成，`sunshine` 及全部模块测试目标成功链接。本轮未重复
+  执行完整 RKMPP 专用测试集。
 - Timeline 变更前的阶段 7 构建已部署到 ROCK 5B+ 并由 PID 53673 运行；进程 `/proc` 映像与磁盘产物 SHA256
   均为 `4f8bbb978563b8af98c40f494fe71dade568cf8048225bd6e4063ff0395e872c`，Moonlight 客户端
   已完成真实 Xbox 会话验收。首个绿色 placeholder 帧可见底部连接状态；Xbox lifecycle 从
@@ -354,8 +361,8 @@ Sunshine controller event
    P50/P95/P99、sample/overflow、placeholder/repeated/captured 和 RGA bypass 等既有语义。
 5. 先接入退出 UI 这类低风险、可逆 action，验证 UI 到 Sunshine controller owner 的命令边界；
    对需要重建 encoder、切换输入或断开 session 的后续 action，明确展示确认和执行结果。
-6. 删除旧固定 Profile HUD 对 640x176 palette bitmap 的 UI 职责；迁移验收完成前，旧 MPP OSD
-   暂时作为回退后端。确认 Vulkan UI 后端稳定后，再单独计划移除旧实现。
+6. 已删除旧固定 Profile HUD 的 640x176 palette bitmap、MPP OSD metadata、配置项和 Web UI 开关；
+   Profile 与连接状态显示现在只使用 Vulkan UI。
 
 ## 阶段 8：分辨率自适应、可读性与垂直布局
 
@@ -525,7 +532,7 @@ Sunshine controller event
 
 - Gate 4、Vulkan 初始化或 UI renderer 失败时，关闭新 UI 合成并继续现有 HDMI RX -> MPP 路径。
 - 新 UI 只使用唯一的 `vulkan_ui` 总控开关，默认启用；关闭后跳过全部 Vulkan UI 路径。
-- 保留现有 MPP OSD/Profile HUD 作为迁移期间回退，不在同一变更中删除。
+- Vulkan UI 迁移验收完成后删除原有 MPP OSD/Profile HUD，不再保留双显示后端。
 - 任何异常路径都必须释放 RGA/Vulkan 引用，并保证已 `DQBUF` 的 slot 最终能够安全 `QBUF`。
 - 不修改 HDMI RX 驱动配置、GPU 驱动或系统 Vulkan ICD 作为功能运行时的一部分。
 
@@ -542,5 +549,5 @@ Sunshine controller event
 - 正式 UI 包含“连接状态”、“Profile”和可用的“退出 UI”入口。
 - 1080p/4K UI 的相对尺寸和字号通过截图验收；普通页面为垂直单列，Profile 保持现有信息结构。
 - 至少一个 Sunshine action 能执行并将真实结果反馈到 UI。
-- Profile HUD 已作为 UI page 工作，旧固定 OSD 的保留或移除状态有明确记录。
+- Profile HUD 已作为 UI page 工作，旧固定 OSD 已完整移除。
 - RKMPP 专用测试通过，性能数据和已知限制已记录。

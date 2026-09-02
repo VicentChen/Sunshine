@@ -29,10 +29,10 @@ namespace platf::vulkan_ui {
     std::uint32_t height {};
   };
 
-  /** @brief Resolution-derived sizes shared by the model, renderer, and ROI compositor. */
+  /** @brief Resolution- and user-size-derived sizes shared by the model, renderer, and ROI compositor. */
   struct layout_metrics_t {
     panel_layout_t standard_panel;  ///< Main menu and connection-status surface.
-    panel_layout_t profile_panel;  ///< Wide, low surface preserving the Profile topology.
+    panel_layout_t profile_panel;  ///< Wide diagnostic viewport whose overflowing Profile content scrolls vertically.
     std::uint32_t panel_margin {};  ///< Bottom safe-area margin in output pixels.
     float scale {};  ///< Linear scale relative to 1920x1080.
     float body_font_pixels {};
@@ -57,32 +57,40 @@ namespace platf::vulkan_ui {
     std::uint64_t revision {};
     color_t background;
     platf::ui::page_e page {platf::ui::page_e::main_menu};  ///< Modal page to render.
-    std::uint8_t focus {};  ///< Focused item in the three-entry main menu.
+    std::uint8_t focus {};  ///< Focused item in the four-entry main menu.
     platf::ui::connection_status_t connection;  ///< Sanitized connection values for the status page.
     platf::ui::profile_status_t profile;  ///< Latest completed-window values for the Profile page.
+    platf::ui::ui_size_e ui_size {platf::ui::ui_size_e::standard};  ///< Current user-selected size tier.
+    std::uint8_t ui_size_focus {static_cast<std::uint8_t>(platf::ui::ui_size_e::standard)};  ///< Focused tier on the settings page.
+    std::uint16_t profile_scroll_steps {};  ///< Programmatic vertical scroll offset selected by controller navigation.
   };
 
-  /** @brief One clipped renderer-independent bar in the rolling Timeline viewport. */
+  /** @brief One clipped renderer-independent bar in the latest or average Timeline viewport. */
   struct timeline_bar_t {
     video::frame_profile_timeline_stage_e stage {video::frame_profile_timeline_stage_e::rx_driver_age};
     video::frame_profile_timeline_lane_e lane {video::frame_profile_timeline_lane_e::capture};
     std::int64_t frame_index {-1};
     std::int64_t start_us {};  ///< Unclipped start relative to the frame's RX EOF.
     std::int64_t end_us {};  ///< Unclipped end relative to the frame's RX EOF.
+    std::uint32_t sample_count {};  ///< Valid completed frames contributing this average bar; zero for an instant bar.
     float left {};  ///< Clipped normalized viewport coordinate.
     float right {};  ///< Clipped normalized viewport coordinate.
   };
 
-  /** @brief Fixed geometry derived from recent completed frames without Vulkan state. */
+  /** @brief Latest-frame and recent-frame-average geometry derived without Vulkan state. */
   struct timeline_geometry_t {
     static constexpr std::size_t bar_capacity = video::frame_profile_timeline_snapshot_t::frame_capacity * video::frame_profile_timeline_frame_t::max_spans;
 
-    std::array<timeline_bar_t, bar_capacity> bars;
-    std::size_t bar_count {};
-    std::int64_t view_start_us {};
-    std::int64_t view_end_us {};
-    std::int64_t latest_frame_index {-1};
-    std::int64_t latest_frame_end_us {};
+    std::array<timeline_bar_t, bar_capacity> bars;  ///< Event bars from only the latest completed frame.
+    std::array<timeline_bar_t, bar_capacity> average_bars;  ///< RX EOF-aligned averages from recent frames.
+    std::size_t bar_count {};  ///< Number of valid latest-frame bars.
+    std::size_t average_bar_count {};  ///< Number of valid averaged Event bars.
+    std::uint32_t frame_count {};  ///< Recent frames considered when building averages.
+    std::int64_t view_start_us {};  ///< Latest-frame axis start relative to RX EOF.
+    std::int64_t view_end_us {};  ///< Latest-frame axis end relative to RX EOF.
+    std::int64_t average_view_end_us {};  ///< Average axis end relative to RX EOF.
+    std::int64_t latest_frame_index {-1};  ///< Stream-local identifier of the displayed latest frame.
+    std::int64_t latest_frame_end_us {};  ///< Latest frame send completion relative to RX EOF.
   };
 
   /** @brief One packed BGR888 capture DMA-BUF that Vulkan may cover in place. */
@@ -113,8 +121,12 @@ namespace platf::vulkan_ui {
    */
   std::optional<std::string> validate_render_model(const render_model_t &model);
 
-  /** @brief Derive adaptive UI surfaces and typography from the encoded Moonlight output. */
-  layout_metrics_t make_layout_metrics(std::uint32_t output_width, std::uint32_t output_height);
+  /** @brief Derive UI surfaces and typography from encoded output and a user-selected relative size. */
+  layout_metrics_t make_layout_metrics(
+    std::uint32_t output_width,
+    std::uint32_t output_height,
+    platf::ui::ui_size_e ui_size = platf::ui::ui_size_e::standard
+  );
 
   /** @brief Select the surface family for one rendered page. */
   panel_layout_t panel_for_page(const layout_metrics_t &metrics, platf::ui::page_e page) noexcept;
@@ -129,8 +141,21 @@ namespace platf::vulkan_ui {
    */
   render_model_t make_render_model(std::uint32_t width, std::uint32_t height, const platf::ui::snapshot_t &snapshot);
 
-  /** @brief Convert the completed-frame ring into clipped rolling Timeline geometry. */
+  /**
+   * @brief Convert the completed-frame ring into one latest frame and an RX EOF-aligned average.
+   *
+   * @param timeline Completed frames ordered from oldest to newest.
+   * @return Renderer-independent latest and average Timeline geometry.
+   */
   timeline_geometry_t make_timeline_geometry(const video::frame_profile_timeline_snapshot_t &timeline);
+
+  /**
+   * @brief Select a packed BGR888 stride aligned for Vulkan external-buffer imports.
+   *
+   * @param width Visible panel width in pixels.
+   * @return Byte stride with sufficient row alignment for Vulkan and RGA.
+   */
+  std::uint32_t make_bgr888_panel_stride(std::uint32_t width);
 
   /** @brief Validate a packed BGR888 target and place one bottom-centered panel. */
   bgr888_copy_region_t make_bgr888_copy_region(const bgr888_dma_buf_t &target, std::uint32_t panel_width, std::uint32_t panel_height, std::uint32_t panel_margin);

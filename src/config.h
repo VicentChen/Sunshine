@@ -205,7 +205,6 @@ namespace config {
     int max_bitrate;  ///< Maximum bitrate ceiling in kbps for bitrate requested from the client.
     double minimum_fps_target;  ///< Lowest framerate that will be used when streaming. Range 0-1000, 0 = half of client's requested framerate.
     bool rkmpp_profile;  ///< Collect HDMI RX and RKMPP per-frame performance timestamps.
-    bool rkmpp_profile_overlay;  ///< Burn the latest RKMPP profile snapshot into encoded video.
     bool rkmpp_low_delay;  ///< Request the RKMPP low-delay encoder setting for an A/B experiment.
     bool rkmpp_disable_reencode;  ///< Disable RKMPP rate-control re-encode attempts for an A/B experiment.
     bool vulkan_ui;  ///< Enable the RKMPP Vulkan UI system and its active implementation stage.

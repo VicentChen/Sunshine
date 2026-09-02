@@ -1845,117 +1845,6 @@ namespace video {
     return std::nullopt;
   }
 
-  class rkmpp_profile_overlay_t {
-  public:
-    /** @brief Attach transient Xbox status, otherwise the optional profile HUD. */
-    void refresh(platf::rkmpp::encoder_t &encoder) {
-      const auto now = std::chrono::steady_clock::now();
-      if (!last_status_poll_ || now - *last_status_poll_ >= 100ms) {
-        last_status_poll_ = now;
-        const auto status = input::xbox_remote_status();
-        const bool show_status = status.state == "starting" || status.state == "failed" || status.state == "stopping";
-        if (show_status) {
-          const auto key = status.state + ':' + status.stage + ':' + status.failure_stage;
-          if (!status_visible_ || key != status_key_) {
-            bitmap_.render_status("XBOX REMOTE PLAY", status_message(status));
-            attach(encoder);
-            configured_ = true;
-            status_visible_ = true;
-            status_key_ = key;
-          }
-          return;
-        }
-        if (status_visible_) {
-          status_visible_ = false;
-          status_key_.clear();
-          configured_ = false;
-          if (!config::video.rkmpp_profile_overlay) {
-            encoder.clear_osd();
-            return;
-          }
-          bitmap_.render_waiting();
-        }
-      } else if (status_visible_) {
-        return;
-      }
-
-      if (!config::video.rkmpp_profile_overlay) {
-        return;
-      }
-      if (!configured_) {
-        attach(encoder);
-        configured_ = true;
-      }
-      frame_profile_snapshot_t snapshot;
-      if (frame_profile_snapshot_store().read_newer(generation_, snapshot)) {
-        bitmap_.render(snapshot);
-        attach(encoder);
-      }
-    }
-
-  private:
-    /**
-     * @brief Map a sanitized Xbox lifecycle snapshot to an OSD message.
-     *
-     * @param status Current Xbox Remote Play lifecycle snapshot.
-     * @return Static display text for the current lifecycle stage.
-     */
-    static std::string_view status_message(const input::xbox_remote_status_t &status) noexcept {
-      if (status.state == "stopping") {
-        return "DISCONNECTING"sv;
-      }
-      if (status.state == "failed") {
-        if (status.failure_kind == "reauthentication_required") {
-          return "AUTHENTICATION REQUIRED"sv;
-        }
-        if (status.failure_kind == "permanent") {
-          return "CONFIGURATION ERROR"sv;
-        }
-        return "CONNECTION FAILED - RETRYING"sv;
-      }
-      if (status.stage == "authentication") {
-        return "AUTHENTICATING"sv;
-      }
-      if (status.stage == "discovery") {
-        return "FINDING XBOX"sv;
-      }
-      if (status.stage == "wake") {
-        return "WAKING XBOX"sv;
-      }
-      if (status.stage == "provisioning") {
-        return "STARTING REMOTE PLAY"sv;
-      }
-      if (status.stage == "signaling_sdp" || status.stage == "signaling_sdp_host_fallback") {
-        return "NEGOTIATING REMOTE PLAY"sv;
-      }
-      if (status.stage == "signaling_ice") {
-        return "CONNECTING DIRECT TRANSPORT"sv;
-      }
-      if (status.stage == "transport") {
-        return "OPENING REMOTE PLAY CHANNELS"sv;
-      }
-      if (status.stage == "handshake") {
-        return "FINALIZING REMOTE PLAY"sv;
-      }
-      if (status.stage == "reconnect_backoff") {
-        return "RECONNECTING"sv;
-      }
-      return "PREPARING CONNECTION"sv;
-    }
-
-    /** @brief Copy the fixed bitmap into the encoder's persistent MPP OSD buffer. */
-    void attach(platf::rkmpp::encoder_t &encoder) {
-      encoder.set_osd_region({16, 16, platf::rkmpp::frame_profile_overlay_bitmap_t::width, platf::rkmpp::frame_profile_overlay_bitmap_t::height, bitmap_.pixels()});
-    }
-
-    platf::rkmpp::frame_profile_overlay_bitmap_t bitmap_;  ///< Fixed palette-index text bitmap.
-    std::uint64_t generation_ {};  ///< Last published profile generation rendered.
-    bool configured_ {};  ///< Whether the initial waiting HUD was attached.
-    bool status_visible_ {};  ///< Whether Xbox status currently overrides the profile HUD.
-    std::string status_key_;  ///< Last sanitized lifecycle tuple rendered.
-    std::optional<std::chrono::steady_clock::time_point> last_status_poll_;  ///< Last Xbox status poll time.
-  };
-
   platf::rkmpp::encoder_config_t make_rkmpp_encoder_config(const config_t &config, const platf::rkmpp::input_layout_t &input_layout) {
     if (config.numRefFrames != 0) {
       throw std::invalid_argument("RKMPP does not support a requested reference-frame count");
@@ -1994,15 +1883,17 @@ namespace video {
     struct surface_t;
 
   public:
-    rkmpp_vulkan_ui_session_t(std::uint32_t output_width, std::uint32_t output_height):
+    rkmpp_vulkan_ui_session_t(std::uint32_t output_width, std::uint32_t output_height, std::uint32_t output_fps_x100):
+        output_width_(output_width),
+        output_height_(output_height),
+        output_fps_x100_(output_fps_x100),
         metrics_(platf::vulkan_ui::make_layout_metrics(output_width, output_height)),
         backend_(platf::rga::make_backend()),
         allocator_(platf::rga::make_cma_dma_allocator()) {
       if (!backend_ || !allocator_) {
         throw std::runtime_error("Vulkan UI failed to initialize RGA resources");
       }
-      standard_surface_ = make_surface(metrics_.standard_panel);
-      profile_surface_ = make_surface(metrics_.profile_panel);
+      rebuild_surfaces(platf::ui::ui_size_e::standard);
   #ifdef SUNSHINE_BUILD_VULKAN
       BOOST_LOG(info) << "RKMPP Vulkan UI initialized on " << standard_surface_->renderer->device_name()
                       << ": hidden until Start is held and Select/Back is pressed; standard="
@@ -2010,6 +1901,7 @@ namespace video {
                       << " profile=" << metrics_.profile_panel.width << 'x' << metrics_.profile_panel.height
                       << " body-font=" << metrics_.body_font_pixels
                       << " title-font=" << metrics_.title_font_pixels
+                      << " size=standard"
                       << " ROI=bottom-center margin=" << metrics_.panel_margin;
   #else
       throw std::runtime_error("Sunshine was built without Vulkan UI support");
@@ -2044,9 +1936,9 @@ namespace video {
       if (image.frame_profile) {
         image.frame_profile->ui_compose_begin = std::chrono::steady_clock::now();
       }
-#ifdef SUNSHINE_BUILD_VULKAN
+  #ifdef SUNSHINE_BUILD_VULKAN
       (void) surface->renderer->publish();
-#endif
+  #endif
       compose_visible_into(destination, *surface);
       if (image.frame_profile) {
         image.frame_profile->ui_compose_end = std::chrono::steady_clock::now();
@@ -2119,19 +2011,11 @@ namespace video {
                         << " allocation=" << plane.allocation_size;
       }
       const auto index = image.frame->buffer_index();
-#ifdef SUNSHINE_BUILD_VULKAN
+  #ifdef SUNSHINE_BUILD_VULKAN
       if (image.frame_profile) {
         image.frame_profile->ui_compose_begin = std::chrono::steady_clock::now();
       }
-      if (surface->renderer->cover_bgr888({
-            .dma_buf_fd = plane.dma_buf_fd,
-            .allocation_size = plane.allocation_size,
-            .width = format.width,
-            .height = format.height,
-            .stride = plane.bytesperline,
-            .generation = generation,
-            .slot = index
-          }, metrics_.panel_margin)) {
+      if (surface->renderer->cover_bgr888({.dma_buf_fd = plane.dma_buf_fd, .allocation_size = plane.allocation_size, .width = format.width, .height = format.height, .stride = plane.bytesperline, .generation = generation, .slot = index}, metrics_.panel_margin)) {
         ++imported_slots_;
         BOOST_LOG(info) << "RKMPP Vulkan UI imported BGR capture slot=" << index
                         << " fd=" << plane.dma_buf_fd
@@ -2145,9 +2029,9 @@ namespace video {
         BOOST_LOG(info) << "RKMPP Vulkan UI first direct BGR DMA-BUF cover completed synchronously"sv;
       }
       return true;
-#else
+  #else
       return false;
-#endif
+  #endif
     }
 
   private:
@@ -2160,11 +2044,26 @@ namespace video {
   #endif
     };
 
-    /** @brief Allocate one stable page-family surface for this encoded output. */
-    std::unique_ptr<surface_t> make_surface(const platf::vulkan_ui::panel_layout_t &panel) {
+    /**
+     * @brief Allocate one stable page-family surface for this encoded output.
+     *
+     * @param panel Visible panel dimensions.
+     * @param metrics Typography and spacing matching @p panel.
+     * @return Fully initialized RGA and Vulkan surface.
+     */
+    std::unique_ptr<surface_t> make_surface(
+      const platf::vulkan_ui::panel_layout_t &panel,
+      const platf::vulkan_ui::layout_metrics_t &metrics
+    ) {
       auto surface = std::make_unique<surface_t>();
       surface->panel = panel;
-      surface->source = platf::rga::target_buffer_t::allocate_bgr888(*backend_, *allocator_, panel.width, panel.height);
+      surface->source = platf::rga::target_buffer_t::allocate_bgr888(
+        *backend_,
+        *allocator_,
+        panel.width,
+        panel.height,
+        platf::vulkan_ui::make_bgr888_panel_stride(panel.width)
+      );
   #ifdef SUNSHINE_BUILD_VULKAN
       const auto &layout = surface->source.layout();
       surface->renderer = platf::vulkan_ui::renderer_t::create(
@@ -2173,10 +2072,48 @@ namespace video {
         layout.width,
         layout.height,
         layout.stride,
-        metrics_
+        metrics
       );
   #endif
       return surface;
+    }
+
+    /**
+     * @brief Atomically rebuild cached UI surfaces after the user changes size.
+     *
+     * A failed runtime resize retains the last working surfaces so the
+     * controller can still close or reopen the UI.
+     */
+    void rebuild_surfaces(platf::ui::ui_size_e size) {
+      if (rendered_ui_size_ && *rendered_ui_size_ == size) {
+        return;
+      }
+      if (failed_ui_size_ && *failed_ui_size_ == size) {
+        return;
+      }
+      const auto next_metrics = platf::vulkan_ui::make_layout_metrics(output_width_, output_height_, size);
+      std::unique_ptr<surface_t> next_standard;
+      std::unique_ptr<surface_t> next_profile;
+      try {
+        next_standard = make_surface(next_metrics.standard_panel, next_metrics);
+        next_profile = make_surface(next_metrics.profile_panel, next_metrics);
+      } catch (const std::exception &e) {
+        if (!standard_surface_ || !profile_surface_) {
+          throw;
+        }
+        failed_ui_size_ = size;
+        BOOST_LOG(error) << "RKMPP Vulkan UI size change failed; retaining the last working surfaces: " << e.what();
+        return;
+      }
+      metrics_ = next_metrics;
+      standard_surface_ = std::move(next_standard);
+      profile_surface_ = std::move(next_profile);
+      rendered_ui_size_ = size;
+      failed_ui_size_.reset();
+      BOOST_LOG(info) << "RKMPP Vulkan UI size changed to " << static_cast<unsigned int>(size)
+                      << ": standard=" << metrics_.standard_panel.width << 'x' << metrics_.standard_panel.height
+                      << " profile=" << metrics_.profile_panel.width << 'x' << metrics_.profile_panel.height
+                      << " body-font=" << metrics_.body_font_pixels;
     }
 
     /** @brief Select the wide Profile surface without changing its information topology. */
@@ -2256,18 +2193,7 @@ namespace video {
       }
       const auto &gamepad = gamepad_status_;
       const bool gamepad_required = gamepad.selected;
-      controller.update_connection({
-        .video_state = std::string {platf::input_sm::state_name(image.connection_state)},
-        .gamepad_state = gamepad_required ? gamepad.state : "not_required",
-        .gamepad_stage = gamepad.stage,
-        .failure_kind = gamepad.failure_kind,
-        .moonlight_width = image.moonlight_width,
-        .moonlight_height = image.moonlight_height,
-        .input_width = image.input_width,
-        .input_height = image.input_height,
-        .video_ready = platf::input_sm::is_streaming_state(image.connection_state),
-        .gamepad_ready = !gamepad_required || gamepad.state == "ready"
-      }, now);
+      controller.update_connection({.video_state = std::string {platf::input_sm::state_name(image.connection_state)}, .gamepad_state = gamepad_required ? gamepad.state : "not_required", .gamepad_stage = gamepad.stage, .failure_kind = gamepad.failure_kind, .moonlight_width = image.moonlight_width, .moonlight_height = image.moonlight_height, .moonlight_fps_x100 = output_fps_x100_, .input_width = image.input_width, .input_height = image.input_height, .video_ready = platf::input_sm::is_streaming_state(image.connection_state), .gamepad_ready = !gamepad_required || gamepad.state == "ready"}, now);
       const auto transition = controller.tick(now);
       if (transition.visibility_changed) {
         BOOST_LOG(info) << "RKMPP Vulkan UI " << (transition.visible ? "opened" : "closed")
@@ -2278,6 +2204,7 @@ namespace video {
         return nullptr;
       }
   #ifdef SUNSHINE_BUILD_VULKAN
+      rebuild_surfaces(snapshot.ui_size);
       auto &surface = surface_for_page(snapshot.page);
       const auto model = platf::vulkan_ui::make_render_model(surface.panel.width, surface.panel.height, snapshot);
       const auto ui_render_begin = std::chrono::steady_clock::now();
@@ -2296,11 +2223,16 @@ namespace video {
   #endif
     }
 
+    std::uint32_t output_width_ {};
+    std::uint32_t output_height_ {};
+    std::uint32_t output_fps_x100_ {};
     platf::vulkan_ui::layout_metrics_t metrics_;
     std::unique_ptr<platf::rga::backend_t> backend_;
     std::unique_ptr<platf::rga::dma_allocator_t> allocator_;
     std::unique_ptr<surface_t> standard_surface_;
     std::unique_ptr<surface_t> profile_surface_;
+    std::optional<platf::ui::ui_size_e> rendered_ui_size_;  ///< Size tier used by the allocated surfaces.
+    std::optional<platf::ui::ui_size_e> failed_ui_size_;  ///< Failed tier suppressed until the user selects another size.
     std::optional<std::uint64_t> capture_generation_;
     input::xbox_remote_status_t gamepad_status_;  ///< Last sanitized gamepad lifecycle poll.
     std::optional<std::chrono::steady_clock::time_point> last_gamepad_poll_;  ///< Limits lifecycle polling on the frame path.
@@ -2323,7 +2255,11 @@ namespace video {
         video_format_(config.videoFormat) {
       if (!vulkan_ui_ && ::config::video.vulkan_ui) {
         try {
-          vulkan_ui_ = std::make_shared<rkmpp_vulkan_ui_session_t>(coded_width, coded_height);
+          vulkan_ui_ = std::make_shared<rkmpp_vulkan_ui_session_t>(
+            coded_width,
+            coded_height,
+            static_cast<std::uint32_t>(config.framerateX100 > 0 ? config.framerateX100 : config.framerate * 100)
+          );
         } catch (const std::exception &e) {
           BOOST_LOG(error) << "RKMPP Vulkan UI initialization failed in RGA path; continuing without overlay: " << e.what();
         }
@@ -2545,7 +2481,6 @@ namespace video {
       if (!ready_) {
         throw std::runtime_error("RKMPP RGA encode called without a converted frame");
       }
-      profile_overlay_.refresh(encoder_);
       if (force_idr_) {
         encoder_.request_idr();
         force_idr_ = false;
@@ -2619,7 +2554,6 @@ namespace video {
     platf::rkmpp::input_frame_t current_input_;
     std::optional<frame_profile_t> current_profile_;
     std::optional<frame_profile_t> encoded_profile_;
-    rkmpp_profile_overlay_t profile_overlay_;
     std::uint64_t rga_input_generation_ {1};  ///< Fixed pool generation; a session recreation destroys its cache.
     bool ready_ {false};
     bool force_idr_ {false};
@@ -2646,7 +2580,8 @@ namespace video {
         try {
           vulkan_ui_ = std::make_shared<rkmpp_vulkan_ui_session_t>(
             static_cast<std::uint32_t>(config.width),
-            static_cast<std::uint32_t>(config.height)
+            static_cast<std::uint32_t>(config.height),
+            static_cast<std::uint32_t>(config.framerateX100 > 0 ? config.framerateX100 : config.framerate * 100)
           );
         } catch (const std::exception &e) {
           BOOST_LOG(error) << "RKMPP Vulkan UI initialization failed; continuing without overlay: " << e.what();
@@ -2741,7 +2676,6 @@ namespace video {
           vulkan_ui_.reset();
         }
       }
-      profile_overlay_.refresh(encoder_);
       if (force_idr_) {
         encoder_.request_idr();
         force_idr_ = false;
@@ -2805,7 +2739,6 @@ namespace video {
       direct_encoder_ready_ = true;
       input_layout_ = input_layout;
       input_cache_generation_.reset();
-      profile_overlay_ = {};
       force_idr_ = true;
     }
 
@@ -2846,7 +2779,6 @@ namespace video {
     std::optional<frame_profile_t> current_profile_;
     std::optional<frame_profile_t> encoded_profile_;
     std::optional<std::uint64_t> input_cache_generation_;  ///< HDMI RX allocation generation currently imported by MPP.
-    rkmpp_profile_overlay_t profile_overlay_;
     bool use_rga_ {};
     bool force_idr_ {};
     bool direct_encoder_ready_ {};
