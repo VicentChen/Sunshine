@@ -27,6 +27,10 @@ namespace platf {
     std::string resolve_capture_source_name(std::string_view configured_source, std::string_view monitor_source) {
       return std::string {configured_source.empty() ? monitor_source : configured_source};
     }
+
+    capture_e capture_status_from_read(int read_result) noexcept {
+      return read_result == 0 ? capture_e::ok : capture_e::reinit;
+    }
   }  // namespace pa
 
   /**
@@ -85,13 +89,11 @@ namespace platf {
 
       auto buf = sample_buf.data();
       int status;
-      if (pa_simple_read(mic.get(), buf, sample_size * sizeof(float), &status)) {
+      const auto read_result = pa_simple_read(mic.get(), buf, sample_size * sizeof(float), &status);
+      if (read_result) {
         BOOST_LOG(error) << "pa_simple_read() failed: "sv << pa_strerror(status);
-
-        return capture_e::error;
       }
-
-      return capture_e::ok;
+      return pa::capture_status_from_read(read_result);
     }
   };
 

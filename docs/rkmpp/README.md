@@ -267,6 +267,7 @@ HDMI 视频数据面与 EDID 控制面相互独立。只要 RX 成功取得一�
 - `VIDIOC_S_EDID` 产生的 HPD 周期只会让捕获队列短暂恢复，不会获得重试额度。会话结束也不恢复 EDID，因此断开重连不会额外制造 HPD 周期。
 - 原生 EDID 和 Sunshine 最后应用的投影保存在 `$XDG_CONFIG_HOME/sunshine/hdmirx-edid-state.bin`；未设置 `XDG_CONFIG_HOME` 时使用 `$HOME/.config/sunshine/hdmirx-edid-state.bin`。这样异常退出后仍能辨认原生基线和当前投影。
 - 写入失败或 readback 不一致时只允许一次有界的原生 EDID 恢复；若不能证明可安全写入，则保留实际 HDMI 输入并使用 RGA，不循环改写 EDID。
+- HDMI 热插拔导致 PulseAudio/ALSA 录音句柄失效时，Sunshine 会自动重新打开配置的 HDMI 音频源。
 
 ## HDMI RX 音频
 

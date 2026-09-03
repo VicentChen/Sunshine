@@ -17,4 +17,12 @@ TEST(LinuxAudioSourceSelection, UsesConfiguredSource) {
 TEST(LinuxAudioSourceSelection, FallsBackToSinkMonitor) {
   EXPECT_EQ(platf::pa::resolve_capture_source_name("", "sink.monitor"), "sink.monitor");
 }
+
+TEST(LinuxAudioSourceSelection, SuccessfulReadContinuesCapture) {
+  EXPECT_EQ(platf::pa::capture_status_from_read(0), platf::capture_e::ok);
+}
+
+TEST(LinuxAudioSourceSelection, FailedReadRequestsReinitialization) {
+  EXPECT_EQ(platf::pa::capture_status_from_read(-1), platf::capture_e::reinit);
+}
 #endif

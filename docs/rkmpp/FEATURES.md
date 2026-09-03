@@ -12,6 +12,7 @@
 - HDMI RX 视频数据面采用 live-first 规则：首个有效 dequeue 帧立即进入编码，尺寸与 Moonlight 一致时直通 RKMPP，不一致时从第一帧使用 RGA；EDID 状态、640x480 timing、Xbox 状态和 source change 都不能门禁真实帧。绿色占位帧只在当前确实取不到 HDMI 帧时产生，source change 仅负责 capture queue 和 generation 恢复。
 - 进程级 EDID 控制器独占写权限，encoder probe 严格只读。能力探测和正式编码会话初始化都使用目标尺寸的合成占位输入验证 RKMPP/RGA，不依赖当时能否 dequeue HDMI 帧；只有 capture loop 能发布真实 HDMI 帧。控制器从校验有效的原生 EDID 解析 Established Timing、Standard Timing、base/CTA DTD、CTA VDB 和 Y420 VDB，选择最接近 Moonlight 请求的原生模式，再把它提升为首选并过滤所有高于目标的模式；低分辨率原生 timing、接收器身份、音频、speaker allocation、HDMI VSDB/HF-VSDB 等兼容能力继续保留，避免目标孤立 EDID 使主机回落到 640x480。
 - EDID 字节写入与 HDMI 模式协商是两个独立结果。实际 HDMI timing 已匹配选中原生模式时零写入；不匹配时每个 streaming display 最多执行一次 EDID/HPD 事务，即使相同字节已安装也会重新声明目标。readback 只验证接收器保存的 EDID，随后由独立 verifier 在五秒窗口内以实际捕获尺寸确认主机是否采用目标；失败会明确记录实际尺寸并继续通过 RGA 串流，不再伪报分辨率切换成功。source change、Xbox wake 和会话析构本身不能触发额外写入；异常写入只允许一次原生恢复。
+- HDMI 热插拔使 PulseAudio 录音流失效时，Linux 音频采集会重建输入流，而不是永久结束本次会话的音频。
 - 直通、RGA 创建和运行时 reconfigure 共用同一套 MPP 配置构造，Moonlight 请求的帧率、分数帧率、码率和 GOP 不再在直通路径静默回落到默认值。
 - 编码输出使用调用方提供的 8 MiB MPP packet buffer，并由 `encoded_packet_t` 持有到网络消费者释放，不额外复制到 `std::vector`。普通 P 帧会跳过不必要的 Annex-B IDR 扫描。
 - Web UI 可选择 `HDMI RX (Rockchip)` 和 `Rockchip MPP`，并配置延迟统计、低延迟实验和关闭重编码实验选项。旧 MPP palette OSD、`rkmpp_profile_overlay` 配置项及 Web UI 开关已经删除；性能采样由 `rkmpp_profile` 独立控制，显示统一由 Vulkan UI 负责。
