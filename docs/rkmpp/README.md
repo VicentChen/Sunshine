@@ -260,10 +260,10 @@ HDMI 视频数据面与 EDID 控制面相互独立。只要 RX 成功取得一�
 
 正式 Moonlight 会话由唯一的进程级 EDID 控制器处理目标：
 
-- 当前实际 HDMI 尺寸已经匹配 Moonlight 时，不读取或写入 EDID；编码器能力探测同样严格只读。能力探测和 Moonlight 正式编码会话初始化均使用合成占位输入验证 RKMPP/RGA，因此 Sunshine 启动或客户端连接时 HDMI 暂时无帧都不会导致初始化失败。
+- 当前实际 HDMI 尺寸已经匹配选中的原生模式时，只读取并保存原生能力基线，不写入 EDID；编码器能力探测严格只读。能力探测和 Moonlight 正式编码会话初始化均使用合成占位输入验证 RKMPP/RGA，因此 Sunshine 启动或客户端连接时 HDMI 暂时无帧都不会导致初始化失败。
 - 控制器从完整且校验有效的原生 EDID 解析 Established Timing、Standard Timing、base/CTA DTD、CTA VDB 和 Y420 VDB，再选择与 Moonlight 请求最接近的原生分辨率。
-- 目标 EDID 通过过滤并复制原生 timing 生成，不使用固定的 720p、1080p、1440p 或 4K 模板；接收器身份和仍然有效的音频、speaker allocation、HDMI VSDB/HF-VSDB 等非视频能力保持不变。
-- 目标字节与当前 EDID 相同时写入次数为零；目标改变时正常路径最多写入一次，并立即逐字节 readback 验证。source change、Xbox wake 和 640x480 timing 无权触发额外写入。
+- 目标 EDID 通过重排并过滤原生 timing 生成，不使用固定的 720p、1080p、1440p 或 4K 模板。选中模式被提升为首选，所有高于目标尺寸的模式被移除；低于目标的 1080p、720p、480p 等原生兼容模式不会被删除。接收器身份和仍然有效的音频、speaker allocation、HDMI VSDB/HF-VSDB 等非视频能力保持不变。
+- 只有实际 HDMI timing 匹配选中模式才代表协商成功。输入不匹配时，每次正式 streaming display 最多写入一次并触发 HPD，即使相同目标字节已安装也会重新声明，因为 EDID readback 相同不能证明主机采用了目标。写入后先逐字节验证接收器内容，再在五秒内观察实际输入；超时会记录目标和实际尺寸，同时继续用 RGA 串流。source change、Xbox wake 和 640x480 timing 本身无权触发额外写入。
 - `VIDIOC_S_EDID` 产生的 HPD 周期只会让捕获队列短暂恢复，不会获得重试额度。会话结束也不恢复 EDID，因此断开重连不会额外制造 HPD 周期。
 - 原生 EDID 和 Sunshine 最后应用的投影保存在 `$XDG_CONFIG_HOME/sunshine/hdmirx-edid-state.bin`；未设置 `XDG_CONFIG_HOME` 时使用 `$HOME/.config/sunshine/hdmirx-edid-state.bin`。这样异常退出后仍能辨认原生基线和当前投影。
 - 写入失败或 readback 不一致时只允许一次有界的原生 EDID 恢复；若不能证明可安全写入，则保留实际 HDMI 输入并使用 RGA，不循环改写 EDID。

@@ -7,6 +7,7 @@
 #include "src/platform/hdmirx_policy.h"
 #include "src/platform/linux/edid.h"
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
@@ -20,9 +21,8 @@ namespace platf::hdmirx {
    * @brief Result of applying one Moonlight target to the HDMI receiver.
    */
   enum class edid_apply_status_e {
-    live_match,  ///< Current live input already has the requested dimensions.
-    unchanged,  ///< The exact projected EDID is already installed.
-    applied,  ///< One new projected EDID was written and verified.
+    live_match,  ///< Current live input already has the selected native dimensions.
+    advertised,  ///< Target EDID was written and verified; input timing is pending.
     read_failed,  ///< The current EDID could not be read.
     invalid_native,  ///< The saved native EDID is incomplete or invalid.
     no_mode,  ///< The native EDID contains no selectable video mode.
@@ -41,12 +41,71 @@ namespace platf::hdmirx {
   };
 
   /**
+   * @brief Result of comparing live HDMI input with an advertised target mode.
+   */
+  enum class input_mode_status_e {
+    awaiting,  ///< The verification deadline has not elapsed.
+    matched,  ///< Live HDMI dimensions match the advertised native mode.
+    timed_out,  ///< The source stabilized elsewhere or did not produce input.
+  };
+
+  /**
+   * @brief One terminal HDMI input-mode verification result.
+   */
+  struct input_mode_result_t {
+    input_mode_status_e status {};  ///< Verification outcome.
+    resolution_t expected;  ///< Advertised HDMI dimensions.
+    std::optional<resolution_t> actual;  ///< Last observed live dimensions.
+  };
+
+  /**
+   * @brief Verify that EDID/HPD advertisement changes the source output.
+   *
+   * This state is intentionally independent from capture liveness. Frames may
+   * continue through RGA while verification is awaiting or has timed out.
+   */
+  class input_mode_verifier_t {
+  public:
+    /**
+     * @brief Begin verification for one advertised HDMI mode.
+     *
+     * @param expected Selected native HDMI dimensions.
+     * @param now Monotonic transaction timestamp.
+     * @param timeout Maximum time allowed for the source to adopt the mode.
+     */
+    void begin(
+      const resolution_t &expected,
+      std::chrono::steady_clock::time_point now,
+      std::chrono::steady_clock::duration timeout
+    ) noexcept;
+
+    /**
+     * @brief Observe current HDMI dimensions without blocking capture.
+     *
+     * @param actual Live dimensions, or nullopt while the link has no timing.
+     * @param now Monotonic observation timestamp.
+     * @return A terminal result exactly once, otherwise nullopt.
+     */
+    std::optional<input_mode_result_t> observe(
+      std::optional<resolution_t> actual,
+      std::chrono::steady_clock::time_point now
+    ) noexcept;
+
+  private:
+    std::optional<resolution_t> expected_;  ///< Active advertised dimensions.
+    std::optional<resolution_t> last_actual_;  ///< Most recent live dimensions.
+    std::chrono::steady_clock::time_point deadline_ {};  ///< Verification deadline.
+  };
+
+  /**
    * @brief Own EDID selection and writes independently from video capture.
    *
    * The object has no source-change or timing-notification API by design. One
-   * target application performs zero writes when unchanged and at most one
-   * normal write when the selected target changes. A second write is permitted
-   * only to restore the native bytes after a failed or unverifiable write.
+   * target application performs no write only when live input already matches
+   * the selected native mode. Otherwise it performs one EDID/HPD transaction,
+   * even when identical bytes are installed, because byte equality does not
+   * prove that the source adopted the advertised mode. A second write is
+   * permitted only to restore native bytes after a failed transaction.
    */
   class edid_controller_t {
   public:
@@ -65,7 +124,7 @@ namespace platf::hdmirx {
      * @param target Moonlight requested resolution.
      * @param requested_refresh Optional Moonlight requested refresh rate.
      * @param current_input Current live HDMI dimensions, when a real frame exists.
-     * @return Transaction outcome; failures never block video capture.
+     * @return Advertisement outcome; only live_match proves source adoption.
      */
     edid_apply_result_t apply_target(
       edid::ioctl_backend_t &backend,

@@ -818,6 +818,7 @@ namespace platf {
                 return *stop;
               }
               apply_edid_target_once(std::nullopt);
+              observe_edid_target(std::nullopt);
               continue;
             }
             std::optional<hdmirx::captured_frame_t> frame;
@@ -840,10 +841,12 @@ namespace platf {
                 return *stop;
               }
               apply_edid_target_once(std::nullopt);
+              observe_edid_target(std::nullopt);
               continue;
             }
             const auto format = capture_.format();
             const hdmirx::resolution_t actual {format.width, format.height};
+            observe_edid_target(actual);
             sm_.enter_streaming(hdmirx::needs_conversion(actual, moonlight_resolution_));
             std::shared_ptr<img_t> image;
             if (!pull(image) || !image) {
@@ -991,7 +994,7 @@ namespace platf {
         return std::nullopt;
       }
 
-      /** @brief Run the independent EDID transaction at most once per display. */
+      /** @brief Run one target advertisement transaction per streaming display. */
       void apply_edid_target_once(std::optional<hdmirx::resolution_t> current_input) {
         if (purpose_ != display_purpose_e::stream || edid_target_attempted_) {
           return;
@@ -999,12 +1002,43 @@ namespace platf {
         edid_target_attempted_ = true;
         const auto result = hdmirx::process_edid_controller().apply_target(backend_, 0, moonlight_resolution_, moonlight_refresh_, current_input);
         if (result.selected_mode) {
-          BOOST_LOG(info) << "HDMI RX native EDID selected " << result.selected_mode->resolution.width << 'x'
-                          << result.selected_mode->resolution.height << " for Moonlight "
-                          << moonlight_resolution_.width << 'x' << moonlight_resolution_.height
-                          << ": " << result.message;
+          const auto &selected = result.selected_mode->resolution;
+          if (result.status == hdmirx::edid_apply_status_e::live_match) {
+            BOOST_LOG(info) << "HDMI mode negotiation verified from live input: Moonlight "
+                            << moonlight_resolution_.width << 'x' << moonlight_resolution_.height
+                            << " selected native " << selected.width << 'x' << selected.height
+                            << ", actual input matches";
+          } else {
+            BOOST_LOG(info) << "HDMI mode advertisement: Moonlight " << moonlight_resolution_.width << 'x'
+                            << moonlight_resolution_.height << " selected native " << selected.width << 'x'
+                            << selected.height << ": " << result.message;
+          }
+          if (result.status == hdmirx::edid_apply_status_e::advertised) {
+            input_mode_verifier_.begin(selected, std::chrono::steady_clock::now(), std::chrono::seconds(5));
+          }
         } else {
           BOOST_LOG(info) << "HDMI RX EDID control: " << result.message;
+        }
+      }
+
+      /** @brief Report whether the source adopted the advertised HDMI mode. */
+      void observe_edid_target(std::optional<hdmirx::resolution_t> actual) {
+        const auto result = input_mode_verifier_.observe(actual, std::chrono::steady_clock::now());
+        if (!result) {
+          return;
+        }
+        if (result->status == hdmirx::input_mode_status_e::matched) {
+          BOOST_LOG(info) << "HDMI mode negotiation verified: actual input " << result->expected.width << 'x'
+                          << result->expected.height << " matches the advertised native mode";
+          return;
+        }
+        if (result->actual) {
+          BOOST_LOG(error) << "HDMI mode negotiation failed: advertised " << result->expected.width << 'x'
+                           << result->expected.height << " but live input remained " << result->actual->width << 'x'
+                           << result->actual->height << "; continuing the live stream through RGA fallback";
+        } else {
+          BOOST_LOG(error) << "HDMI mode negotiation failed: advertised " << result->expected.width << 'x'
+                           << result->expected.height << " but no live HDMI timing appeared; capture remains live-first";
         }
       }
 
@@ -1014,6 +1048,7 @@ namespace platf {
       hdmirx::resolution_t moonlight_resolution_;  ///< Moonlight-requested coded resolution for the active session.
       hdmirx::refresh_rate_t moonlight_refresh_;  ///< Moonlight-requested refresh rate.
       display_purpose_e purpose_;  ///< Distinguishes streaming from read-only probes.
+      hdmirx::input_mode_verifier_t input_mode_verifier_;  ///< Confirms source adoption independently from capture.
       bool recovery_pending_ {};
       bool edid_target_attempted_ {};  ///< Prevents source events from reapplying EDID.
     };

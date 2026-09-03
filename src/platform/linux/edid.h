@@ -227,20 +227,23 @@ namespace platf::edid {
   std::vector<platf::hdmirx::hdmi_mode_t> parse_edid_modes(std::span<const std::uint8_t> edid_data) noexcept;
 
   /**
-   * @brief Project a native EDID to one of its advertised resolutions.
+   * @brief Build a source-compatible EDID profile capped at one native mode.
    *
-   * Matching video encodings are copied byte-for-byte. Other video encodings
-   * are removed while non-video CTA capabilities remain unchanged. Unknown
-   * extension formats are rejected because their video contents cannot be
-   * filtered safely.
+   * The selected mode is promoted ahead of other native encodings. Lower and
+   * equal resolutions remain available as compatibility fallbacks, while any
+   * mode exceeding the selected dimensions is removed. Video timings are
+   * copied from the validated receiver EDID; this function never synthesizes
+   * timings. Non-video CTA capabilities remain unchanged. Unknown extension
+   * formats are rejected because their video contents cannot be filtered
+   * safely.
    *
    * @param source_edid Complete native EDID.
-   * @param target Resolution selected from the native mode catalog.
-   * @return Valid projected EDID, or an empty vector when projection is unsafe.
+   * @param target Verified native mode selected for the Moonlight request.
+   * @return Valid target EDID, or an empty vector when projection is unsafe.
    */
-  std::vector<std::uint8_t> project_edid_to_resolution(
+  std::vector<std::uint8_t> project_edid_for_mode(
     std::span<const std::uint8_t> source_edid,
-    const platf::hdmirx::resolution_t &target
+    const platf::hdmirx::hdmi_mode_t &target
   ) noexcept;
 
   /**

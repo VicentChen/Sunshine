@@ -74,12 +74,14 @@ namespace {
     }
   };
 
-  TEST(HdmirxEdidController, MatchingLiveFrameDoesNotReadOrWriteEdid) {
+  TEST(HdmirxEdidController, MatchingSelectedLiveModeReadsBaselineButDoesNotWrite) {
     event_receiver_t receiver;
     edid_controller_t controller;
     const auto result = controller.apply_target(receiver, 0, {1920, 1080}, {{60, 1}}, resolution_t {1920, 1080});
     EXPECT_EQ(result.status, edid_apply_status_e::live_match);
-    EXPECT_EQ(receiver.reads, 0U);
+    ASSERT_TRUE(result.selected_mode);
+    EXPECT_EQ(result.selected_mode->resolution, (resolution_t {1920, 1080}));
+    EXPECT_EQ(receiver.reads, 2U);
     EXPECT_EQ(receiver.writes, 0U);
     EXPECT_EQ(receiver.hpd_events, 0U);
     EXPECT_EQ(receiver.audio_changes, 1U);
@@ -89,7 +91,7 @@ namespace {
     event_receiver_t receiver;
     edid_controller_t controller;
     const auto result = controller.apply_target(receiver, 0, {1680, 1050}, {{60, 1}});
-    ASSERT_EQ(result.status, edid_apply_status_e::applied);
+    ASSERT_EQ(result.status, edid_apply_status_e::advertised);
     ASSERT_TRUE(result.selected_mode);
     EXPECT_EQ(result.selected_mode->resolution, (resolution_t {1600, 900}));
     EXPECT_EQ(receiver.writes, 1U);
@@ -97,32 +99,77 @@ namespace {
     const auto modes = parse_edid_modes(receiver.bytes);
     ASSERT_FALSE(modes.empty());
     EXPECT_TRUE(std::all_of(modes.begin(), modes.end(), [](const auto &mode) {
-      return mode.resolution == resolution_t {1600, 900};
+      return mode.resolution.width <= 1600U && mode.resolution.height <= 900U;
+    }));
+    EXPECT_TRUE(std::any_of(modes.begin(), modes.end(), [](const auto &mode) {
+      return mode.resolution == resolution_t {640, 480};
     }));
   }
 
-  TEST(HdmirxEdidController, RepeatedTargetAfterHpdEventsNeverRewrites) {
+  TEST(HdmirxEdidController, FourKInputIsRenegotiatedForA1080pMoonlightTarget) {
+    event_receiver_t receiver;
+    receiver.bytes = edid_test::make_rockchip_340mhz_edid();
+    edid_controller_t controller;
+    const auto result = controller.apply_target(receiver, 0, {1920, 1080}, {{60, 1}}, resolution_t {3840, 2160});
+    ASSERT_EQ(result.status, edid_apply_status_e::advertised);
+    ASSERT_TRUE(result.selected_mode);
+    EXPECT_EQ(result.selected_mode->resolution, (resolution_t {1920, 1080}));
+    EXPECT_EQ(receiver.writes, 1U);
+    const auto modes = parse_edid_modes(receiver.bytes);
+    EXPECT_FALSE(std::any_of(modes.begin(), modes.end(), [](const auto &mode) {
+      return mode.resolution == resolution_t {3840, 2160};
+    }));
+  }
+
+  TEST(HdmirxEdidController, Rockchip340ProfileAdvertises4kWithoutA600MHzTemplate) {
+    event_receiver_t receiver;
+    receiver.bytes = edid_test::make_rockchip_340mhz_edid();
+    edid_controller_t controller;
+    const auto result = controller.apply_target(receiver, 0, {3840, 2160}, {{60, 1}}, resolution_t {640, 480});
+    ASSERT_EQ(result.status, edid_apply_status_e::advertised);
+    ASSERT_TRUE(result.selected_mode);
+    EXPECT_EQ(result.selected_mode->resolution, (resolution_t {3840, 2160}));
+    EXPECT_EQ(result.selected_mode->refresh_rate, (refresh_rate_t {60, 1}));
+    EXPECT_EQ(receiver.writes, 1U);
+    const auto catalog = parse_mode_catalog(receiver.bytes);
+    EXPECT_TRUE(std::any_of(catalog.begin(), catalog.end(), [](const auto &record) {
+      return record.mode.resolution == resolution_t {3840, 2160} && record.origin == mode_origin_e::cta_y420_vdb;
+    }));
+    EXPECT_TRUE(std::any_of(catalog.begin(), catalog.end(), [](const auto &record) {
+      return record.mode.resolution == resolution_t {1920, 1080} && record.origin == mode_origin_e::base_dtd;
+    }));
+  }
+
+  TEST(HdmirxEdidController, ExistingTargetBytesAreReassertedUntilLiveTimingMatches) {
     event_receiver_t receiver;
     edid_controller_t controller;
-    ASSERT_EQ(controller.apply_target(receiver, 0, {1280, 720}).status, edid_apply_status_e::applied);
+    ASSERT_EQ(controller.apply_target(receiver, 0, {1920, 1080}, {{60, 1}}, resolution_t {3840, 2160}).status, edid_apply_status_e::advertised);
+    const auto first_profile = receiver.bytes;
+    const auto repeated = controller.apply_target(receiver, 0, {1920, 1080}, {{60, 1}}, resolution_t {640, 480});
+    EXPECT_EQ(repeated.status, edid_apply_status_e::advertised);
+    EXPECT_EQ(receiver.bytes, first_profile);
+    EXPECT_EQ(receiver.writes, 2U);
+  }
+
+  TEST(HdmirxEdidController, MismatchedLiveModeReassertsTargetForANewTransaction) {
+    event_receiver_t receiver;
+    edid_controller_t controller;
+    ASSERT_EQ(controller.apply_target(receiver, 0, {1280, 720}).status, edid_apply_status_e::advertised);
     const auto events_after_write = receiver.hpd_events;
 
-    // The fake has already emitted plugout, hotplug, and source-change. The
-    // controller intentionally has no event-notification API; applying the same
-    // session target again is byte-idempotent.
-    const auto repeated = controller.apply_target(receiver, 0, {1280, 720});
-    EXPECT_EQ(repeated.status, edid_apply_status_e::unchanged);
-    EXPECT_EQ(receiver.writes, 1U);
-    EXPECT_EQ(receiver.hpd_events, events_after_write);
+    const auto repeated = controller.apply_target(receiver, 0, {1280, 720}, std::nullopt, resolution_t {1920, 1080});
+    EXPECT_EQ(repeated.status, edid_apply_status_e::advertised);
+    EXPECT_EQ(receiver.writes, 2U);
+    EXPECT_GT(receiver.hpd_events, events_after_write);
     EXPECT_EQ(receiver.audio_changes, 1U);
   }
 
   TEST(HdmirxEdidController, NewMoonlightTargetUsesCachedNativeBaseline) {
     event_receiver_t receiver;
     edid_controller_t controller;
-    ASSERT_EQ(controller.apply_target(receiver, 0, {1280, 720}).status, edid_apply_status_e::applied);
+    ASSERT_EQ(controller.apply_target(receiver, 0, {1280, 720}).status, edid_apply_status_e::advertised);
     const auto second = controller.apply_target(receiver, 0, {3840, 2160});
-    ASSERT_EQ(second.status, edid_apply_status_e::applied);
+    ASSERT_EQ(second.status, edid_apply_status_e::advertised);
     ASSERT_TRUE(second.selected_mode);
     EXPECT_EQ(second.selected_mode->resolution, (resolution_t {3840, 2160}));
     EXPECT_EQ(receiver.writes, 2U);
@@ -154,7 +201,7 @@ namespace {
     event_receiver_t receiver;
     {
       edid_controller_t controller;
-      ASSERT_EQ(controller.apply_target(receiver, 0, {1280, 720}).status, edid_apply_status_e::applied);
+      ASSERT_EQ(controller.apply_target(receiver, 0, {1280, 720}).status, edid_apply_status_e::advertised);
       EXPECT_EQ(receiver.writes, 1U);
     }
     EXPECT_EQ(receiver.writes, 1U);
@@ -168,12 +215,12 @@ namespace {
     event_receiver_t receiver;
     {
       edid_controller_t first_process {state_path};
-      ASSERT_EQ(first_process.apply_target(receiver, 0, {1280, 720}).status, edid_apply_status_e::applied);
+      ASSERT_EQ(first_process.apply_target(receiver, 0, {1280, 720}).status, edid_apply_status_e::advertised);
     }
     {
       edid_controller_t restarted_process {state_path};
       const auto result = restarted_process.apply_target(receiver, 0, {3840, 2160});
-      ASSERT_EQ(result.status, edid_apply_status_e::applied);
+      ASSERT_EQ(result.status, edid_apply_status_e::advertised);
       ASSERT_TRUE(result.selected_mode);
       EXPECT_EQ(result.selected_mode->resolution, (resolution_t {3840, 2160}));
     }
@@ -188,5 +235,52 @@ namespace {
     const auto result = controller.apply_target(receiver, 0, {1920, 1080});
     EXPECT_EQ(result.status, edid_apply_status_e::read_failed);
     EXPECT_EQ(receiver.writes, 0U);
+  }
+
+  TEST(HdmirxEdidController, ExactLiveTargetSurvivesAnEdidReadFailure) {
+    event_receiver_t receiver;
+    receiver.fail_reads = true;
+    edid_controller_t controller;
+    const auto result = controller.apply_target(receiver, 0, {1920, 1080}, {{60, 1}}, resolution_t {1920, 1080});
+    EXPECT_EQ(result.status, edid_apply_status_e::live_match);
+    EXPECT_FALSE(result.selected_mode);
+    EXPECT_EQ(receiver.writes, 0U);
+    EXPECT_EQ(receiver.audio_changes, 1U);
+  }
+
+  TEST(HdmirxInputModeVerifier, ReportsMatchExactlyOnce) {
+    input_mode_verifier_t verifier;
+    const auto start = std::chrono::steady_clock::time_point {};
+    verifier.begin({1920, 1080}, start, std::chrono::seconds(5));
+    EXPECT_FALSE(verifier.observe(resolution_t {640, 480}, start + std::chrono::seconds(1)));
+    const auto matched = verifier.observe(resolution_t {1920, 1080}, start + std::chrono::seconds(2));
+    ASSERT_TRUE(matched);
+    EXPECT_EQ(matched->status, input_mode_status_e::matched);
+    EXPECT_EQ(matched->expected, (resolution_t {1920, 1080}));
+    EXPECT_EQ(matched->actual, (resolution_t {1920, 1080}));
+    EXPECT_FALSE(verifier.observe(resolution_t {1920, 1080}, start + std::chrono::seconds(3)));
+  }
+
+  TEST(HdmirxInputModeVerifier, ReportsLastMismatchedTimingAtDeadline) {
+    input_mode_verifier_t verifier;
+    const auto start = std::chrono::steady_clock::time_point {};
+    verifier.begin({3840, 2160}, start, std::chrono::seconds(5));
+    EXPECT_FALSE(verifier.observe(std::nullopt, start + std::chrono::seconds(3)));
+    EXPECT_FALSE(verifier.observe(resolution_t {640, 480}, start + std::chrono::seconds(4)));
+    const auto timed_out = verifier.observe(std::nullopt, start + std::chrono::seconds(5));
+    ASSERT_TRUE(timed_out);
+    EXPECT_EQ(timed_out->status, input_mode_status_e::timed_out);
+    EXPECT_EQ(timed_out->actual, (resolution_t {640, 480}));
+    EXPECT_FALSE(verifier.observe(std::nullopt, start + std::chrono::seconds(6)));
+  }
+
+  TEST(HdmirxInputModeVerifier, ReportsMissingTimingAtDeadline) {
+    input_mode_verifier_t verifier;
+    const auto start = std::chrono::steady_clock::time_point {};
+    verifier.begin({3840, 2160}, start, std::chrono::seconds(5));
+    const auto timed_out = verifier.observe(std::nullopt, start + std::chrono::seconds(5));
+    ASSERT_TRUE(timed_out);
+    EXPECT_EQ(timed_out->status, input_mode_status_e::timed_out);
+    EXPECT_FALSE(timed_out->actual);
   }
 }  // namespace

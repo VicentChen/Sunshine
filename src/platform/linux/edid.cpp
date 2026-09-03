@@ -59,6 +59,14 @@ namespace platf::edid {
       return left.resolution == right.resolution && same_refresh(left.refresh_rate, right.refresh_rate);
     }
 
+    /** @brief Check whether a mode fits inside the advertised resolution ceiling. */
+    bool fits_within(
+      const platf::hdmirx::resolution_t &candidate,
+      const platf::hdmirx::resolution_t &ceiling
+    ) noexcept {
+      return candidate.width <= ceiling.width && candidate.height <= ceiling.height;
+    }
+
     /** @brief Decode one base-block standard timing pair. */
     std::optional<platf::hdmirx::hdmi_mode_t> standard_timing_to_mode(
       std::uint8_t horizontal,
@@ -109,6 +117,9 @@ namespace platf::edid {
           return progressive({1280, 720}, {60, 1});
         case 5:
           return interlaced({1920, 1080}, {60, 1});
+        case 6:
+        case 7:
+          return interlaced({720, 480}, {60, 1});
         case 16:
           return progressive({1920, 1080}, {60, 1});
         case 17:
@@ -118,6 +129,9 @@ namespace platf::edid {
           return progressive({1280, 720}, {50, 1});
         case 20:
           return interlaced({1920, 1080}, {50, 1});
+        case 21:
+        case 22:
+          return interlaced({720, 576}, {50, 1});
         case 31:
           return progressive({1920, 1080}, {50, 1});
         case 32:
@@ -215,7 +229,7 @@ namespace platf::edid {
     /** @brief Filter one CTA video data block into a projected collection. */
     bool append_projected_cta_block(
       std::span<const std::uint8_t> block,
-      const platf::hdmirx::resolution_t &target,
+      const platf::hdmirx::hdmi_mode_t &target,
       std::vector<std::uint8_t> &output
     ) {
       const auto header = block.front();
@@ -232,17 +246,31 @@ namespace platf::edid {
       }
 
       const auto first = y420_vdb ? std::size_t {2} : std::size_t {1};
-      std::vector<std::uint8_t> selected;
+      std::vector<std::uint8_t> preferred;
+      std::vector<std::uint8_t> fallbacks;
       for (std::size_t index = first; index < block.size(); ++index) {
         const auto vic = static_cast<std::uint8_t>(block[index] & 0x7fU);
         const auto decoded = cta_vic_to_mode(vic);
         if (!decoded) {
           return false;
         }
-        if (decoded->first.resolution == target) {
-          selected.push_back(block[index]);
+        if (!fits_within(decoded->first.resolution, target.resolution)) {
+          continue;
+        }
+        auto encoding = static_cast<std::uint8_t>(block[index] & 0x7fU);
+        if (same_mode(decoded->first, target)) {
+          if (!y420_vdb) {
+            encoding |= 0x80U;
+          }
+          preferred.push_back(encoding);
+        } else {
+          fallbacks.push_back(encoding);
         }
       }
+      std::vector<std::uint8_t> selected;
+      selected.reserve(preferred.size() + fallbacks.size());
+      selected.insert(selected.end(), preferred.begin(), preferred.end());
+      selected.insert(selected.end(), fallbacks.begin(), fallbacks.end());
       if (selected.empty()) {
         return true;
       }
@@ -251,11 +279,6 @@ namespace platf::edid {
         output.push_back(0x0eU);
         output.insert(output.end(), selected.begin(), selected.end());
       } else {
-        if (std::none_of(selected.begin(), selected.end(), [](std::uint8_t value) {
-              return (value & 0x80U) != 0;
-            })) {
-          selected.front() |= 0x80U;
-        }
         output.push_back(static_cast<std::uint8_t>(0x40U | selected.size()));
         output.insert(output.end(), selected.begin(), selected.end());
       }
@@ -472,13 +495,13 @@ namespace platf::edid {
     return modes;
   }
 
-  std::vector<std::uint8_t> project_edid_to_resolution(
+  std::vector<std::uint8_t> project_edid_for_mode(
     std::span<const std::uint8_t> source_edid,
-    const platf::hdmirx::resolution_t &target
+    const platf::hdmirx::hdmi_mode_t &target
   ) noexcept {
     const auto catalog = parse_mode_catalog(source_edid);
-    if (catalog.empty() || std::none_of(catalog.begin(), catalog.end(), [&target](const auto &record) {
-          return record.mode.resolution == target;
+    if (!target.verified || catalog.empty() || std::none_of(catalog.begin(), catalog.end(), [&target](const auto &record) {
+          return same_mode(record.mode, target);
         })) {
       return {};
     }
@@ -492,19 +515,20 @@ namespace platf::edid {
     std::vector<std::uint8_t> projected(source_edid.begin(), source_edid.end());
     auto base = std::span<std::uint8_t, k_edid_block_size> {projected.data(), k_edid_block_size};
     for (const auto &timing : k_established_timings) {
-      if (timing.resolution != target) {
+      if (!fits_within(timing.resolution, target.resolution)) {
         base[timing.byte] &= static_cast<std::uint8_t>(~timing.mask);
       }
     }
     for (std::size_t offset = 38; offset < 54; offset += 2) {
       const auto mode = standard_timing_to_mode(base[offset], base[offset + 1], base[18] == 1U && base[19] < 3U);
-      if (mode && mode->resolution != target) {
+      if (mode && !fits_within(mode->resolution, target.resolution)) {
         base[offset] = 0x01U;
         base[offset + 1] = 0x01U;
       }
     }
 
-    std::vector<std::array<std::uint8_t, 18>> base_target_dtds;
+    std::vector<std::array<std::uint8_t, 18>> base_preferred_dtds;
+    std::vector<std::array<std::uint8_t, 18>> base_fallback_dtds;
     std::vector<std::array<std::uint8_t, 18>> monitor_descriptors;
     for (std::size_t offset = 54; offset <= 108; offset += 18) {
       std::array<std::uint8_t, 18> raw {};
@@ -516,13 +540,24 @@ namespace platf::edid {
             })) {
           monitor_descriptors.push_back(raw);
         }
-      } else if (timing->h_active == target.width && timing->v_active == target.height) {
-        base_target_dtds.push_back(raw);
+      } else if (const auto mode = timing_to_hdmi_mode(*timing); mode && fits_within(mode->resolution, target.resolution)) {
+        if (same_mode(*mode, target)) {
+          base_preferred_dtds.push_back(raw);
+        } else {
+          base_fallback_dtds.push_back(raw);
+        }
       }
     }
     std::fill(base.begin() + 54, base.begin() + 126, std::uint8_t {0});
     auto descriptor_offset = std::size_t {54};
-    for (const auto &raw : base_target_dtds) {
+    for (const auto &raw : base_preferred_dtds) {
+      if (descriptor_offset > 108) {
+        break;
+      }
+      std::copy(raw.begin(), raw.end(), base.begin() + descriptor_offset);
+      descriptor_offset += raw.size();
+    }
+    for (const auto &raw : base_fallback_dtds) {
       if (descriptor_offset > 108) {
         break;
       }
@@ -536,7 +571,7 @@ namespace platf::edid {
       std::copy(raw.begin(), raw.end(), base.begin() + descriptor_offset);
       descriptor_offset += raw.size();
     }
-    if (base_target_dtds.empty()) {
+    if (base_preferred_dtds.empty()) {
       base[24] &= static_cast<std::uint8_t>(~0x02U);
     } else {
       base[24] |= 0x02U;
@@ -559,33 +594,45 @@ namespace platf::edid {
         offset += block_size;
       }
 
-      std::vector<std::array<std::uint8_t, 18>> target_dtds;
+      std::vector<std::array<std::uint8_t, 18>> preferred_dtds;
+      std::vector<std::array<std::uint8_t, 18>> fallback_dtds;
       if (source[2] != 0) {
         for (std::size_t offset = data_end; offset + 18 <= 127; offset += 18) {
           std::array<std::uint8_t, 18> raw {};
           std::copy_n(source.begin() + offset, raw.size(), raw.begin());
           const auto timing = parse_timing_descriptor(std::span<const std::uint8_t, 18> {raw.data(), raw.size()});
-          if (timing && timing->h_active == target.width && timing->v_active == target.height) {
-            target_dtds.push_back(raw);
+          if (timing) {
+            const auto mode = timing_to_hdmi_mode(*timing);
+            if (mode && fits_within(mode->resolution, target.resolution)) {
+              if (same_mode(*mode, target)) {
+                preferred_dtds.push_back(raw);
+              } else {
+                fallback_dtds.push_back(raw);
+              }
+            }
           }
         }
       }
 
       const auto dtd_offset = 4U + data_blocks.size();
-      if (dtd_offset + target_dtds.size() * 18U > 127U) {
+      if (dtd_offset + (preferred_dtds.size() + fallback_dtds.size()) * 18U > 127U) {
         return {};
       }
       std::array<std::uint8_t, k_edid_block_size> rewritten {};
       rewritten[0] = 0x02U;
       rewritten[1] = source[1];
-      rewritten[3] = static_cast<std::uint8_t>((source[3] & 0xf0U) | std::min<std::size_t>(target_dtds.size(), 15U));
+      rewritten[3] = static_cast<std::uint8_t>((source[3] & 0xf0U) | std::min<std::size_t>(preferred_dtds.size(), 15U));
       std::copy(data_blocks.begin(), data_blocks.end(), rewritten.begin() + 4);
       auto output_offset = dtd_offset;
-      for (const auto &raw : target_dtds) {
+      for (const auto &raw : preferred_dtds) {
         std::copy(raw.begin(), raw.end(), rewritten.begin() + output_offset);
         output_offset += raw.size();
       }
-      rewritten[2] = data_blocks.empty() && target_dtds.empty() ? 0U : static_cast<std::uint8_t>(dtd_offset);
+      for (const auto &raw : fallback_dtds) {
+        std::copy(raw.begin(), raw.end(), rewritten.begin() + output_offset);
+        output_offset += raw.size();
+      }
+      rewritten[2] = data_blocks.empty() && preferred_dtds.empty() && fallback_dtds.empty() ? 0U : static_cast<std::uint8_t>(dtd_offset);
       fix_checksum(std::span<std::uint8_t, k_edid_block_size> {rewritten.data(), rewritten.size()});
       std::copy(rewritten.begin(), rewritten.end(), projected.begin() + block_index * k_edid_block_size);
     }
@@ -594,9 +641,13 @@ namespace platf::edid {
       return {};
     }
     const auto projected_catalog = parse_mode_catalog(projected);
-    if (projected_catalog.empty() || std::any_of(projected_catalog.begin(), projected_catalog.end(), [&target](const auto &record) {
-          return record.mode.resolution != target;
-        })) {
+    const auto retained_target = std::any_of(projected_catalog.begin(), projected_catalog.end(), [&target](const auto &record) {
+      return same_mode(record.mode, target);
+    });
+    const auto exceeds_target = std::any_of(projected_catalog.begin(), projected_catalog.end(), [&target](const auto &record) {
+      return !fits_within(record.mode.resolution, target.resolution);
+    });
+    if (projected_catalog.empty() || !retained_target || exceeds_target) {
       return {};
     }
     return projected;

@@ -13,7 +13,21 @@
 
 namespace {
   using namespace platf::edid;
+  using platf::hdmirx::hdmi_mode_t;
   using platf::hdmirx::resolution_t;
+
+  /** @brief Project a fixture for its verified 60 Hz native mode. */
+  std::vector<std::uint8_t> project_60hz(
+    const std::vector<std::uint8_t> &source,
+    resolution_t resolution
+  ) {
+    return project_edid_for_mode(source, hdmi_mode_t {resolution, {60, 1}, true});
+  }
+
+  /** @brief Return whether a resolution fits inside a target ceiling. */
+  bool fits_within(resolution_t candidate, resolution_t target) {
+    return candidate.width <= target.width && candidate.height <= target.height;
+  }
 
   /** @brief Mockable in-memory EDID backend. */
   class memory_backend_t final: public ioctl_backend_t {
@@ -134,22 +148,24 @@ namespace {
               1);
   }
 
-  TEST(EdidProjection, PreservesNative1080DetailedTimingBytes) {
+  TEST(EdidProjection, PromotesTargetAndPreservesLowerCompatibilityModes) {
     const auto native = edid_test::make_native_edid();
-    const auto projected = project_edid_to_resolution(native, {1920, 1080});
+    const auto projected = project_60hz(native, {1920, 1080});
     ASSERT_FALSE(projected.empty());
     EXPECT_TRUE(validate_edid_checksums(projected));
     EXPECT_TRUE(std::equal(native.begin() + 54, native.begin() + 72, projected.begin() + 54));
     const auto catalog = parse_mode_catalog(projected);
     ASSERT_FALSE(catalog.empty());
     EXPECT_TRUE(std::all_of(catalog.begin(), catalog.end(), [](const auto &record) {
-      return record.mode.resolution == resolution_t {1920, 1080};
+      return fits_within(record.mode.resolution, {1920, 1080});
     }));
+    EXPECT_TRUE(contains(catalog, {1280, 720}, mode_origin_e::cta_vdb));
+    EXPECT_TRUE(contains(catalog, {640, 480}, mode_origin_e::established_timing));
   }
 
   TEST(EdidProjection, PreservesNonVideoCtaCapabilities) {
     const auto native = edid_test::make_native_edid();
-    const auto projected = project_edid_to_resolution(native, {1920, 1080});
+    const auto projected = project_60hz(native, {1920, 1080});
     ASSERT_FALSE(projected.empty());
     const std::array<std::uint8_t, 4> audio {0x23, 0x09, 0x07, 0x07};
     const std::array<std::uint8_t, 6> hdmi_vsdb {0x65, 0x03, 0x0c, 0x00, 0x10, 0x00};
@@ -157,19 +173,20 @@ namespace {
     EXPECT_NE(std::search(projected.begin(), projected.end(), hdmi_vsdb.begin(), hdmi_vsdb.end()), projected.end());
   }
 
-  TEST(EdidProjection, EmitsEachSelectedCtaVicExactlyOnce) {
-    const auto projected = project_edid_to_resolution(edid_test::make_native_edid(), {1920, 1080});
+  TEST(EdidProjection, PlacesTheSelectedCtaModeBeforeFallbacks) {
+    const auto projected = project_60hz(edid_test::make_native_edid(), {1920, 1080});
     ASSERT_FALSE(projected.empty());
     const auto extension_offset = k_edid_block_size;
-    ASSERT_EQ(projected[extension_offset + 4], 0x41U);
+    ASSERT_EQ(projected[extension_offset + 4], 0x42U);
     EXPECT_EQ(projected[extension_offset + 5], 0x90U);
-    EXPECT_EQ(projected[extension_offset + 6] >> 5U, 1U);
+    EXPECT_EQ(projected[extension_offset + 6], 4U);
+    EXPECT_EQ(projected[extension_offset + 7] >> 5U, 1U);
   }
 
   TEST(EdidProjection, PreservesNativeCtaDetailedTimingBytes) {
     const auto native = edid_test::make_native_edid();
     const auto source_catalog = parse_mode_catalog(native);
-    const auto projected = project_edid_to_resolution(native, {1280, 720});
+    const auto projected = project_60hz(native, {1280, 720});
     ASSERT_FALSE(projected.empty());
     const auto projected_catalog = parse_mode_catalog(projected);
     const auto source_dtd = std::find_if(source_catalog.begin(), source_catalog.end(), [](const auto &record) {
@@ -182,32 +199,66 @@ namespace {
     ASSERT_NE(projected_dtd, projected_catalog.end());
     EXPECT_EQ(projected_dtd->raw_encoding, source_dtd->raw_encoding);
     EXPECT_TRUE(std::all_of(projected_catalog.begin(), projected_catalog.end(), [](const auto &record) {
-      return record.mode.resolution == resolution_t {1280, 720};
+      return fits_within(record.mode.resolution, {1280, 720});
     }));
   }
 
   TEST(EdidProjection, SupportsStandardAndEstablishedModesWithoutTemplates) {
     const auto native = edid_test::make_native_edid();
     for (const auto resolution : {resolution_t {1600, 900}, resolution_t {640, 480}}) {
-      const auto projected = project_edid_to_resolution(native, resolution);
+      const auto projected = project_60hz(native, resolution);
       ASSERT_FALSE(projected.empty());
       const auto catalog = parse_mode_catalog(projected);
       ASSERT_FALSE(catalog.empty());
       EXPECT_TRUE(std::all_of(catalog.begin(), catalog.end(), [&](const auto &record) {
-        return record.mode.resolution == resolution;
+        return fits_within(record.mode.resolution, resolution);
       }));
     }
   }
 
+  TEST(EdidProjection, Rockchip340ProfileSelects4kWithoutRemovingSafeFallbacks) {
+    const auto native = edid_test::make_rockchip_340mhz_edid();
+    const auto projected = project_60hz(native, {3840, 2160});
+    ASSERT_FALSE(projected.empty());
+    ASSERT_TRUE(validate_edid_checksums(projected));
+    const auto catalog = parse_mode_catalog(projected);
+    EXPECT_TRUE(contains(catalog, {3840, 2160}, mode_origin_e::cta_vdb));
+    EXPECT_TRUE(contains(catalog, {3840, 2160}, mode_origin_e::cta_y420_vdb));
+    EXPECT_TRUE(contains(catalog, {1920, 1080}, mode_origin_e::base_dtd));
+    EXPECT_TRUE(contains(catalog, {1280, 720}, mode_origin_e::cta_vdb));
+    EXPECT_TRUE(contains(catalog, {640, 480}, mode_origin_e::cta_vdb));
+    EXPECT_EQ(projected[k_edid_block_size + 4], 0x51U);
+    EXPECT_EQ(projected[k_edid_block_size + 5], 0xe1U);
+    EXPECT_EQ(projected[24] & 0x02U, 0U);
+    EXPECT_TRUE(std::all_of(catalog.begin(), catalog.end(), [](const auto &record) {
+      return fits_within(record.mode.resolution, {3840, 2160});
+    }));
+  }
+
+  TEST(EdidProjection, Rockchip340ProfileCaps1080AndRemovesEvery4kEncoding) {
+    const auto projected = project_60hz(edid_test::make_rockchip_340mhz_edid(), {1920, 1080});
+    ASSERT_FALSE(projected.empty());
+    const auto catalog = parse_mode_catalog(projected);
+    ASSERT_FALSE(catalog.empty());
+    EXPECT_TRUE(contains(catalog, {1920, 1080}, mode_origin_e::base_dtd));
+    EXPECT_TRUE(std::all_of(catalog.begin(), catalog.end(), [](const auto &record) {
+      return fits_within(record.mode.resolution, {1920, 1080});
+    }));
+    EXPECT_FALSE(std::any_of(catalog.begin(), catalog.end(), [](const auto &record) {
+      return record.mode.resolution == resolution_t {3840, 2160};
+    }));
+  }
+
   TEST(EdidProjection, RejectsInvalidUnadvertisedAndUnknownExtensionData) {
     const auto native = edid_test::make_native_edid();
-    EXPECT_TRUE(project_edid_to_resolution(native, {1366, 768}).empty());
-    EXPECT_TRUE(project_edid_to_resolution(edid_test::make_bad_checksum_edid(), {1920, 1080}).empty());
+    EXPECT_TRUE(project_edid_for_mode(native, {{1920, 1080}, {60, 1}, false}).empty());
+    EXPECT_TRUE(project_edid_for_mode(native, {{1366, 768}, {60, 1}, true}).empty());
+    EXPECT_TRUE(project_edid_for_mode(edid_test::make_bad_checksum_edid(), {{1920, 1080}, {60, 1}, true}).empty());
     auto unknown = native;
     unknown[k_edid_block_size] = 0x70;
     auto extension = std::span<std::uint8_t, k_edid_block_size> {unknown.data() + k_edid_block_size, k_edid_block_size};
     edid_test::fix_checksum(extension);
-    EXPECT_TRUE(project_edid_to_resolution(unknown, {1920, 1080}).empty());
+    EXPECT_TRUE(project_edid_for_mode(unknown, {{1920, 1080}, {60, 1}, true}).empty());
   }
 
   TEST(EdidIo, ReadsCompleteDeclaredEdid) {

@@ -7,7 +7,7 @@
 - 目标：彻底移除 EDID 控制与视频数据传输之间的错误耦合，保证 HDMI 有输入时立即串流，并根据 Moonlight 请求从 HDMI RX 原生 EDID 中选择最接近的分辨率
 - 非目标：修改 Xbox Remote Play 协议、改变非 RKMPP 平台的显示捕获、修改 `docs/rkmpp/SPEC.md`
 
-## 2026-09-03 实施进度
+## 2026-09-04 实施进度
 
 已完成的软件改造：
 
@@ -18,8 +18,11 @@
 - encoder probe 改为显式只读用途，不写 EDID；
 - encoder probe 和正式编码会话初始化均使用合成占位输入验证 RKMPP/RGA，不再因 Sunshine 启动或 Moonlight 连接瞬间没有 HDMI 帧而初始化失败；
 - 删除旧协商测试，使用新的 parser/projector、控制器事件模型和 live-first 状态测试替代；
-- `test_sunshine_rkmpp` 136 个测试全部通过，`sunshine` 与 `rkmpp_hdmirx_smoke` 已构建通过。
+- `test_sunshine_rkmpp` 当前 145 个测试全部通过，`sunshine` 已构建通过。
 - 2026-09-03 无 HDMI 帧启动验证已确认 encoder probe 不再等待 dequeue，并成功识别 H.264/HEVC RKMPP；此前的 `failed to initialize video capture/encoding` 根因已消除。
+- 2026-09-04 已删除“高分辨率 HDMI 输入可以代替目标并由 RGA 缩小”的错误规则；Moonlight 1080p 与 HDMI 4K 不再被判定为匹配。
+- EDID 投影由“只留下目标分辨率”改成“目标模式优先、删除高于目标的模式、保留低分辨率原生兼容模式”，并以 Rockchip 340 MHz 实机 EDID 固化 1080p/4K 回归测试。
+- EDID readback 与主机模式切换被拆成两个状态：写入后必须继续观察实际 HDMI timing，只有达到所选模式才记录成功；五秒内未达到则明确记录目标和实际输入，视频仍保持 live-first。
 
 尚未完成的是本文件“实机验收矩阵”。在真实 Xbox、RK3588 HDMI RX 和 Moonlight 的事件时间线确认前，本计划保持为活动计划，不宣称问题已经完成实机根治。
 
@@ -67,8 +70,8 @@
 
 1. 一个 HDMI RX 设备只能有一个进程级 EDID 控制器。
 2. 编码器探测、capture queue 重建、source-change、Xbox wake 和 640x480 输入都不能直接写 EDID。
-3. 相同目标 EDID 已经生效时，写入次数必须为零。
-4. Moonlight 请求映射到新的原生模式时，正常路径最多执行一次 EDID 写入。
+3. 实际 HDMI timing 已匹配所选模式时，写入次数必须为零。
+4. 实际 timing 不匹配时，每个正式 streaming display 最多执行一次 EDID 写入；相同字节可以重写一次以产生必要的 HPD 重新声明，但 source-change 不能增加次数。
 5. EDID 写入失败后的原始数据恢复是错误恢复事务，不属于正常重试，并且必须有明确上限。
 6. 会话析构不得自动恢复 EDID并制造新的 HPD 周期。
 
@@ -99,9 +102,11 @@
 接收 Moonlight width/height/fps
   -> 从原生模式目录选择最接近分辨率
   -> 同分辨率时用请求刷新率或原生 preferred/native 顺序决胜
-  -> 从原生 EDID 投影出只保留该分辨率的目标 EDID
-  -> 目标与当前 EDID 相同：不写入
-  -> 目标与当前 EDID 不同：执行一次写入并 readback 验证
+  -> 从原生 EDID 投影出目标优先、以目标为分辨率上限的兼容 EDID
+  -> 实际 HDMI timing 已等于所选模式：不写入
+  -> 实际 timing 不匹配：执行一次写入并 readback 验证接收器字节
+  -> 独立观察实际 HDMI timing，匹配后才确认主机切换成功
+  -> 五秒仍不匹配：记录目标/实际尺寸并继续使用 RGA，不伪报成功
 ```
 
 EDID 控制事务与视频捕获状态相互独立。若写入前已经存在有效输入，现有帧可以立即用于建立 Moonlight 编码输出；驱动执行 HPD 周期时才进入短暂无信号处理。
@@ -206,15 +211,15 @@ EDID 控制事务与视频捕获状态相互独立。若写入前已经存在有
 
 用新的投影器替换 `restrict_edid_to_resolution()`：
 
-1. 接收完整原生 EDID和已选择的原生 resolution group。
-2. 保留该分辨率所有允许的原生刷新率，或按明确策略保留选定刷新率。
-3. 原样复制对应 DTD/VIC/standard timing 编码。
-4. 删除其他分辨率的 Established、Standard、DTD、CTA SVD 和 Y420 SVD。
-5. 正确重建 native/preferred 标记。
+1. 接收完整原生 EDID和已选择的原生 mode。
+2. 将所选分辨率/刷新率的原生编码提升到同类视频列表首位并设置可表达的 native/preferred 标记。
+3. 原样复制目标和低分辨率回退模式的 DTD/VIC/standard timing 编码。
+4. 删除宽或高超过目标的 Established、Standard、DTD、CTA SVD 和 Y420 SVD。
+5. 当目标没有可复制的 base DTD 时清除 base preferred 标记，避免低分辨率回退被错误声明为首选。
 6. 删除因 VDB 重排而失效的 Y420 capability map，或按新索引重建。
 7. 保留仍然有效的非视频 CTA data block。
 8. 更新 DTD offset、native DTD count、extension count 和所有 checksum。
-9. 重新解析生成结果，确认其视频模式集合只包含预期分辨率。
+9. 重新解析生成结果，确认所选模式仍存在且所有视频模式均未超过目标尺寸。
 
 写入前必须满足：
 
@@ -222,7 +227,7 @@ EDID 控制事务与视频捕获状态相互独立。若写入前已经存在有
 目标 EDID 校验有效
 AND 目标模式来源于原生 EDID
 AND 重新解析结果符合预期
-AND 目标 EDID != 当前已应用 EDID
+AND 每个 streaming display 尚未执行过目标事务
 ```
 
 ### 阶段 5：重构 HDMI 捕获数据面
@@ -366,7 +371,7 @@ S_EDID
 
 全部条件满足后才允许将该计划标记完成：
 
-1. 同一目标分辨率连续 20 次连接只有首次必要写入，后续 EDID 写入为零。
+1. 同一目标分辨率连续 20 次连接中，实际 timing 已匹配时写入为零；不匹配的每个 display 最多一次写入，且每次都能得到明确的 timing 验证结果。
 2. source-change、640x480 和 Xbox wake 永远不会增加 EDID 写入计数。
 3. 任意有效 HDMI 输入的首个 dequeue 帧立即进入编码；之后不再出现由协商状态产生的绿帧。
 4. 输入与 Moonlight 一致时完全绕过 RGA；不一致时第一帧立即使用 RGA。
@@ -383,6 +388,6 @@ S_EDID
 - 不在现有 EDID retry 状态机上继续增加标志、次数、延迟或 Xbox 特例。
 - 不以 Xbox Remote Play ready/wake 状态推断 HDMI EDID/DDC 状态。
 - 不把 640x480 视为错误状态；它是可以立即捕获和转换的有效 HDMI 输入。
-- 不使用重复 `VIDIOC_S_EDID` 作为 DDC 诊断手段。
+- 不在同一个 streaming display 内重复 `VIDIOC_S_EDID`；跨 display 只有实际 timing 不匹配时才允许重新声明一次目标。
 - 不以单元测试通过替代真实驱动事件模型和实机时间线验收。
 - 每个阶段优先运行对应的 `test_sunshine_rkmpp` 定向测试，不运行项目无关的完整测试套件。

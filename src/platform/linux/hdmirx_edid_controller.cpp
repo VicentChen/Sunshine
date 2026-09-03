@@ -29,6 +29,39 @@ namespace platf::hdmirx {
   edid_controller_t::edid_controller_t(std::filesystem::path state_path):
       state_path_(std::move(state_path)) {}
 
+  void input_mode_verifier_t::begin(
+    const resolution_t &expected,
+    std::chrono::steady_clock::time_point now,
+    std::chrono::steady_clock::duration timeout
+  ) noexcept {
+    expected_ = expected;
+    last_actual_.reset();
+    deadline_ = now + timeout;
+  }
+
+  std::optional<input_mode_result_t> input_mode_verifier_t::observe(
+    std::optional<resolution_t> actual,
+    std::chrono::steady_clock::time_point now
+  ) noexcept {
+    if (!expected_) {
+      return std::nullopt;
+    }
+    if (actual) {
+      last_actual_ = actual;
+      if (*actual == *expected_) {
+        const input_mode_result_t result {input_mode_status_e::matched, *expected_, actual};
+        expected_.reset();
+        return result;
+      }
+    }
+    if (now < deadline_) {
+      return std::nullopt;
+    }
+    const input_mode_result_t result {input_mode_status_e::timed_out, *expected_, last_actual_};
+    expected_.reset();
+    return result;
+  }
+
   edid_apply_result_t edid_controller_t::apply_target(
     edid::ioctl_backend_t &backend,
     std::uint32_t pad,
@@ -38,13 +71,13 @@ namespace platf::hdmirx {
   ) {
     std::lock_guard lock(mutex_);
     load_state_locked();
-    if (current_input && *current_input == target) {
-      enable_audio_once(backend);
-      return {edid_apply_status_e::live_match, std::nullopt, "live HDMI input already matches Moonlight"};
-    }
 
     auto current_result = edid::read_edid(backend, pad);
     if (!current_result) {
+      if (current_input && *current_input == target) {
+        enable_audio_once(backend);
+        return {edid_apply_status_e::live_match, std::nullopt, "live HDMI input already matches Moonlight; EDID read was unnecessary"};
+      }
       return {edid_apply_status_e::read_failed, std::nullopt, current_result.error().message};
     }
     auto current = std::move(*current_result);
@@ -65,17 +98,17 @@ namespace platf::hdmirx {
     if (!selected) {
       return {edid_apply_status_e::no_mode, std::nullopt, "native EDID contains no selectable mode"};
     }
-    auto projected = edid::project_edid_to_resolution(native_edid_, selected->resolution);
+    if (current_input && *current_input == selected->resolution) {
+      enable_audio_once(backend);
+      return {edid_apply_status_e::live_match, selected, "live HDMI input matches the selected native mode"};
+    }
+
+    auto projected = edid::project_edid_for_mode(native_edid_, *selected);
     if (projected.empty()) {
       return {edid_apply_status_e::projection_failed, selected, "native EDID projection was not safe"};
     }
-    if (current == projected) {
-      last_applied_edid_ = projected;
-      persist_state_locked();
-      enable_audio_once(backend);
-      return {edid_apply_status_e::unchanged, selected, "projected EDID is already installed"};
-    }
 
+    const bool reasserted = current == projected;
     const auto write_result = edid::write_edid(backend, pad, projected);
     if (!write_result) {
       restore_after_error(backend, pad);
@@ -90,7 +123,10 @@ namespace platf::hdmirx {
     last_applied_edid_ = std::move(projected);
     persist_state_locked();
     enable_audio_once(backend);
-    return {edid_apply_status_e::applied, selected, "projected native EDID written and verified"};
+    const auto message = reasserted ?
+                           "target EDID reasserted and byte-verified; awaiting live HDMI timing" :
+                           "target EDID written and byte-verified; awaiting live HDMI timing";
+    return {edid_apply_status_e::advertised, selected, message};
   }
 
   std::vector<std::uint8_t> edid_controller_t::native_edid() const {
