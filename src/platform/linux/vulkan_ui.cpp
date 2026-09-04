@@ -191,7 +191,12 @@ namespace platf::vulkan_ui {
     void draw_menu_card(const char *id, const char *label, const char *description, bool focused, float height) {
       const auto card = focused ? ImVec4 {0.055F, 0.330F, 0.720F, 1.0F} : ImVec4 {0.075F, 0.095F, 0.130F, 1.0F};
       ImGui::PushStyleColor(ImGuiCol_ChildBg, card);
-      ImGui::BeginChild(id, ImVec2 {0.0F, height}, ImGuiChildFlags_Borders);
+      ImGui::BeginChild(
+        id,
+        ImVec2 {0.0F, height},
+        ImGuiChildFlags_Borders,
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse
+      );
       ImGui::TextUnformatted(label);
       ImGui::Spacing();
       ImGui::TextWrapped("%s", description);
@@ -511,7 +516,10 @@ namespace platf::vulkan_ui {
         "HOST-PACKET",
         "HOST-SEND"
       };
-      const auto card_height = metrics.body_font_pixels * 4.5F;
+      // Each metric card inherits vertical window padding and contains a title,
+      // an item gap, and a wrapped two-line value. Keep enough height for the
+      // second value line at every resolution-derived font scale.
+      const auto card_height = metrics.body_font_pixels * 5.5F;
       for (std::size_t index = 0; index < labels.size(); ++index) {
         const auto description = profile_metric_text(profile.metrics[index]);
         ImGui::TableNextColumn();
@@ -994,6 +1002,10 @@ namespace platf::vulkan_ui {
       return imported;
     }
 
+    void invalidate_capture_targets() noexcept {
+      clear_capture_targets();
+    }
+
     std::uint64_t rendered_revision() const noexcept {
       return rendered_revision_;
     }
@@ -1424,6 +1436,10 @@ namespace platf::vulkan_ui {
 
   bool renderer_t::cover_bgr888(const bgr888_dma_buf_t &target, std::uint32_t panel_margin) {
     return impl_->cover_bgr888(target, panel_margin);
+  }
+
+  void renderer_t::invalidate_capture_targets() noexcept {
+    impl_->invalidate_capture_targets();
   }
 
   std::uint64_t renderer_t::rendered_revision() const noexcept {

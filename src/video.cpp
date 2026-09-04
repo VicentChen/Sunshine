@@ -1911,6 +1911,8 @@ namespace video {
                       << " title-font=" << metrics_.title_font_pixels
                       << " size=standard"
                       << " ROI=bottom-center margin=" << metrics_.panel_margin;
+      platf::ui::global_controller().attach_backend();
+      backend_attached_ = true;
   #else
       throw std::runtime_error("Sunshine was built without Vulkan UI support");
   #endif
@@ -1918,6 +1920,7 @@ namespace video {
 
     /** @brief Report the successfully exercised live-buffer path at teardown. */
     ~rkmpp_vulkan_ui_session_t() {
+      disable();
       if (frames_composed_ != 0) {
         BOOST_LOG(info) << "RKMPP Vulkan UI stopped: composed=" << frames_composed_
                         << " capture_generations=" << capture_generations_
@@ -1935,13 +1938,30 @@ namespace video {
       return *allocator_;
     }
 
+    /** @brief Stop presenting this backend and immediately release modal input interception. */
+    void disable() noexcept {
+      if (!backend_attached_) {
+        return;
+      }
+      backend_attached_ = false;
+      platf::ui::global_controller().detach_backend();
+    }
+
     /** @brief Advance UI state and report whether an NV12 frame needs an isolated target. */
     bool wants_nv12_target(platf::hdmirx::hdmirx_img_t &image) {
+      if (!backend_attached_) {
+        return false;
+      }
+      observe_capture_generation(image);
       return prepare_visible_panel(image) != nullptr;
     }
 
     /** @brief Render a changed visible snapshot and cover one imported NV12 fallback destination. */
     bool compose_into(platf::rga::imported_buffer_t &destination, platf::hdmirx::hdmirx_img_t &image) {
+      if (!backend_attached_) {
+        return false;
+      }
+      observe_capture_generation(image);
       auto *surface = prepare_visible_panel(image);
       if (!surface) {
         return false;
@@ -1990,6 +2010,10 @@ namespace video {
 
     /** @brief Synchronously use Vulkan to cover a direct BGR capture DMA-BUF when visible. */
     bool compose(platf::hdmirx::hdmirx_img_t &image) {
+      if (!backend_attached_) {
+        return false;
+      }
+      observe_capture_generation(image);
       auto *surface = prepare_visible_panel(image);
       if (!surface) {
         return false;
@@ -2004,14 +2028,6 @@ namespace video {
       }
 
       const auto generation = image.frame->generation();
-      if (!capture_generation_ || *capture_generation_ != generation) {
-        capture_generation_ = generation;
-        ++capture_generations_;
-        BOOST_LOG(info) << "RKMPP Vulkan UI capture generation=" << generation
-                        << " dimensions=" << format.width << 'x' << format.height
-                        << " stride=" << plane.bytesperline
-                        << " allocation=" << plane.allocation_size;
-      }
       const auto index = image.frame->buffer_index();
       if (format.mpp_format != MPP_FMT_BGR888) {
         throw std::runtime_error("direct Vulkan UI requires a BGR888 HDMI RX frame");
@@ -2177,6 +2193,34 @@ namespace video {
       return status;
     }
 
+    /** @brief Invalidate every direct-BGR Vulkan import as soon as capture is rebuilt. */
+    void observe_capture_generation(const platf::hdmirx::hdmirx_img_t &image) {
+      if (!image.frame || !image.capture_format || image.frame->planes().size() != 1 || image.capture_format->planes.size() != 1) {
+        return;
+      }
+      const auto generation = image.frame->generation();
+      if (capture_generation_ && *capture_generation_ == generation) {
+        return;
+      }
+#ifdef SUNSHINE_BUILD_VULKAN
+      if (standard_surface_) {
+        standard_surface_->renderer->invalidate_capture_targets();
+      }
+      if (profile_surface_) {
+        profile_surface_->renderer->invalidate_capture_targets();
+      }
+#endif
+      capture_generation_ = generation;
+      ++capture_generations_;
+      const auto &format = *image.capture_format;
+      const auto &plane = image.frame->planes().front();
+      BOOST_LOG(info) << "RKMPP Vulkan UI capture generation=" << generation
+                      << " dimensions=" << format.width << 'x' << format.height
+                      << " stride=" << plane.bytesperline
+                      << " allocation=" << plane.allocation_size
+                      << "; invalidated direct-BGR imports";
+    }
+
     /** @brief Render the current controller snapshot once and report visibility. */
     surface_t *prepare_visible_panel(platf::hdmirx::hdmirx_img_t &image) {
       auto &controller = platf::ui::global_controller();
@@ -2256,6 +2300,7 @@ namespace video {
     std::uint64_t frames_composed_ {};
     std::uint64_t capture_generations_ {};
     std::uint64_t bgr_imported_slots_ {};
+    bool backend_attached_ {};  ///< Whether controller input may currently be intercepted for this renderer.
   };
 
   class rkmpp_rga_encode_session_t final: public encode_session_t {
@@ -2402,6 +2447,7 @@ namespace video {
                               << target_resolution_.width << 'x' << target_resolution_.height;
             }
           } catch (const std::exception &e) {
+            vulkan_ui_->disable();
             vulkan_ui_enabled_ = false;
             BOOST_LOG(error) << "RKMPP Vulkan UI RGA-path composition failed; disabling overlay for this session: " << e.what();
           }
@@ -2454,6 +2500,7 @@ namespace video {
                               << target_resolution_.width << 'x' << target_resolution_.height;
             }
           } catch (const std::exception &e) {
+            vulkan_ui_->disable();
             vulkan_ui_enabled_ = false;
             BOOST_LOG(error) << "RKMPP Vulkan UI placeholder composition failed; disabling overlay for this session: " << e.what();
           }
@@ -2634,8 +2681,16 @@ namespace video {
       // an RGA destination: writing it makes subsequent driver-produced UV
       // data alias luma. Keep the producer allocation read-only and compose a
       // visible NV12 UI into the existing isolated CMA fallback target.
-      if (live_layout->format == MPP_FMT_YUV420SP && vulkan_ui_ && vulkan_ui_->wants_nv12_target(*image_)) {
-        return convert_with_rga(img);
+      if (live_layout->format == MPP_FMT_YUV420SP && vulkan_ui_) {
+        try {
+          if (vulkan_ui_->wants_nv12_target(*image_)) {
+            return convert_with_rga(img);
+          }
+        } catch (const std::exception &e) {
+          BOOST_LOG(error) << "RKMPP Vulkan UI frame preparation failed; disabling overlay for this session: " << e.what();
+          vulkan_ui_->disable();
+          vulkan_ui_.reset();
+        }
       }
       if (!direct_encoder_ready_ || *live_layout != input_layout_) {
         try {
@@ -2693,6 +2748,7 @@ namespace video {
           vulkan_ui_->compose(*image_);
         } catch (const std::exception &e) {
           BOOST_LOG(error) << "RKMPP Vulkan UI composition failed; disabling overlay for this session: " << e.what();
+          vulkan_ui_->disable();
           vulkan_ui_.reset();
         }
       }

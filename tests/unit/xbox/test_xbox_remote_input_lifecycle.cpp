@@ -149,6 +149,7 @@ namespace {
         return std::make_unique<connection_t>(state, connection_id);
       });
       platf::ui::global_controller().reset();
+      platf::ui::global_controller().attach_backend();
     }
 
     /**
@@ -160,6 +161,7 @@ namespace {
       flush_input_tasks();
       input::testing::set_xbox_remote_connection_factory({});
       input::testing::set_platform_input({});
+      platf::ui::global_controller().detach_backend();
       platf::ui::global_controller().reset();
       config::input = std::move(original_input_);
       if (owns_task_pool_) {

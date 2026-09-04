@@ -156,6 +156,23 @@ namespace platf::ui {
   public:
     using clock_t = std::chrono::steady_clock;  ///< Monotonic clock used by the hold detector.
 
+    /** @brief Create an independently usable controller, or a detached process-wide controller. */
+    explicit controller_t(bool backend_available = true) noexcept;
+
+    /** @brief Register one live renderer backend that can make controller UI visible. */
+    void attach_backend();
+
+    /**
+     * @brief Unregister one renderer backend and clear modal routing when the last one leaves.
+     *
+     * A runtime Vulkan/RGA failure must detach before its encoder continues without UI so
+     * an invisible modal cannot keep consuming Moonlight controller packets.
+     */
+    void detach_backend();
+
+    /** @brief Return whether at least one renderer backend can currently present the UI. */
+    bool backend_available() const;
+
     /**
      * @brief Process one complete Moonlight controller state.
      *
@@ -230,6 +247,7 @@ namespace platf::ui {
     static std::uint32_t navigation_mask(const controller_input_t &input, input_state_t &state) noexcept;
 
     mutable std::mutex mutex_;  ///< Serializes input updates and renderer snapshots.
+    std::uint32_t backend_count_ {};  ///< Live renderers able to present the process-wide UI.
     std::array<input_state_t, platf::MAX_GAMEPADS> inputs_;  ///< State indexed by process-wide gamepad slot.
     std::optional<std::uint8_t> owner_;  ///< Controller that opened and may navigate the UI.
     std::optional<std::uint8_t> release_controller_;  ///< Controller held behind the full-release gate.

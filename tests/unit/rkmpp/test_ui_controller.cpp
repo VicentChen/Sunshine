@@ -385,4 +385,35 @@ namespace {
     EXPECT_EQ(ui.snapshot().page, page_e::main_menu);
     EXPECT_FALSE(update(ui, 0, 5000ms).consume);
   }
+
+  TEST(UiController, BackendAvailabilityIsReferenceCountedAndLastDetachClosesModal) {
+    platf::ui::controller_t ui {false};
+    EXPECT_FALSE(ui.backend_available());
+    EXPECT_FALSE(update(ui, 0, 0ms, platf::START).consume);
+    EXPECT_FALSE(ui.snapshot().visible);
+
+    ui.attach_backend();
+    ui.attach_backend();
+    EXPECT_TRUE(ui.backend_available());
+    open(ui);
+    EXPECT_TRUE(ui.visible());
+
+    ui.detach_backend();
+    EXPECT_TRUE(ui.backend_available());
+    EXPECT_TRUE(ui.visible());
+
+    ui.detach_backend();
+    EXPECT_FALSE(ui.backend_available());
+    EXPECT_FALSE(ui.visible());
+    EXPECT_FALSE(ui.owner().has_value());
+    EXPECT_FALSE(ui.snapshot().visible);
+    EXPECT_FALSE(update(ui, 0, 10ms, platf::START).consume);
+
+    ui.attach_backend();
+    EXPECT_TRUE(ui.backend_available());
+    EXPECT_TRUE(update(ui, 0, 20ms, platf::START).consume);
+    ui.detach_backend();
+    EXPECT_FALSE(ui.backend_available());
+    EXPECT_FALSE(update(ui, 0, 21ms).consume);
+  }
 }  // namespace

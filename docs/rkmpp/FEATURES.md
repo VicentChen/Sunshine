@@ -20,6 +20,7 @@
 - Profile Timeline 把最多 32 个最近完成帧按 RX EOF 对齐后得到的平均视图放在上方，下方只显示最新一个完成帧，避免多帧实时条密集闪烁。每个 Event 的名称通过竖直引线放在彩条下方，并以前置同色块强化对应关系；相互碰撞的标签自动增加标注行。Event 后不再显示内部有效样本数：不同阶段可能因 RGA bypass、条件执行、缺失或无效时间戳而采用不同数量的帧，平均视图标题只说明本次最多检查了多少个最近帧。Profile 使用与普通页面等高的宽面板，Timeline 和 completed-window 指标位于带可见滚动条的视窗中，owner 可用 D-pad 或左摇杆上下滚动。
 - Vulkan UI 的 BGR surface 使用适合 Vulkan external-buffer import 的对齐行跨度；Compact（85%）Profile 不再因未对齐的 1224 像素可见宽度创建失败。尺寸切换会先完整建立一组新 surface 再原子替换，运行时创建失败则保留最后一组可用 surface，不再使整个 UI session 失效。
 - 线程安全的 UI controller 支持先按住 `Start`、再点按 `Back/Select` 立即开关 UI；Start 修饰键会先被截获，未组成快捷键时在松开后补发普通 Start 点击。实现同时保留完整释放门、owner、全局输入截获、D-pad/左摇杆焦点导航和断开/reset 清理。
+- UI controller 的输入截获由成功初始化的 renderer backend 引用计数门控；最后一个后端退出或运行失败时会立即关闭模态并清理按键状态。HDMI RX capture generation 在 UI 可见性判断前更新，source recovery 会主动销毁两个页面 renderer 的旧 BGR DMA-BUF import，即使 UI 当时隐藏也不会复用旧 allocation。
 - 可通过 `audio_source` 选择 HDMI RX 对应的 PulseAudio/PipeWire Source，并复用 Sunshine 的 float PCM → Opus 音频链路；空值保持原有 `audio_sink` monitor 回退。PulseAudio 生命周期改由 `pa_threaded_mainloop` 和 mainloop lock 串行化，避免断流 teardown 与事件清理并发。ROCK 5B+ 已识别 ALSA `hw:3,0` 和对应的双声道 PipeWire Source，支持的枚举格式为 S16LE、S24_32LE、S32LE、32–192 kHz。Source 优先级和 monitor 回退已有自动测试；真实 PCM、Moonlight 播放、断开恢复及 A/V 同步尚未完成实机验收。
 
 # NS

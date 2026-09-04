@@ -215,6 +215,9 @@ namespace platf::vulkan_ui {
      */
     bool cover_bgr888(const bgr888_dma_buf_t &target, std::uint32_t panel_margin);
 
+    /** @brief Drop all imported HDMI capture targets before a producer generation is reused. */
+    void invalidate_capture_targets() noexcept;
+
     /** @brief Return the most recently completed model revision, or zero before rendering. */
     std::uint64_t rendered_revision() const noexcept;
 

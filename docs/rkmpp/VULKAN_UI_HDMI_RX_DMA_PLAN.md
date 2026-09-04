@@ -18,9 +18,11 @@
 - 连接状态页同时显示 Moonlight 请求的编码分辨率和帧率；帧率保留 `59.94 FPS` 等小数值，未知时明确显示 `UNKNOWN`。
 - 除 Profile 外，主菜单、连接状态以及后续选项页统一采用从上到下的单列布局；Profile
   保留当前 Timeline、execution lane 和指标网格的信息结构。
-- UI 使用 Vulkan 在 GPU 上生成不透明 BGR 内容。BGR888 直通时由 Vulkan 将 ROI 直接写入当前 HDMI RX DMA-BUF；只有视频本身已进入 NV12 RGA fallback 时，才由 RGA 覆盖转换后的目标。
+- UI 控制器只有在至少一个 Vulkan/RGA 展示后端成功初始化时才允许截获手柄；最后一个后端
+  运行失败或退出时立即关闭模态并清理 release gate，基本输入路由必须继续工作。
+- UI 使用 Vulkan 在 GPU 上生成不透明 BGR 内容。BGR888 直通时由 Vulkan 将 ROI 直接写入当前 HDMI RX DMA-BUF；NV12 capture 始终只读，UI 可见时先由 RGA 复制到隔离的 CMA NV12 目标，再由 RGA 转换并覆盖 BGR panel ROI。
 
-本计划不要求半透明效果。生产路径不得为 alpha blend 读取目标视频区域，也不得复制整帧 HDMI 图像。
+本计划不要求半透明效果。生产路径不得为 alpha blend 读取目标视频区域；BGR888 直通不复制整帧，NV12 UI 可见时允许为保护生产者 DMA-BUF 执行一次必要的硬件整帧复制。
 
 ## 已验证前置条件
 
@@ -76,6 +78,12 @@ HDMI RX BGR888 直通 VIDIOC_DQBUF
   -> MPP 编码同一个 HDMI RX DMA-BUF
   -> VIDIOC_QBUF
 
+HDMI RX NV12 直通 VIDIOC_DQBUF
+  -> UI 隐藏：MPP 编码同一个只读 HDMI RX DMA-BUF
+  -> UI 可见：RGA 整帧复制到隔离 CMA NV12 target
+  -> RGA: BGR panel -> 隔离 NV12 target 的目标 ROI
+  -> MPP 编码隔离 NV12 target
+
 视频 RGA fallback
   -> Vulkan 按 revision 发布缓存 BGR panel DMA-BUF
   -> RGA: BGR panel -> NV12 fallback target 的目标 ROI
@@ -85,6 +93,9 @@ HDMI RX BGR888 直通 VIDIOC_DQBUF
 约束：
 
 - 不得在 capture slot 仍处于 `QBUF` 状态时写入。
+- `rk_hdmirx` 的 NV12 capture DMA-BUF 不得作为 RGA destination；即使 slot 已 `DQBUF`，写入也会
+  破坏驱动后续产生的色度/亮度数据。NV12 只能作为硬件读取源或直接交给 MPP；已验证的 BGR888
+  Vulkan ROI cover 不受此限制。
 - Vulkan 直写与 RGA fallback 都必须同步完成，或显式等待 fence 后才能调用 MPP。
 - MPP 完成输入消费前不得释放 frame holder 或归还 V4L2 slot。
 - UI 隐藏时不得执行 Vulkan UI 更新、Vulkan ROI copy 或 RGA UI 合成。
@@ -95,6 +106,10 @@ HDMI RX BGR888 直通 VIDIOC_DQBUF
 ## Gate 4：真实 HDMI RX DMA-BUF 原位覆盖
 
 Gate 4 只验证真实 capture buffer，不引入正式 UI。
+
+> **2026-09-04 结论修正：INVALIDATED。** 单帧和短会话曾能看到正确 ROI，但后续验证发现把
+> `rk_hdmirx` NV12 capture allocation 作为 RGA destination 会导致持续绿屏和 UV/luma 别名。
+> 下列步骤与数据只保留为历史实验记录，不得恢复为生产路径；正式实现改用隔离 CMA NV12 target。
 
 ### 当前实施状态（2026-09-01）
 
@@ -107,8 +122,7 @@ Gate 4 只验证真实 capture buffer，不引入正式 UI。
 - Moonlight 4K 实机画面已确认底部居中的不透明测试区域位置正确，区域外画面正常。
 - 运行日志确认同一 capture generation 的 4 个 slot 全部轮转导入；一次连续会话同步合成
   2,462 帧并正常释放，未出现 RGA import、MPP timeout 或 V4L2 queue starvation。
-- Gate 4 状态为 **PASS**。该结论只覆盖真实 HDMI RX DMA-BUF 原位合成，不替代后续
-  Vulkan 页面、输入截获和 action 的独立验收。
+- Gate 4 的原 **PASS** 结论已由持续帧验证推翻；正式路径不得写 NV12 capture allocation。
 
 ### 工作
 
@@ -123,7 +137,7 @@ Gate 4 只验证真实 capture buffer，不引入正式 UI。
 
 ### 验收
 
-- RGA 能以 HDMI RX `VIDIOC_EXPBUF` FD 作为 NV12 destination。
+- （历史验收条件，已判定不安全）RGA 能以 HDMI RX `VIDIOC_EXPBUF` FD 作为 NV12 destination。
 - Moonlight 中能看到位置和尺寸正确的不透明测试区域。
 - ROI 外画面保持正常，没有整帧复制、闪烁、撕裂或色彩平面错位。
 - 测试区域不会出现在下一次复用该 capture slot 的错误位置或错误帧中。
@@ -404,16 +418,16 @@ Sunshine controller event
   与关闭“Force gamepad #1 always connected”的设置并退出。真实物理手柄输入透传与扩大 ROI 的相对
   性能门限仍保留为后续实机验收项。
 
-### 当前问题与边界（2026-09-02）
+### 自适应布局已实现与剩余边界（2026-09-04）
 
-- UI session 目前固定分配 `960x180` BGR panel，1080p 时占画面约 `50% x 16.7%`，4K 时只占
-  `25% x 8.3%`，所以同一 UI 在 4K 下会缩小一半。
-- ImGui 当前使用默认字体图集，没有按编码分辨率选择实际像素字号；窗口 padding、卡片高度、
-  Timeline label width 等也都是固定像素值。
-- 主菜单使用 3 列，连接状态使用 4 列，视觉方向与线性 focus 顺序不一致；controller 当前还会让
-  上下左右四个方向都循环同一条 focus 链。
-- 本阶段只改变 UI panel、字体、布局和相应导航语义，不改变连接完成条件、action、输入 owner、
-  neutral cleanup、Profile 数据源、Timeline stage/lane、统计口径或视频缩放策略。
+- UI session 已按 Moonlight 输出尺寸和紧凑/标准/大号档位建立普通页与 Profile 两类 surface；
+  1080p 标准档分别为 `1280x720` 与 `1440x720`，4K 分别为 `2560x1440` 与 `2880x1440`。
+- ImGui 字体、padding、Timeline 几何和 safe margin 已由共同 metrics 缩放，主菜单和连接页使用
+  单列布局；Left/Right 不再改变主菜单焦点。
+- capture generation 现在在可见性判断前观察；即使 UI 隐藏，source recovery 也会立即清空两个
+  renderer 的 direct-BGR import cache，避免 fd 数值复用到已释放的 V4L2 allocation。
+- 每种页面 surface 当前仍各自持有完整 Vulkan renderer/device context。共享 device/queue/context
+  属于资源优化，不改变本次输入安全、cache 生命周期或 DMA-BUF 所有权修复。
 - “Profile 保持现状”指保留当前标题信息、Timeline 五条 execution lane、相对时间含义和统计
   网格结构；Profile 仍采用适合时间线的横向布局，但会使用共同的分辨率缩放和可读字号。
 
@@ -430,8 +444,8 @@ Sunshine controller event
 
    | Moonlight 输出 | 主菜单/连接状态 panel | Profile panel | 正文字号 | 标题字号 | 外边距 |
    | --- | --- | --- | --- | --- | --- |
-   | 1920x1080 | 1280x720 | 1440x360 | 28 px | 36 px | 36 px |
-   | 3840x2160 | 2560x1440 | 2880x720 | 56 px | 72 px | 72 px |
+   | 1920x1080 | 1280x720 | 1440x720 | 28 px | 36 px | 36 px |
+   | 3840x2160 | 2560x1440 | 2880x1440 | 56 px | 72 px | 72 px |
 
    这样 1080p 与 4K 的相对占屏比例一致；相比当前 `960x180`，普通页面有足够高度容纳单列内容，
    Profile 则继续保持宽而低的时间线形态。
@@ -522,7 +536,8 @@ Sunshine controller event
 
 - UI 隐藏时，视频路径没有额外 Vulkan submission 或 RGA UI operation。
 - UI 静态显示时，Vulkan 不重复渲染；仅对每个编码帧执行 panel ROI 覆盖。
-- UI 更新不产生完整 4K RGBA surface 或完整视频帧副本。
+- UI 更新不产生完整 4K RGBA surface；BGR888 直通不复制视频帧，NV12 仅在 UI 可见时通过 RGA
+  把 capture source 完整复制到隔离目标。
 - 4K 只按 2 倍线性尺寸扩大 panel，不得因面积扩大而在每个视频帧重建 font atlas、framebuffer
   或 import cache；这些资源只在 session/输出尺寸变化时创建。
 - UI 合成不会使 capture queue 长期饥饿或导致 MPP 超时。
@@ -530,7 +545,7 @@ Sunshine controller event
 
 ## 失败处理与回滚
 
-- Gate 4、Vulkan 初始化或 UI renderer 失败时，关闭新 UI 合成并继续现有 HDMI RX -> MPP 路径。
+- 隔离 NV12 目标、Vulkan 初始化或 UI renderer 失败时，关闭新 UI 合成并继续现有 HDMI RX -> MPP 路径。
 - 新 UI 只使用唯一的 `vulkan_ui` 总控开关，默认启用；关闭后跳过全部 Vulkan UI 路径。
 - Vulkan UI 迁移验收完成后删除原有 MPP OSD/Profile HUD，不再保留双显示后端。
 - 任何异常路径都必须释放 RGA/Vulkan 引用，并保证已 `DQBUF` 的 slot 最终能够安全 `QBUF`。
@@ -541,8 +556,8 @@ Sunshine controller event
 只有同时满足以下条件，才能将本计划中的已实现能力合并到
 `docs/rkmpp/FEATURES.md` 并删除本计划：
 
-- Gate 4 在真实 HDMI RX capture buffer 上通过。
-- Vulkan UI、RGA 原位覆盖和 MPP 编码链路在 Moonlight 中完成实机验证。
+- NV12 capture 保持只读，隔离 CMA NV12 目标上的整帧复制、UI ROI 覆盖和 MPP 编码链路在 Moonlight 中完成实机验证。
+- BGR888 capture 上的 Vulkan ROI cover 在 Moonlight 中完成实机验证。
 - 手柄打开、导航、截获、关闭和 neutral cleanup 全部通过集成验证。
 - 连接状态从首个绿色 placeholder 帧持续显示到视频与手柄同时 ready，并能在连接丢失后
   自动重新出现；连接完成后无需用户操作即可自动隐藏。

@@ -23,6 +23,45 @@ namespace platf::ui {
     return video_ready && gamepad_ready;
   }
 
+  controller_t::controller_t(const bool backend_available) noexcept:
+      backend_count_(backend_available ? 1U : 0U) {}
+
+  void controller_t::attach_backend() {
+    std::lock_guard lock {mutex_};
+    ++backend_count_;
+    ++revision_;
+  }
+
+  void controller_t::detach_backend() {
+    std::lock_guard lock {mutex_};
+    if (backend_count_ == 0) {
+      return;
+    }
+    --backend_count_;
+    if (backend_count_ != 0) {
+      return;
+    }
+
+    inputs_ = {};
+    owner_.reset();
+    release_controller_.reset();
+    release_chord_ = 0;
+    page_ = page_e::main_menu;
+    profile_scroll_steps_ = 0;
+    connection_initialized_ = false;
+    connection_ready_since_.reset();
+    connection_settled_ = false;
+    if (visible_) {
+      visible_ = false;
+      ++revision_;
+    }
+  }
+
+  bool controller_t::backend_available() const {
+    std::lock_guard lock {mutex_};
+    return backend_count_ != 0;
+  }
+
   std::int8_t controller_t::axis_direction(std::int16_t value, std::int8_t previous) noexcept {
     if (previous < 0 && value < -axis_release_) {
       return -1;
@@ -68,6 +107,9 @@ namespace platf::ui {
     static_cast<void>(now);
     std::lock_guard lock {mutex_};
     decision_t result {.visible = visible_};
+    if (backend_count_ == 0) {
+      return result;
+    }
     if (controller >= inputs_.size()) {
       result.consume = visible_;
       return result;
@@ -257,6 +299,9 @@ namespace platf::ui {
   decision_t controller_t::tick(clock_t::time_point now) {
     static_cast<void>(now);
     std::lock_guard lock {mutex_};
+    if (backend_count_ == 0) {
+      return {};
+    }
     return {.visible = visible_};
   }
 
@@ -305,10 +350,11 @@ namespace platf::ui {
 
   snapshot_t controller_t::snapshot() const {
     std::lock_guard lock {mutex_};
-    const bool automatic = connection_initialized_ && !connection_settled_;
+    const bool backend_available = backend_count_ != 0;
+    const bool automatic = backend_available && connection_initialized_ && !connection_settled_;
     const auto page = visible_ || !automatic ? page_ : page_e::connection_status;
     return {
-      .visible = visible_ || automatic,
+      .visible = backend_available && (visible_ || automatic),
       .modal = visible_,
       .page = page,
       .focus = focus_,
@@ -366,7 +412,7 @@ namespace platf::ui {
   }
 
   controller_t &global_controller() {
-    static controller_t controller;
+    static controller_t controller {false};
     return controller;
   }
 }  // namespace platf::ui
