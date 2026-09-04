@@ -67,7 +67,7 @@ namespace platf::vulkan_ui {
 
   /** @brief One clipped renderer-independent bar in the latest or average Timeline viewport. */
   struct timeline_bar_t {
-    video::frame_profile_timeline_stage_e stage {video::frame_profile_timeline_stage_e::rx_driver_age};
+    video::frame_profile_timeline_stage_e stage {video::frame_profile_timeline_stage_e::rx_ready_wait};
     video::frame_profile_timeline_lane_e lane {video::frame_profile_timeline_lane_e::capture};
     std::int64_t frame_index {-1};
     std::int64_t start_us {};  ///< Unclipped start relative to the frame's RX EOF.

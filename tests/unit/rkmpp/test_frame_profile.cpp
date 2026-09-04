@@ -12,6 +12,7 @@ namespace {
     const auto base = video::frame_profile_t::time_point(microseconds(base_us));
     video::frame_profile_t profile;
     profile.capture = base;
+    profile.dequeue_begin = base + microseconds(90);
     profile.dequeued = base + microseconds(100);
     profile.capture_queue_exit = base + microseconds(150);
     profile.rga_used = true;
@@ -58,6 +59,8 @@ TEST(FrameProfileWindow, CalculatesEveryStage) {
     return snapshot.metrics[static_cast<std::size_t>(value)];
   };
   EXPECT_EQ(metric(video::frame_profile_metric_e::rx_driver_age).p50_us, 100);
+  EXPECT_EQ(metric(video::frame_profile_metric_e::rx_ready_wait).p50_us, 90);
+  EXPECT_EQ(metric(video::frame_profile_metric_e::rx_dequeue).p50_us, 10);
   EXPECT_EQ(metric(video::frame_profile_metric_e::capture_queue).p50_us, 50);
   EXPECT_EQ(metric(video::frame_profile_metric_e::rga).p50_us, 100);
   EXPECT_EQ(metric(video::frame_profile_metric_e::mpp_import).p50_us, 4);
@@ -188,17 +191,25 @@ TEST(FrameProfileTimeline, PreservesRelativeStageBoundsAndOverlap) {
     return nullptr;
   };
   const auto *rga = find(video::frame_profile_timeline_stage_e::rga);
+  const auto *rx_ready_wait = find(video::frame_profile_timeline_stage_e::rx_ready_wait);
+  const auto *rx_dequeue = find(video::frame_profile_timeline_stage_e::rx_dequeue);
   const auto *ui_render = find(video::frame_profile_timeline_stage_e::ui_render);
   const auto *mpp_prep = find(video::frame_profile_timeline_stage_e::mpp_prep);
   const auto *mpp_encode = find(video::frame_profile_timeline_stage_e::mpp_encode);
   const auto *mpp_packet_get = find(video::frame_profile_timeline_stage_e::mpp_packet_get);
   ASSERT_NE(rga, nullptr);
+  ASSERT_NE(rx_ready_wait, nullptr);
+  ASSERT_NE(rx_dequeue, nullptr);
   ASSERT_NE(ui_render, nullptr);
   ASSERT_NE(mpp_prep, nullptr);
   ASSERT_NE(mpp_encode, nullptr);
   ASSERT_NE(mpp_packet_get, nullptr);
   EXPECT_EQ(rga->start_us, 150);
   EXPECT_EQ(rga->end_us, 250);
+  EXPECT_EQ(rx_ready_wait->start_us, 0);
+  EXPECT_EQ(rx_ready_wait->end_us, 90);
+  EXPECT_EQ(rx_dequeue->start_us, 90);
+  EXPECT_EQ(rx_dequeue->end_us, 100);
   EXPECT_EQ(ui_render->start_us, 155);
   EXPECT_EQ(ui_render->end_us, 225);
   EXPECT_EQ(rga->lane, video::frame_profile_timeline_lane_e::rga);
@@ -211,15 +222,20 @@ TEST(FrameProfileTimeline, PreservesRelativeStageBoundsAndOverlap) {
 TEST(FrameProfileTimeline, MarksMissingAndInvalidStagesWithoutCreatingZeroBars) {
   auto profile = complete_profile();
   profile.rga_used = false;
+  profile.dequeue_begin.reset();
   profile.mpp_import_end.reset();
   profile.packetize_begin = *profile.send_end + std::chrono::microseconds(1);
 
   const auto frame = video::make_frame_profile_timeline_frame(profile, *profile.capture);
   ASSERT_TRUE(frame);
   const auto import_bit = 1U << static_cast<std::uint8_t>(video::frame_profile_timeline_stage_e::mpp_import);
+  const auto ready_wait_bit = 1U << static_cast<std::uint8_t>(video::frame_profile_timeline_stage_e::rx_ready_wait);
+  const auto dequeue_bit = 1U << static_cast<std::uint8_t>(video::frame_profile_timeline_stage_e::rx_dequeue);
   const auto encoded_queue_bit = 1U << static_cast<std::uint8_t>(video::frame_profile_timeline_stage_e::encoded_queue);
   const auto packet_send_bit = 1U << static_cast<std::uint8_t>(video::frame_profile_timeline_stage_e::packetize_send);
   EXPECT_TRUE(frame->rga_bypass);
+  EXPECT_NE(frame->missing_stage_mask & ready_wait_bit, 0U);
+  EXPECT_NE(frame->missing_stage_mask & dequeue_bit, 0U);
   EXPECT_NE(frame->missing_stage_mask & import_bit, 0U);
   EXPECT_NE(frame->invalid_stage_mask & encoded_queue_bit, 0U);
   EXPECT_NE(frame->invalid_stage_mask & packet_send_bit, 0U);

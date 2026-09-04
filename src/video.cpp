@@ -440,6 +440,7 @@ namespace video {
     YUV444_SUPPORT = 1 << 10,  ///< Encoder may support 4:4:4 chroma sampling depending on hardware
     ASYNC_TEARDOWN = 1 << 11,  ///< Encoder supports async teardown on a different thread
     FIXED_GOP_SIZE = 1 << 12,  ///< Use fixed small GOP size (encoder doesn't support on-demand IDR frames)
+    SINGLE_USE_INPUT = 1 << 13,  ///< Each converted input may be submitted to the encoder only once
   };
 
   /**
@@ -1241,7 +1242,7 @@ namespace video {
     {{}, {}, {}, {}, {}, {}, {}},
     {{}, {}, {}, {}, {}, {}, "hevc_rkmpp"s},
     {{}, {}, {}, {}, {}, {}, "h264_rkmpp"s},
-    0
+    PARALLEL_ENCODING | SINGLE_USE_INPUT
   };
   #endif
 
@@ -2165,7 +2166,8 @@ namespace video {
     /** @brief Select the completed-window fields retained by the Vulkan UI page. */
     static platf::ui::profile_status_t make_profile_status(const frame_profile_snapshot_t &snapshot) noexcept {
       constexpr std::array metrics {
-        frame_profile_metric_e::rx_driver_age,
+        frame_profile_metric_e::rx_ready_wait,
+        frame_profile_metric_e::rx_dequeue,
         frame_profile_metric_e::capture_queue,
         frame_profile_metric_e::rga,
         frame_profile_metric_e::mpp_encode,
@@ -3553,8 +3555,11 @@ namespace video {
       return;
     }
 
+    bool initial_input_pending = true;
     while (true) {
       bool requested_idr_frame = false;
+      bool converted_input = std::exchange(initial_input_pending, false);
+      std::shared_ptr<platf::img_t> current_img;
 
       while (invalidate_ref_frames_events->peek()) {
         if (auto frames = invalidate_ref_frames_events->pop(0ms)) {
@@ -3576,14 +3581,16 @@ namespace video {
       // Encode at a minimum FPS to avoid image quality issues with static content
       if (!requested_idr_frame || images->peek()) {
         if (auto img = images->pop(max_frametime)) {
-          frame_timestamp = img->frame_timestamp;
-          if (img->frame_profile) {
-            img->frame_profile->capture_queue_exit = std::chrono::steady_clock::now();
+          current_img = std::move(img);
+          frame_timestamp = current_img->frame_timestamp;
+          if (current_img->frame_profile) {
+            current_img->frame_profile->capture_queue_exit = std::chrono::steady_clock::now();
           }
-          if (session->convert(*img)) {
+          if (session->convert(*current_img)) {
             BOOST_LOG(error) << "Could not convert image"sv;
             return;
           }
+          converted_input = true;
         } else if (!images->running()) {
           break;
         }
@@ -3601,6 +3608,13 @@ namespace video {
       // in flight after encoder teardown.
       if (shutdown_event->peek() || !images->running() || (reinit_event.peek() && frame_nr > 1)) {
         break;
+      }
+
+      // RKMPP releases its imported DMA-BUF or reusable RGA target after each
+      // submission. Wait for the next captured frame instead of resubmitting
+      // an already-consumed input when the minimum-FPS timer expires.
+      if ((encoder.flags & SINGLE_USE_INPUT) && !converted_input) {
+        continue;
       }
 
       if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp)) {

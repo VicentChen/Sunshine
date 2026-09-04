@@ -290,6 +290,7 @@ namespace platf::vulkan_ui {
     ImU32 timeline_stage_color(video::frame_profile_timeline_stage_e stage) noexcept {
       constexpr std::array colors {
         IM_COL32(80, 170, 255, 230),
+        IM_COL32(65, 145, 238, 230),
         IM_COL32(65, 125, 220, 230),
         IM_COL32(75, 205, 145, 230),
         IM_COL32(195, 105, 255, 230),
@@ -508,7 +509,8 @@ namespace platf::vulkan_ui {
         return;
       }
       constexpr std::array labels {
-        "RX EOF-DQ",
+        "RX WAIT",
+        "RX DQBUF",
         "CAP QUEUE",
         "RGA",
         "MPP ENCODE",

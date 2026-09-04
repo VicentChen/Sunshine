@@ -43,6 +43,7 @@ namespace video {
     bool rga_used {};  ///< Whether the frame passed through RGA conversion or fill.
 
     std::optional<time_point> capture;  ///< V4L2 CLOCK_MONOTONIC timestamp.
+    std::optional<time_point> dequeue_begin;  ///< Time immediately before the successful VIDIOC_DQBUF call began.
     std::optional<time_point> dequeued;  ///< Time immediately after VIDIOC_DQBUF succeeded.
     std::optional<time_point> capture_queue_exit;  ///< Time the encoder thread began processing the captured image.
     std::optional<time_point> rga_begin;  ///< Time immediately before RGA work began.
@@ -71,6 +72,8 @@ namespace video {
   /** @brief Durations calculated from a completed frame profile. */
   enum class frame_profile_metric_e : std::uint8_t {
     rx_driver_age,  ///< V4L2 timestamp to successful dequeue.
+    rx_ready_wait,  ///< V4L2 timestamp to the start of the successful VIDIOC_DQBUF call.
+    rx_dequeue,  ///< Successful VIDIOC_DQBUF system-call duration.
     capture_queue,  ///< Successful dequeue to encoder-thread processing.
     rga,  ///< RGA conversion or placeholder fill.
     mpp_import,  ///< Non-cached MPP DMA-BUF import.
@@ -117,7 +120,8 @@ namespace video {
 
   /** @brief Concrete work spans retained for the real-time frame timeline. */
   enum class frame_profile_timeline_stage_e : std::uint8_t {
-    rx_driver_age,  ///< Observable RX EOF timestamp to successful dequeue.
+    rx_ready_wait,  ///< Observable RX EOF timestamp to the start of VIDIOC_DQBUF.
+    rx_dequeue,  ///< Successful VIDIOC_DQBUF system-call duration.
     capture_queue,  ///< Successful dequeue to encoder-thread processing.
     rga,  ///< Video conversion, scaling, fill, or letterbox work.
     ui_render,  ///< Changed Dear ImGui snapshot rendered through Vulkan.
@@ -145,7 +149,7 @@ namespace video {
 
   /** @brief One valid concrete stage interval relative to its frame's RX EOF origin. */
   struct frame_profile_timeline_span_t {
-    frame_profile_timeline_stage_e stage {frame_profile_timeline_stage_e::rx_driver_age};  ///< Stable stage identifier.
+    frame_profile_timeline_stage_e stage {frame_profile_timeline_stage_e::rx_ready_wait};  ///< Stable stage identifier.
     frame_profile_timeline_lane_e lane {frame_profile_timeline_lane_e::capture};  ///< Execution row used by the renderer.
     std::int64_t start_us {};  ///< Stage start relative to RX EOF in microseconds.
     std::int64_t end_us {};  ///< Stage end relative to RX EOF in microseconds.
@@ -186,8 +190,10 @@ namespace video {
   /** @brief Return the stable display name for a concrete timeline stage. */
   constexpr std::string_view frame_profile_timeline_stage_name(frame_profile_timeline_stage_e stage) noexcept {
     switch (stage) {
-      case frame_profile_timeline_stage_e::rx_driver_age:
-        return "RX EOF-DQ";
+      case frame_profile_timeline_stage_e::rx_ready_wait:
+        return "RX WAIT";
+      case frame_profile_timeline_stage_e::rx_dequeue:
+        return "RX DQBUF";
       case frame_profile_timeline_stage_e::capture_queue:
         return "CAP QUEUE";
       case frame_profile_timeline_stage_e::rga:
@@ -227,6 +233,10 @@ namespace video {
     switch (metric) {
       case frame_profile_metric_e::rx_driver_age:
         return "RX driver age";
+      case frame_profile_metric_e::rx_ready_wait:
+        return "RX ready wait";
+      case frame_profile_metric_e::rx_dequeue:
+        return "RX dequeue";
       case frame_profile_metric_e::capture_queue:
         return "Capture queue";
       case frame_profile_metric_e::rga:
@@ -309,6 +319,8 @@ namespace video {
         moonlight_height_ = profile.moonlight_height;
       }
       collect_metric(frame_profile_metric_e::rx_driver_age, profile.capture, profile.dequeued);
+      collect_metric(frame_profile_metric_e::rx_ready_wait, profile.capture, profile.dequeue_begin);
+      collect_metric(frame_profile_metric_e::rx_dequeue, profile.dequeue_begin, profile.dequeued);
       collect_metric(frame_profile_metric_e::capture_queue, profile.dequeued, profile.capture_queue_exit);
       if (profile.rga_used) {
         collect_metric(frame_profile_metric_e::rga, profile.rga_begin, profile.rga_end);
@@ -516,7 +528,8 @@ namespace video {
       frame.spans[frame.span_count++] = {stage, lane, start_us, end_us};
     };
 
-    append(frame_profile_timeline_stage_e::rx_driver_age, frame_profile_timeline_lane_e::capture, profile.capture, profile.dequeued);
+    append(frame_profile_timeline_stage_e::rx_ready_wait, frame_profile_timeline_lane_e::capture, profile.capture, profile.dequeue_begin);
+    append(frame_profile_timeline_stage_e::rx_dequeue, frame_profile_timeline_lane_e::capture, profile.dequeue_begin, profile.dequeued);
     append(frame_profile_timeline_stage_e::capture_queue, frame_profile_timeline_lane_e::capture, profile.dequeued, profile.capture_queue_exit);
     if (profile.rga_used) {
       append(frame_profile_timeline_stage_e::rga, frame_profile_timeline_lane_e::rga, profile.rga_begin, profile.rga_end);

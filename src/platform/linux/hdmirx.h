@@ -168,6 +168,8 @@ namespace platf::hdmirx {
      * steady_clock timeline.  Frames lacking TIMESTAMP_MONOTONIC are rejected.
      */
     std::chrono::steady_clock::time_point timestamp() const noexcept;
+    /** @brief Return the time immediately before the successful VIDIOC_DQBUF call began. */
+    std::chrono::steady_clock::time_point dequeue_begin_timestamp() const noexcept;
     /** @brief Return the time immediately after VIDIOC_DQBUF succeeded. */
     std::chrono::steady_clock::time_point dequeue_timestamp() const noexcept;
     std::uint32_t timestamp_flags() const noexcept;
@@ -184,7 +186,7 @@ namespace platf::hdmirx {
 
   private:
     friend class hdmirx_capture_t;
-    captured_frame_t(std::shared_ptr<detail::capture_state_t> state, std::uint64_t generation, std::uint32_t index, std::uint32_t sequence, std::chrono::steady_clock::time_point timestamp, std::chrono::steady_clock::time_point dequeue_timestamp, std::uint32_t timestamp_flags, std::uint32_t freshness_drops, std::vector<frame_plane_t> planes) noexcept;
+    captured_frame_t(std::shared_ptr<detail::capture_state_t> state, std::uint64_t generation, std::uint32_t index, std::uint32_t sequence, std::chrono::steady_clock::time_point timestamp, std::chrono::steady_clock::time_point dequeue_begin_timestamp, std::chrono::steady_clock::time_point dequeue_timestamp, std::uint32_t timestamp_flags, std::uint32_t freshness_drops, std::vector<frame_plane_t> planes) noexcept;
 
     void release_noexcept() noexcept;
 
@@ -193,6 +195,7 @@ namespace platf::hdmirx {
     std::uint32_t index_ {};
     std::uint32_t sequence_ {};
     std::chrono::steady_clock::time_point timestamp_ {};
+    std::chrono::steady_clock::time_point dequeue_begin_timestamp_ {};
     std::chrono::steady_clock::time_point dequeue_timestamp_ {};
     std::uint32_t timestamp_flags_ {};
     std::uint32_t freshness_drops_ {};

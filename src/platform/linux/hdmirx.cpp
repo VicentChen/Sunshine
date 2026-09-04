@@ -254,12 +254,13 @@ namespace platf::hdmirx {
     };
   }  // namespace detail
 
-  captured_frame_t::captured_frame_t(std::shared_ptr<detail::capture_state_t> state, std::uint64_t generation, std::uint32_t index, std::uint32_t sequence, std::chrono::steady_clock::time_point timestamp, std::chrono::steady_clock::time_point dequeue_timestamp, std::uint32_t timestamp_flags, std::uint32_t freshness_drops, std::vector<frame_plane_t> planes) noexcept:
+  captured_frame_t::captured_frame_t(std::shared_ptr<detail::capture_state_t> state, std::uint64_t generation, std::uint32_t index, std::uint32_t sequence, std::chrono::steady_clock::time_point timestamp, std::chrono::steady_clock::time_point dequeue_begin_timestamp, std::chrono::steady_clock::time_point dequeue_timestamp, std::uint32_t timestamp_flags, std::uint32_t freshness_drops, std::vector<frame_plane_t> planes) noexcept:
       state_(std::move(state)),
       generation_(generation),
       index_(index),
       sequence_(sequence),
       timestamp_(timestamp),
+      dequeue_begin_timestamp_(dequeue_begin_timestamp),
       dequeue_timestamp_(dequeue_timestamp),
       timestamp_flags_(timestamp_flags),
       freshness_drops_(freshness_drops),
@@ -276,6 +277,7 @@ namespace platf::hdmirx {
       index_ = other.index_;
       sequence_ = other.sequence_;
       timestamp_ = other.timestamp_;
+      dequeue_begin_timestamp_ = other.dequeue_begin_timestamp_;
       dequeue_timestamp_ = other.dequeue_timestamp_;
       timestamp_flags_ = other.timestamp_flags_;
       freshness_drops_ = other.freshness_drops_;
@@ -315,6 +317,10 @@ namespace platf::hdmirx {
 
   std::chrono::steady_clock::time_point captured_frame_t::timestamp() const noexcept {
     return timestamp_;
+  }
+
+  std::chrono::steady_clock::time_point captured_frame_t::dequeue_begin_timestamp() const noexcept {
+    return dequeue_begin_timestamp_;
   }
 
   std::chrono::steady_clock::time_point captured_frame_t::dequeue_timestamp() const noexcept {
@@ -550,6 +556,7 @@ namespace platf::hdmirx {
       dequeue_buffer.memory = k_memory_type;
       dequeue_buffer.length = static_cast<__u32>(dequeue_planes.size());
       dequeue_buffer.m.planes = dequeue_planes.data();
+      const auto dequeue_begin_timestamp = std::chrono::steady_clock::now();
       if (ioctl_retry(state->video_fd, VIDIOC_DQBUF, &dequeue_buffer) == -1) {
         if (errno == EAGAIN) {
           continue;
@@ -610,7 +617,7 @@ namespace platf::hdmirx {
       if (latest_frame && freshness_drops != std::numeric_limits<std::uint32_t>::max()) {
         ++freshness_drops;
       }
-      latest_frame = captured_frame_t(state, state->generation, dequeue_buffer.index, dequeue_buffer.sequence, v4l2_monotonic_timestamp(dequeue_buffer.timestamp), dequeue_timestamp, dequeue_buffer.flags, freshness_drops, std::move(planes));
+      latest_frame = captured_frame_t(state, state->generation, dequeue_buffer.index, dequeue_buffer.sequence, v4l2_monotonic_timestamp(dequeue_buffer.timestamp), dequeue_begin_timestamp, dequeue_timestamp, dequeue_buffer.flags, freshness_drops, std::move(planes));
     }
   }
 
@@ -873,6 +880,7 @@ namespace platf {
               rx_image->frame_profile->moonlight_width = moonlight_resolution_.width;
               rx_image->frame_profile->moonlight_height = moonlight_resolution_.height;
               rx_image->frame_profile->capture = rx_image->frame->timestamp();
+              rx_image->frame_profile->dequeue_begin = rx_image->frame->dequeue_begin_timestamp();
               rx_image->frame_profile->dequeued = rx_image->frame->dequeue_timestamp();
             } else {
               rx_image->frame_profile.reset();

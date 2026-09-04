@@ -74,7 +74,8 @@ namespace platf::ui {
 
   /** @brief Stable subset and ordering of completed-window metrics shown by the UI. */
   enum class profile_metric_e : std::uint8_t {
-    rx_driver_age,  ///< HDMI RX timestamp to dequeue.
+    rx_ready_wait,  ///< HDMI RX timestamp to the start of VIDIOC_DQBUF.
+    rx_dequeue,  ///< Successful VIDIOC_DQBUF system-call duration.
     capture_queue,  ///< Dequeue to encoder-thread processing.
     rga,  ///< RGA conversion or placeholder fill.
     mpp_encode,  ///< MPP submit to complete encoded packet.
