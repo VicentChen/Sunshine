@@ -223,10 +223,14 @@ rkmpp_disable_reencode = disabled
 会先作为 UI 修饰键被截获；如果没有继续按 Select，松开 Start 时会向当前应用补发一次普通点击。
 Dear ImGui 通过官方 Vulkan renderer backend 在按输出分辨率和 UI 大小档位自适应的 BGR surface 中绘制
 当前页面。BGR888 直通时，Vulkan 按 capture generation 与 slot 缓存 buffer import，并把
-面板直接 copy 到当前 HDMI RX DMA-BUF 底部居中、距下边缘 32 像素的 ROI；这条路径不经过
-RGA，也不做 CPU 像素复制。视频本身已进入 RGA fallback 时，Vulkan 才把变化后的面板发布到
-共享 BGR DMA-BUF，再由 RGA 转换并覆盖 NV12 target。页面状态不变时不会重复提交 ImGui
-绘制；UI 隐藏时两种路径都不执行 ROI 覆盖。
+面板直接 copy 到当前 HDMI RX DMA-BUF 底部居中的 ROI；这条路径不经过 RGA，也不做 CPU
+像素复制。NV12 UI 可见时，HDMI RX capture DMA-BUF 始终作为只读 RGA source：RGA 先把
+完整帧复制到隔离的 CMA NV12 target，再把 Vulkan 发布到共享 BGR DMA-BUF 的面板转换覆盖到
+target 的 UI ROI，最后由 RKMPP 编码 target。不得把 rk_hdmirx 的生产者 allocation 作为 RGA
+destination；实机证明这样会使后续 capture 的 UV 数据别名到 Y 数据并产生持续绿屏。视频本身
+进入尺寸不匹配的 RGA fallback 时复用同一 target 和面板。页面状态不变时不会重复提交 ImGui
+绘制；UI 隐藏且尺寸匹配时 NV12 继续直通，不执行 RGA。ROI 的下边缘安全距离与页面尺寸一起
+按输出分辨率和 UI 大小档位缩放。
 
 ~~~text
 vulkan_ui = enabled
@@ -242,11 +246,11 @@ fallback RGA 失败时，Sunshine 会在当前会话中关闭 UI 并继续基本
 
 ## RGA 视频缩放与格式转换
 
-仅当 Moonlight 请求的分辨率与 HDMI RX 实际可见分辨率不一致时，Sunshine 才使用 RGA
-执行视频硬件缩放、颜色转换以及保持宽高比的黑边或居中裁剪。尺寸一致时不得使用 RGA
-重新缩放视频，原始 HDMI RX DMA-BUF 会直接交给 RKMPP；恢复后格式或 stride 变化会重建
-直通编码器。可见 Vulkan UI 的局部 ROI 覆盖不属于视频缩放：BGR888 直通时由 Vulkan
-直接写 capture DMA-BUF，只有视频转换后的 NV12 target 才使用 RGA 合成 UI；隐藏时均不执行。
+Moonlight 请求的分辨率与 HDMI RX 实际可见分辨率不一致时，Sunshine 使用 RGA 执行视频
+硬件缩放、颜色转换以及保持宽高比的黑边或居中裁剪。尺寸一致且 UI 隐藏时，原始 HDMI RX
+DMA-BUF 直接交给 RKMPP；恢复后格式或 stride 变化会重建直通编码器。BGR888 可见 UI 仍由
+Vulkan 直接写 capture ROI；NV12 可见 UI 则临时走隔离 target 的完整帧 RGA copy，再在 target
+上做 UI ROI 合成，避免向 rk_hdmirx capture allocation 写入。
 
 RGA 转换路径使用一个可复用的 NV12 目标 DMA-BUF。同步编码在消费完成后归还该缓冲；
 初始化阶段产生但未编码的占位图像也会在下一次转换前主动释放。这样可以降低 4K CMA
@@ -302,6 +306,7 @@ PulseAudio 后端使用 `pa_threaded_mainloop`，并在 mainloop lock 内串行�
 启用 Trace/Debug 日志或 `rkmpp_profile` 后，可观察：
 
 - **RGA timings**：`setup`、`fill`、`process/resize` 的微秒级耗时。
+- **NV12 UI compose**：可见 UI 的隔离 target 完整帧 copy 计入 RGA 指标，面板 ROI 合成计入 Timeline 的 UI compose 阶段。
 - **MPP encode latency**：MPP submit、output wait 和完整编码耗时。
 - **RKMPP capture-to-send latency**：HDMI RX dequeue、编码、封包到网络提交的主机侧分段耗时。
 

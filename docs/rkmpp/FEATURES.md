@@ -16,7 +16,7 @@
 - 直通、RGA 创建和运行时 reconfigure 共用同一套 MPP 配置构造，Moonlight 请求的帧率、分数帧率、码率和 GOP 不再在直通路径静默回落到默认值。
 - 编码输出使用调用方提供的 8 MiB MPP packet buffer，并由 `encoded_packet_t` 持有到网络消费者释放，不额外复制到 `std::vector`。普通 P 帧会跳过不必要的 Annex-B IDR 扫描。
 - Web UI 可选择 `HDMI RX (Rockchip)` 和 `Rockchip MPP`，并配置延迟统计、低延迟实验和关闭重编码实验选项。旧 MPP palette OSD、`rkmpp_profile_overlay` 配置项及 Web UI 开关已经删除；性能采样由 `rkmpp_profile` 独立控制，显示统一由 Vulkan UI 负责。
-- Vulkan UI 使用固定版本的 Dear ImGui core 与官方 Vulkan renderer backend 离屏绘制不透明 BGR 诊断页；页面尺寸、字体和留白按 Moonlight 输出分辨率及用户选择的紧凑/标准/大号档位缩放。BGR888 直通时 Vulkan 直接导入并写入当前 HDMI RX capture DMA-BUF 的 ROI，视频 RGA fallback 时才把缓存面板转换覆盖到 NV12 target。不创建 GLFW/SDL 窗口或 swapchain；相同 revision 复用缓存，UI 隐藏时不提交绘制或 ROI 覆盖。
+- Vulkan UI 使用固定版本的 Dear ImGui core 与官方 Vulkan renderer backend 离屏绘制不透明 BGR 诊断页；页面尺寸、字体和留白按 Moonlight 输出分辨率及用户选择的紧凑/标准/大号档位缩放。BGR888 直通时 Vulkan 直接导入并写入当前 HDMI RX capture DMA-BUF 的 ROI；NV12 UI 可见时，RGA 先把只读 capture 帧复制到隔离的 CMA NV12 目标，再把缓存面板转换覆盖到该目标的 UI ROI，避免把 HDMI RX 生产者拥有的 DMA-BUF 当作 RGA 目标而破坏后续色度平面。UI 隐藏且尺寸匹配时仍保持 NV12 直通，不执行 RGA。不创建 GLFW/SDL 窗口或 swapchain；相同 revision 复用缓存。
 - Profile Timeline 把最多 32 个最近完成帧按 RX EOF 对齐后得到的平均视图放在上方，下方只显示最新一个完成帧，避免多帧实时条密集闪烁。每个 Event 的名称通过竖直引线放在彩条下方，并以前置同色块强化对应关系；相互碰撞的标签自动增加标注行。Event 后不再显示内部有效样本数：不同阶段可能因 RGA bypass、条件执行、缺失或无效时间戳而采用不同数量的帧，平均视图标题只说明本次最多检查了多少个最近帧。Profile 使用与普通页面等高的宽面板，Timeline 和 completed-window 指标位于带可见滚动条的视窗中，owner 可用 D-pad 或左摇杆上下滚动。
 - Vulkan UI 的 BGR surface 使用适合 Vulkan external-buffer import 的对齐行跨度；Compact（85%）Profile 不再因未对齐的 1224 像素可见宽度创建失败。尺寸切换会先完整建立一组新 surface 再原子替换，运行时创建失败则保留最后一组可用 surface，不再使整个 UI session 失效。
 - 线程安全的 UI controller 支持先按住 `Start`、再点按 `Back/Select` 立即开关 UI；Start 修饰键会先被截获，未组成快捷键时在松开后补发普通 Start 点击。实现同时保留完整释放门、owner、全局输入截获、D-pad/左摇杆焦点导航和断开/reset 清理。

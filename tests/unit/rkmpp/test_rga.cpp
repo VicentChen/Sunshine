@@ -361,6 +361,41 @@ namespace {
     EXPECT_EQ(backend.last_process_color_space, platf::rga::color_space_e::rgb_to_yuv_bt709_limited);
   }
 
+  TEST(RgaOperations, CoversAdaptiveFourKUiPanelIntoNv12CaptureRoi) {
+    fake_backend_t backend;
+    const platf::rga::image_layout_t panel_layout {
+      10,
+      2'560,
+      1'440,
+      7'680,
+      11'059'200,
+      platf::rga::pixel_format_e::bgr888
+    };
+    const platf::rga::image_layout_t capture_layout {
+      11,
+      3'840,
+      2'160,
+      3'840,
+      12'441'600,
+      platf::rga::pixel_format_e::nv12
+    };
+    auto panel = platf::rga::imported_buffer_t::import(backend, panel_layout);
+    auto capture = platf::rga::imported_buffer_t::import(backend, capture_layout);
+
+    platf::rga::process(
+      panel,
+      {0, 0, 2'560, 1'440},
+      capture,
+      {640, 648, 2'560, 1'440},
+      platf::rga::color_space_e::rgb_to_yuv_bt709_limited
+    );
+
+    EXPECT_EQ(backend.process_checks, 1);
+    EXPECT_EQ(backend.processes, 1);
+    EXPECT_EQ(backend.last_process_check_color_space, platf::rga::color_space_e::rgb_to_yuv_bt709_limited);
+    EXPECT_EQ(backend.last_process_color_space, platf::rga::color_space_e::rgb_to_yuv_bt709_limited);
+  }
+
   TEST(RgaOperations, ConvertsImcheckFailureToErrorAndSkipsOperation) {
     fake_backend_t backend;
     backend.process_check_status = {false, 9, "fake imcheck rejection"};

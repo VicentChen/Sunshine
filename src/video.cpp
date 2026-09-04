@@ -1881,9 +1881,11 @@ namespace video {
   /**
    * @brief Cache a Vulkan-rendered UI and cover each live HDMI RX DMA-BUF ROI.
    *
-   * The externally allocated BGR DMA-BUF is shared only for the NV12 RGA
-   * fallback. On the direct BGR path Vulkan imports each capture slot as a
-   * buffer and copies the cached panel into the leased frame itself.
+   * The externally allocated BGR DMA-BUF is shared with RGA for converted NV12
+   * targets. Direct NV12 capture allocations remain read-only: while the UI is
+   * visible, the encoder path copies the frame to an isolated CMA target and
+   * overlays the panel there. On the direct BGR path Vulkan imports each
+   * capture slot and copies the cached panel into it.
    */
   class rkmpp_vulkan_ui_session_t {
     struct surface_t;
@@ -1919,7 +1921,7 @@ namespace video {
       if (frames_composed_ != 0) {
         BOOST_LOG(info) << "RKMPP Vulkan UI stopped: composed=" << frames_composed_
                         << " capture_generations=" << capture_generations_
-                        << " imported_slots=" << imported_slots_;
+                        << " bgr_imported_slots=" << bgr_imported_slots_;
       }
     }
 
@@ -1931,6 +1933,11 @@ namespace video {
     /** @brief Return the allocator that must outlive UI and converted targets. */
     platf::rga::dma_allocator_t &rga_allocator() noexcept {
       return *allocator_;
+    }
+
+    /** @brief Advance UI state and report whether an NV12 frame needs an isolated target. */
+    bool wants_nv12_target(platf::hdmirx::hdmirx_img_t &image) {
+      return prepare_visible_panel(image) != nullptr;
     }
 
     /** @brief Render a changed visible snapshot and cover one imported NV12 fallback destination. */
@@ -1992,19 +1999,8 @@ namespace video {
       }
       const auto &format = *image.capture_format;
       const auto &plane = image.frame->planes().front();
-      if (format.mpp_format != MPP_FMT_BGR888) {
-        throw std::runtime_error("direct Vulkan UI requires a BGR888 HDMI RX frame");
-      }
       if (plane.data_offset != 0) {
         throw std::runtime_error("Vulkan UI does not support a nonzero HDMI RX DMA-BUF data offset");
-      }
-      const auto minimum_stride = static_cast<std::uint64_t>(format.width) * 3U;
-      if (minimum_stride > std::numeric_limits<std::uint32_t>::max() || plane.bytesperline < minimum_stride || plane.bytesperline % 3U != 0 || static_cast<std::uint64_t>(format.height) > std::numeric_limits<std::uint64_t>::max() / plane.bytesperline) {
-        throw std::runtime_error("Vulkan UI HDMI RX stride is invalid");
-      }
-      const auto required_size = static_cast<std::uint64_t>(format.height) * plane.bytesperline;
-      if (plane.payload_bytes < required_size || plane.sizeimage < required_size || plane.allocation_size < required_size) {
-        throw std::runtime_error("Vulkan UI HDMI RX DMA-BUF is smaller than its BGR888 layout");
       }
 
       const auto generation = image.frame->generation();
@@ -2017,12 +2013,23 @@ namespace video {
                         << " allocation=" << plane.allocation_size;
       }
       const auto index = image.frame->buffer_index();
+      if (format.mpp_format != MPP_FMT_BGR888) {
+        throw std::runtime_error("direct Vulkan UI requires a BGR888 HDMI RX frame");
+      }
+      const auto minimum_stride = static_cast<std::uint64_t>(format.width) * 3U;
+      if (minimum_stride > std::numeric_limits<std::uint32_t>::max() || plane.bytesperline < minimum_stride || plane.bytesperline % 3U != 0 || static_cast<std::uint64_t>(format.height) > std::numeric_limits<std::uint64_t>::max() / plane.bytesperline) {
+        throw std::runtime_error("Vulkan UI BGR888 HDMI RX stride is invalid");
+      }
+      const auto required_size = static_cast<std::uint64_t>(format.height) * plane.bytesperline;
+      if (plane.payload_bytes < required_size || plane.sizeimage < required_size || plane.allocation_size < required_size) {
+        throw std::runtime_error("Vulkan UI HDMI RX DMA-BUF is smaller than its BGR888 layout");
+      }
   #ifdef SUNSHINE_BUILD_VULKAN
       if (image.frame_profile) {
         image.frame_profile->ui_compose_begin = std::chrono::steady_clock::now();
       }
       if (surface->renderer->cover_bgr888({.dma_buf_fd = plane.dma_buf_fd, .allocation_size = plane.allocation_size, .width = format.width, .height = format.height, .stride = plane.bytesperline, .generation = generation, .slot = index}, metrics_.panel_margin)) {
-        ++imported_slots_;
+        ++bgr_imported_slots_;
         BOOST_LOG(info) << "RKMPP Vulkan UI imported BGR capture slot=" << index
                         << " fd=" << plane.dma_buf_fd
                         << " generation=" << generation;
@@ -2248,7 +2255,7 @@ namespace video {
     platf::ui::profile_status_t profile_status_;  ///< Locally merged statistics and Timeline snapshots.
     std::uint64_t frames_composed_ {};
     std::uint64_t capture_generations_ {};
-    std::uint64_t imported_slots_ {};
+    std::uint64_t bgr_imported_slots_ {};
   };
 
   class rkmpp_rga_encode_session_t final: public encode_session_t {
@@ -2621,6 +2628,13 @@ namespace video {
       const platf::hdmirx::resolution_t input_resolution {live_layout->visible_width, live_layout->visible_height};
       const platf::hdmirx::resolution_t target_resolution {static_cast<std::uint32_t>(config_.width), static_cast<std::uint32_t>(config_.height)};
       if (platf::hdmirx::needs_conversion(input_resolution, target_resolution)) {
+        return convert_with_rga(img);
+      }
+      // The rk_hdmirx capture allocation is safe as an RGA source but not as
+      // an RGA destination: writing it makes subsequent driver-produced UV
+      // data alias luma. Keep the producer allocation read-only and compose a
+      // visible NV12 UI into the existing isolated CMA fallback target.
+      if (live_layout->format == MPP_FMT_YUV420SP && vulkan_ui_ && vulkan_ui_->wants_nv12_target(*image_)) {
         return convert_with_rga(img);
       }
       if (!direct_encoder_ready_ || *live_layout != input_layout_) {
