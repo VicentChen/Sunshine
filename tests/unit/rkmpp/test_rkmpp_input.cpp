@@ -7,6 +7,7 @@
   #include <gtest/gtest.h>
   #include <limits>
   #include <src/platform/linux/rkmpp.h>
+  #include <src/video.h>
   #include <utility>
   #include <vector>
 
@@ -43,6 +44,20 @@ namespace {
     EXPECT_EQ(platf::rkmpp::validate_encoder_config(converted_config), platf::rkmpp::encoder_config_status_e::ok);
     EXPECT_EQ(direct_config.coded_width, 1920U);
     EXPECT_EQ(converted_config.coded_width, 1280U);
+  }
+
+  TEST(RkmppEncoderConfig, EnablesAutoTileOnlyForHevcSessions) {
+    const auto input = nv12_layout();
+    video::config_t config {};
+    config.width = 1920;
+    config.height = 1080;
+    config.framerate = 60;
+    config.bitrate = 12'000;
+
+    config.videoFormat = 0;
+    EXPECT_FALSE(video::make_rkmpp_encoder_config(config, input).auto_tile);
+    config.videoFormat = 1;
+    EXPECT_TRUE(video::make_rkmpp_encoder_config(config, input).auto_tile);
   }
 
   TEST(RkmppInputLayout, RejectsLayoutsThatCannotCoverVisiblePixels) {

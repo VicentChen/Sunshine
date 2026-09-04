@@ -14,6 +14,7 @@
 - EDID 字节写入与 HDMI 模式协商是两个独立结果。实际 HDMI timing 已匹配选中原生模式时零写入；不匹配时每个 streaming display 最多执行一次 EDID/HPD 事务，即使相同字节已安装也会重新声明目标。readback 只验证接收器保存的 EDID，随后由独立 verifier 在五秒窗口内以实际捕获尺寸确认主机是否采用目标；失败会明确记录实际尺寸并继续通过 RGA 串流，不再伪报分辨率切换成功。source change、Xbox wake 和会话析构本身不能触发额外写入；异常写入只允许一次原生恢复。
 - HDMI 热插拔使 PulseAudio 录音流失效时，Linux 音频采集会重建输入流，而不是永久结束本次会话的音频。
 - 直通、RGA 创建和运行时 reconfigure 共用同一套 MPP 配置构造，Moonlight 请求的帧率、分数帧率、码率和 GOP 不再在直通路径静默回落到默认值。
+- HEVC 会话启用 MPP `h265:auto_tile`，让 RK3588 把单帧划分为两个硬件 tile 并交给两个 RKVENC core 并行编码；H.264 会话保持单 core 配置。1080p60 与 4K60 实机测试中两个 core 的中断计数同步增长，确认配置已进入双 core 数据面。
 - 编码输出使用六个固定的 non-contiguous system DMA-HEAP slot；encoder 创建时一次性分配并通过 `mpp_buffer_get_ptr()` 预热 CPU 映射，运行时不再逐帧分配或映射 output buffer。单 slot 容量为 `max(8 MiB, aligned_input_frame_size)`，4K NV12 实机会话为 12,441,600 bytes；pool 满时最多有界等待 250 ms，不允许动态扩容。`encoded_packet_t` 持有 slot lease 到网络消费者释放，避免复用仍在发送的码流。MPP 1.3.9 的公开 API 无法可靠清空全部 packet metadata/segment 状态，因此保留每帧新建轻量 `MppPacket` wrapper 的安全方案。普通 P 帧会跳过不必要的 Annex-B IDR 扫描。
 - Web UI 可选择 `HDMI RX (Rockchip)` 和 `Rockchip MPP`，并配置延迟统计、低延迟实验和关闭重编码实验选项。旧 MPP palette OSD、`rkmpp_profile_overlay` 配置项及 Web UI 开关已经删除；性能采样由 `rkmpp_profile` 独立控制，显示统一由 Vulkan UI 负责。
 - Vulkan UI 使用固定版本的 Dear ImGui core 与官方 Vulkan renderer backend 离屏绘制不透明 BGR 诊断页；页面尺寸、字体和留白按 Moonlight 输出分辨率及用户选择的紧凑/标准/大号档位缩放。BGR888 直通时 Vulkan 直接导入并写入当前 HDMI RX capture DMA-BUF 的 ROI；NV12 UI 可见时，RGA 先把只读 capture 帧复制到隔离的 CMA NV12 目标，再把缓存面板转换覆盖到该目标的 UI ROI，避免把 HDMI RX 生产者拥有的 DMA-BUF 当作 RGA 目标而破坏后续色度平面。UI 隐藏且尺寸匹配时仍保持 NV12 直通，不执行 RGA。不创建 GLFW/SDL 窗口或 swapchain；相同 revision 复用缓存。

@@ -591,6 +591,7 @@ namespace platf::rkmpp {
     state->output_pool = output_pool_t::create(static_cast<std::size_t>(output_bytes));
     state->stats.output_buffer_bytes = output_bytes;
     state->stats.output_pool_capacity = detail::output_pool_slot_count;
+    const bool auto_tile = settings.codec == codec_e::h265 && settings.auto_tile;
 
     check(mpp_create(&state->context, &state->api), "mpp_create");
     RK_S64 timeout_ms = 2000;
@@ -630,6 +631,9 @@ namespace platf::rkmpp {
     } else {
       set("h265:profile", 1);
       set("h265:level", 120);
+      if (auto_tile) {
+        set("h265:auto_tile", 1);
+      }
     }
     if (settings.low_delay) {
       set("base:low_delay", 1);
@@ -646,6 +650,7 @@ namespace platf::rkmpp {
                     << " fps=" << settings.fps_num << "/" << settings.fps_den
                     << " bitrate=" << settings.bitrate << " gop=" << settings.gop
                     << " low_delay=" << settings.low_delay << " max_reenc_times=" << (settings.disable_reencode ? 0 : -1)
+                    << " auto_tile=" << auto_tile
                     << " split:mode=0 split:out=0"
                     << " output_pool=" << detail::output_pool_slot_count << 'x' << output_bytes
                     << " allocator=dma_heap(system,non-contiguous) prewarmed=true";

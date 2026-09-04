@@ -221,6 +221,7 @@ namespace platf::rkmpp {
     std::uint32_t gop {60};  ///< GOP length in frames.
     bool low_delay {false};  ///< Request MPP low-delay mode; disabled by the baseline configuration.
     bool disable_reencode {false};  ///< Limit MPP rate control to zero re-encode attempts; disabled by the baseline configuration.
+    bool auto_tile {false};  ///< Split HEVC frames into hardware tiles so RK3588 may encode them on both RKVENC cores.
   };
 
   /**

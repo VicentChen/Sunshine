@@ -1875,7 +1875,7 @@ namespace video {
     if (gop == 0 || gop > std::numeric_limits<std::uint32_t>::max()) {
       throw std::invalid_argument("RKMPP GOP is out of range");
     }
-    return {config.videoFormat == 0 ? platf::rkmpp::codec_e::h264 : platf::rkmpp::codec_e::h265, input_layout, static_cast<std::uint32_t>(config.width), static_cast<std::uint32_t>(config.height), static_cast<std::uint32_t>(fps.num), static_cast<std::uint32_t>(fps.den), static_cast<std::uint32_t>(config.bitrate) * 1000U, static_cast<std::uint32_t>(gop), ::config::video.rkmpp_low_delay, ::config::video.rkmpp_disable_reencode};
+    return {config.videoFormat == 0 ? platf::rkmpp::codec_e::h264 : platf::rkmpp::codec_e::h265, input_layout, static_cast<std::uint32_t>(config.width), static_cast<std::uint32_t>(config.height), static_cast<std::uint32_t>(fps.num), static_cast<std::uint32_t>(fps.den), static_cast<std::uint32_t>(config.bitrate) * 1000U, static_cast<std::uint32_t>(gop), ::config::video.rkmpp_low_delay, ::config::video.rkmpp_disable_reencode, config.videoFormat == 1};
   }
 
   /**
