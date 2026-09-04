@@ -60,6 +60,10 @@ TEST(RkmppStressTest, EncoderLifecycleNoFdLeaks) {
     EXPECT_EQ(stats.bytes, 0U) << "Unexpected stats on iteration " << i;
     EXPECT_EQ(stats.min_packet_bytes, 0U) << "Unexpected stats on iteration " << i;
     EXPECT_EQ(stats.max_packet_bytes, 0U) << "Unexpected stats on iteration " << i;
+    EXPECT_EQ(stats.output_buffer_bytes, 8U * 1024U * 1024U) << "Unexpected pool slot size on iteration " << i;
+    EXPECT_EQ(stats.output_pool_capacity, platf::rkmpp::detail::output_pool_slot_count) << "Unexpected pool capacity on iteration " << i;
+    EXPECT_EQ(stats.output_pool_peak_leases, 0U) << "Unexpected active pool lease on iteration " << i;
+    EXPECT_EQ(stats.output_pool_waits, 0U) << "Unexpected pool wait on iteration " << i;
     // encoder goes out of scope here and destroys its MPP context/configuration.
   }
 

@@ -3,7 +3,10 @@
 #include "src/logging.h"
 #include "src/platform/hdmirx_policy.h"
 
+#include <algorithm>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <limits>
 #include <mpp_buffer.h>
 #include <mpp_frame.h>
@@ -18,6 +21,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace platf::rkmpp {
   void input_frame_t::reset() noexcept {
@@ -25,7 +29,8 @@ namespace platf::rkmpp {
   }
 
   namespace {
-    constexpr std::size_t output_buffer_size = 8U * 1024U * 1024U;
+    constexpr std::uint64_t minimum_output_buffer_size = 8U * 1024U * 1024U;
+    constexpr auto output_pool_wait_timeout = std::chrono::milliseconds(250);
     constexpr auto packet_timeout = std::chrono::seconds(5);
 
     void check(MPP_RET result, const char *operation) {
@@ -83,20 +88,187 @@ namespace platf::rkmpp {
       }
     };
 
+    /** @brief Fixed system DMA-HEAP buffers shared by the encoder and network packet leases. */
+    class output_pool_t {
+    public:
+      /** @brief Immutable counters sampled by `encoder_t::stats()`. */
+      struct stats_t {
+        std::uint32_t peak_leases {};  ///< Largest simultaneous lease count.
+        std::uint64_t waits {};  ///< Acquisitions that observed an empty free list.
+      };
+
+      /**
+       * @brief Allocate and CPU-map every output slot before the first encoded frame.
+       *
+       * @param slot_size Byte capacity of each buffer.
+       * @return Shared pool whose lifetime extends through every outstanding packet.
+       */
+      static std::shared_ptr<output_pool_t> create(std::size_t slot_size) {
+        auto pool = std::shared_ptr<output_pool_t>(new output_pool_t(slot_size));
+        check(mpp_buffer_group_get_internal(&pool->group_, MPP_BUFFER_TYPE_DMA_HEAP), "mpp_buffer_group_get_internal(output system DMA-HEAP)");
+        check(mpp_buffer_group_limit_config(pool->group_, slot_size, detail::output_pool_slot_count), "mpp_buffer_group_limit_config(output)");
+        pool->slots_.reserve(detail::output_pool_slot_count);
+        pool->leased_.resize(detail::output_pool_slot_count);
+        for (std::uint32_t index = 0; index < detail::output_pool_slot_count; ++index) {
+          MppBuffer buffer {};
+          check(mpp_buffer_get(pool->group_, &buffer, slot_size), "mpp_buffer_get(output pool)");
+          try {
+            MppBufferInfo info {};
+            check(mpp_buffer_info_get(buffer, &info), "mpp_buffer_info_get(output pool)");
+            const auto type = static_cast<unsigned int>(info.type);
+            if ((type & MPP_BUFFER_TYPE_MASK) != MPP_BUFFER_TYPE_DMA_HEAP || (type & MPP_BUFFER_FLAGS_CONTIG) != 0) {
+              throw std::runtime_error("RKMPP output pool allocator is not non-contiguous system DMA-HEAP");
+            }
+            if (!mpp_buffer_get_ptr(buffer)) {
+              throw std::runtime_error("RKMPP output pool CPU mmap prewarm failed");
+            }
+            pool->slots_.push_back(buffer);
+            pool->free_.push_back(index);
+          } catch (...) {
+            mpp_buffer_put(buffer);
+            throw;
+          }
+        }
+        return pool;
+      }
+
+      output_pool_t(const output_pool_t &) = delete;
+      output_pool_t &operator=(const output_pool_t &) = delete;
+
+      ~output_pool_t() {
+        for (auto buffer : slots_) {
+          if (buffer) {
+            mpp_buffer_put(buffer);
+          }
+        }
+        if (group_) {
+          mpp_buffer_group_put(group_);
+        }
+      }
+
+      /** @brief Lease one slot with bounded backpressure when the network retains all slots. */
+      std::uint32_t acquire() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (free_.empty()) {
+          ++waits_;
+          if (!available_.wait_for(lock, output_pool_wait_timeout, [&] {
+                return !free_.empty();
+              })) {
+            throw std::runtime_error("RKMPP output pool exhausted while packets remain in flight");
+          }
+        }
+        const auto index = free_.front();
+        free_.pop_front();
+        leased_[index] = true;
+        ++lease_count_;
+        peak_leases_ = std::max(peak_leases_, lease_count_);
+        return index;
+      }
+
+      /** @brief Return a packet's slot and wake one bounded producer wait. */
+      void release(std::uint32_t index) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (index >= leased_.size() || !leased_[index]) {
+          return;
+        }
+        leased_[index] = false;
+        --lease_count_;
+        free_.push_back(index);
+        available_.notify_one();
+      }
+
+      /** @brief Return the MPP buffer backing one valid active lease. */
+      MppBuffer buffer(std::uint32_t index) const noexcept {
+        return index < slots_.size() ? slots_[index] : nullptr;
+      }
+
+      /** @brief Copy synchronized high-water and wait counters. */
+      stats_t stats() const noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return {peak_leases_, waits_};
+      }
+
+      /** @brief Return the fixed capacity of every slot in bytes. */
+      std::size_t slot_size() const noexcept {
+        return slot_size_;
+      }
+
+    private:
+      explicit output_pool_t(std::size_t slot_size):
+          slot_size_(slot_size) {}
+
+      MppBufferGroup group_ {};
+      std::vector<MppBuffer> slots_;
+      std::vector<bool> leased_;
+      std::deque<std::uint32_t> free_;
+      std::size_t slot_size_ {};
+      mutable std::mutex mutex_;
+      std::condition_variable available_;
+      std::uint32_t lease_count_ {};
+      std::uint32_t peak_leases_ {};
+      std::uint64_t waits_ {};
+    };
+
+    /** @brief Move-only return token for one output-pool slot. */
+    struct output_lease_t {
+      std::shared_ptr<output_pool_t> pool;
+      std::uint32_t index {};
+
+      output_lease_t() = default;
+
+      output_lease_t(std::shared_ptr<output_pool_t> owner, std::uint32_t slot):
+          pool(std::move(owner)),
+          index(slot) {}
+
+      output_lease_t(const output_lease_t &) = delete;
+      output_lease_t &operator=(const output_lease_t &) = delete;
+
+      output_lease_t(output_lease_t &&other) noexcept:
+          pool(std::move(other.pool)),
+          index(other.index) {}
+
+      output_lease_t &operator=(output_lease_t &&other) noexcept {
+        if (this != &other) {
+          reset();
+          pool = std::move(other.pool);
+          index = other.index;
+        }
+        return *this;
+      }
+
+      ~output_lease_t() {
+        reset();
+      }
+
+      /** @brief Return the slot early when encoding or packet transfer fails. */
+      void reset() noexcept {
+        if (pool) {
+          pool->release(index);
+          pool.reset();
+        }
+      }
+
+      /** @brief Return the reusable buffer selected by this lease. */
+      MppBuffer buffer() const noexcept {
+        return pool ? pool->buffer(index) : nullptr;
+      }
+    };
+
+    /** @brief Per-frame MppPacket wrapper around one prewarmed pool lease. */
     struct output_t {
-      MppBuffer buffer {};
+      output_lease_t lease;
       MppPacket packet {};
 
-      explicit output_t(video::frame_profile_t *profile) {
+      output_t(const std::shared_ptr<output_pool_t> &pool, video::frame_profile_t *profile) {
         if (profile) {
           profile->mpp_output_buffer_begin = std::chrono::steady_clock::now();
         }
-        check(mpp_buffer_get(nullptr, &buffer, output_buffer_size), "mpp_buffer_get(output)");
+        lease = output_lease_t(pool, pool->acquire());
         if (profile) {
           profile->mpp_output_buffer_end = std::chrono::steady_clock::now();
           profile->mpp_output_packet_begin = std::chrono::steady_clock::now();
         }
-        check(mpp_packet_init_with_buffer(&packet, buffer), "mpp_packet_init_with_buffer");
+        check(mpp_packet_init_with_buffer(&packet, lease.buffer()), "mpp_packet_init_with_buffer");
         if (profile) {
           profile->mpp_output_packet_end = std::chrono::steady_clock::now();
         }
@@ -107,15 +279,11 @@ namespace platf::rkmpp {
         if (packet) {
           mpp_packet_deinit(&packet);
         }
-        if (buffer) {
-          mpp_buffer_put(buffer);
-        }
       }
 
-      std::pair<MppPacket, MppBuffer> release() noexcept {
-        auto result = std::make_pair(packet, buffer);
+      std::pair<MppPacket, output_lease_t> release() noexcept {
+        auto result = std::make_pair(packet, std::move(lease));
         packet = nullptr;
-        buffer = nullptr;
         return result;
       }
     };
@@ -162,6 +330,10 @@ namespace platf::rkmpp {
       default:
         return 0;
     }
+  }
+
+  std::uint64_t detail::output_buffer_size(const input_layout_t &layout) noexcept {
+    return std::max(minimum_output_buffer_size, minimum_allocation_size(layout));
   }
 
   std::optional<input_layout_t> make_input_layout_from_plane(std::uint32_t visible_width, std::uint32_t visible_height, MppFrameFormat format, std::uint32_t horizontal_stride, std::uint64_t plane_extent) noexcept {
@@ -271,15 +443,12 @@ namespace platf::rkmpp {
 
   struct encoded_packet_t::state_t {
     MppPacket packet {};
-    MppBuffer buffer {};
+    output_lease_t lease;
     bool intra {};
 
     ~state_t() {
       if (packet) {
         mpp_packet_deinit(&packet);
-      }
-      if (buffer) {
-        mpp_buffer_put(buffer);
       }
     }
   };
@@ -332,6 +501,7 @@ namespace platf::rkmpp {
     std::uint32_t vertical_stride {};
     encoder_stats_t stats {};
     std::vector<cached_input_buffer_t> input_buffers;
+    std::shared_ptr<output_pool_t> output_pool;
 
     /**
      * @brief Return a cached DMA-BUF import, importing this producer slot once.
@@ -373,6 +543,12 @@ namespace platf::rkmpp {
     }
 
     ~state_t() {
+      if (output_pool) {
+        const auto pool_stats = output_pool->stats();
+        BOOST_LOG(info) << "RKMPP output pool summary: peak_leases=" << pool_stats.peak_leases
+                        << '/' << detail::output_pool_slot_count
+                        << " waits=" << pool_stats.waits;
+      }
       clear_input_buffers();
       if (config) {
         mpp_enc_cfg_deinit(config);
@@ -408,6 +584,13 @@ namespace platf::rkmpp {
     state->settings = settings;
     state->horizontal_stride = settings.input_layout.horizontal_stride;
     state->vertical_stride = settings.input_layout.vertical_stride;
+    const auto output_bytes = detail::output_buffer_size(settings.input_layout);
+    if (output_bytes > std::numeric_limits<std::size_t>::max()) {
+      throw std::runtime_error("RKMPP output pool slot size is not representable by the local MPP ABI");
+    }
+    state->output_pool = output_pool_t::create(static_cast<std::size_t>(output_bytes));
+    state->stats.output_buffer_bytes = output_bytes;
+    state->stats.output_pool_capacity = detail::output_pool_slot_count;
 
     check(mpp_create(&state->context, &state->api), "mpp_create");
     RK_S64 timeout_ms = 2000;
@@ -463,7 +646,9 @@ namespace platf::rkmpp {
                     << " fps=" << settings.fps_num << "/" << settings.fps_den
                     << " bitrate=" << settings.bitrate << " gop=" << settings.gop
                     << " low_delay=" << settings.low_delay << " max_reenc_times=" << (settings.disable_reencode ? 0 : -1)
-                    << " split:mode=0 split:out=0";
+                    << " split:mode=0 split:out=0"
+                    << " output_pool=" << detail::output_pool_slot_count << 'x' << output_bytes
+                    << " allocator=dma_heap(system,non-contiguous) prewarmed=true";
 
     return encoder_t(std::move(state));
   }
@@ -487,7 +672,10 @@ namespace platf::rkmpp {
         input_buffer = transient_input_buffer->value;
       }
       frame_t input_frame;
-      output_t encoded_output(input.profile);
+      output_t encoded_output(state_->output_pool, input.profile);
+      if (input.profile) {
+        input.profile->mpp_prep_begin = std::chrono::steady_clock::now();
+      }
       mpp_frame_set_width(input_frame.value, input.layout.visible_width);
       mpp_frame_set_height(input_frame.value, input.layout.visible_height);
       mpp_frame_set_hor_stride(input_frame.value, state_->horizontal_stride);
@@ -505,11 +693,15 @@ namespace platf::rkmpp {
         check(state_->api->control(state_->context, MPP_ENC_SET_IDR_FRAME, nullptr), "MPP_ENC_SET_IDR_FRAME");
       }
       if (input.profile) {
-        input.profile->mpp_submit_begin = std::chrono::steady_clock::now();
+        const auto encode_begin = std::chrono::steady_clock::now();
+        input.profile->mpp_prep_end = encode_begin;
+        input.profile->mpp_encode_begin = encode_begin;
       }
       check(state_->api->encode_put_frame(state_->context, input_frame.value), "encode_put_frame");
       if (input.profile) {
-        input.profile->mpp_submit_end = std::chrono::steady_clock::now();
+        const auto encode_end = std::chrono::steady_clock::now();
+        input.profile->mpp_encode_end = encode_end;
+        input.profile->mpp_packet_get_begin = encode_end;
       }
 
       const auto deadline = std::chrono::steady_clock::now() + packet_timeout;
@@ -533,17 +725,19 @@ namespace platf::rkmpp {
           throw std::runtime_error("RKMPP returned an unexpected output packet");
         }
         if (input.profile) {
-          input.profile->mpp_output = std::chrono::steady_clock::now();
+          const auto packet_get_end = std::chrono::steady_clock::now();
+          input.profile->mpp_packet_get_end = packet_get_end;
+          input.profile->mpp_output = packet_get_end;
         }
         RK_S32 intra = 0;
         if (auto meta = mpp_packet_get_meta(packet.value)) {
           (void) mpp_meta_get_s32(meta, KEY_OUTPUT_INTRA, &intra);
         }
         auto state = std::make_unique<encoded_packet_t::state_t>();
-        auto [output_packet, output_buffer] = encoded_output.release();
+        auto [output_packet, output_lease] = encoded_output.release();
         packet.value = nullptr;
         state->packet = output_packet;
-        state->buffer = output_buffer;
+        state->lease = std::move(output_lease);
         state->intra = intra != 0;
         ++state_->stats.packets;
         state_->stats.bytes += length;
@@ -600,7 +794,16 @@ namespace platf::rkmpp {
   }
 
   encoder_stats_t encoder_t::stats() const noexcept {
-    return state_ ? state_->stats : encoder_stats_t {};
+    if (!state_) {
+      return {};
+    }
+    auto stats = state_->stats;
+    if (state_->output_pool) {
+      const auto pool_stats = state_->output_pool->stats();
+      stats.output_pool_peak_leases = pool_stats.peak_leases;
+      stats.output_pool_waits = pool_stats.waits;
+    }
+    return stats;
   }
 
   bool is_compiled() noexcept {

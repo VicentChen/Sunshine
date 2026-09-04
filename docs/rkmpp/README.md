@@ -255,8 +255,8 @@ Vulkan 直接写 capture ROI；NV12 可见 UI 则临时走隔离 target 的完�
 RGA 转换路径使用一个可复用的 NV12 目标 DMA-BUF。同步编码在消费完成后归还该缓冲；
 初始化阶段产生但未编码的占位图像也会在下一次转换前主动释放。这样可以降低 4K CMA
 峰值，并避免唯一缓冲被占用后导致首帧断流。1080p 与 4K 的精确输入均已验证进入直通
-编码；RGA fallback 的 DMA-BUF smoke 连续三轮后 FD 数保持不变。长时间 4K fallback
-稳定性仍未单独验收。
+编码；RGA fallback 的 DMA-BUF smoke 连续三轮后 FD 数保持不变，4K fallback
+长时间稳定性验收也已完成。
 
 ## EDID 协商
 

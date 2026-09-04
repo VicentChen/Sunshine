@@ -231,7 +231,7 @@ namespace {
   TEST(VulkanUiModel, BuildsOnlyTheLatestFrameAlongsideTheRecentAverage) {
     video::frame_profile_timeline_snapshot_t timeline {.frame_count = 2, .stream_generation = 3};
     timeline.frames[0] = {
-      .spans = {{{video::frame_profile_timeline_stage_e::mpp_output_wait, video::frame_profile_timeline_lane_e::mpp, 3000, 9000}}},
+      .spans = {{{video::frame_profile_timeline_stage_e::mpp_packet_get, video::frame_profile_timeline_lane_e::mpp, 3000, 9000}}},
       .frame_index = 10,
       .origin_offset_us = 0,
       .end_us = 12000,
@@ -265,14 +265,14 @@ namespace {
   TEST(VulkanUiModel, BuildsRxEofAlignedAverageTimeline) {
     video::frame_profile_timeline_snapshot_t timeline {.frame_count = 2};
     timeline.frames[0] = {
-      .spans = {{{video::frame_profile_timeline_stage_e::mpp_submit, video::frame_profile_timeline_lane_e::mpp, 100, 200}}},
+      .spans = {{{video::frame_profile_timeline_stage_e::mpp_encode, video::frame_profile_timeline_lane_e::mpp, 100, 200}}},
       .frame_index = 1,
       .origin_offset_us = 500000,
       .end_us = 200,
       .span_count = 1
     };
     timeline.frames[1] = {
-      .spans = {{{video::frame_profile_timeline_stage_e::mpp_submit, video::frame_profile_timeline_lane_e::mpp, 200, 500}}},
+      .spans = {{{video::frame_profile_timeline_stage_e::mpp_encode, video::frame_profile_timeline_lane_e::mpp, 200, 500}}},
       .frame_index = 2,
       .origin_offset_us = 516667,
       .end_us = 500,
@@ -282,7 +282,7 @@ namespace {
     const auto geometry = platf::vulkan_ui::make_timeline_geometry(timeline);
     ASSERT_EQ(geometry.average_bar_count, 1U);
     const auto &average = geometry.average_bars[0];
-    EXPECT_EQ(average.stage, video::frame_profile_timeline_stage_e::mpp_submit);
+    EXPECT_EQ(average.stage, video::frame_profile_timeline_stage_e::mpp_encode);
     EXPECT_EQ(average.lane, video::frame_profile_timeline_lane_e::mpp);
     EXPECT_EQ(average.sample_count, 2U);
     EXPECT_EQ(average.start_us, 150);
@@ -300,7 +300,7 @@ namespace {
     };
     snapshot.profile.timeline.frame_count = 1;
     snapshot.profile.timeline.frames[0] = {
-      .spans = {{{video::frame_profile_timeline_stage_e::mpp_submit, video::frame_profile_timeline_lane_e::mpp, 3000, 4000}}},
+      .spans = {{{video::frame_profile_timeline_stage_e::mpp_encode, video::frame_profile_timeline_lane_e::mpp, 3000, 4000}}},
       .frame_index = 1,
       .end_us = 5000,
       .span_count = 1

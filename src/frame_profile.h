@@ -57,8 +57,12 @@ namespace video {
     std::optional<time_point> mpp_output_buffer_end;  ///< Time immediately after MPP allocates an output buffer.
     std::optional<time_point> mpp_output_packet_begin;  ///< Time immediately before MPP initializes the output packet wrapper.
     std::optional<time_point> mpp_output_packet_end;  ///< Time immediately after MPP initializes the output packet wrapper.
-    std::optional<time_point> mpp_submit_begin;  ///< Time immediately before encode_put_frame.
-    std::optional<time_point> mpp_submit_end;  ///< Time immediately after encode_put_frame returned.
+    std::optional<time_point> mpp_prep_begin;  ///< Time immediately before frame metadata and submission state are prepared.
+    std::optional<time_point> mpp_prep_end;  ///< Time immediately before the blocking encode call begins.
+    std::optional<time_point> mpp_encode_begin;  ///< Time immediately before blocking encode_put_frame begins.
+    std::optional<time_point> mpp_encode_end;  ///< Time immediately after blocking encode_put_frame returns.
+    std::optional<time_point> mpp_packet_get_begin;  ///< Time immediately before polling encode_get_packet.
+    std::optional<time_point> mpp_packet_get_end;  ///< Time a complete non-empty packet is returned by encode_get_packet.
     std::optional<time_point> mpp_output;  ///< Time a complete non-empty MppPacket became available.
     std::optional<time_point> packetize_begin;  ///< Time the network thread began processing the encoded frame.
     std::optional<time_point> send_end;  ///< Time the final send_batch call for the frame returned.
@@ -72,9 +76,10 @@ namespace video {
     mpp_import,  ///< Non-cached MPP DMA-BUF import.
     mpp_output_buffer_acquire,  ///< MPP output-buffer allocation.
     mpp_output_packet_init,  ///< MPP output-packet wrapper initialization.
-    mpp_submit,  ///< Time spent in encode_put_frame.
-    mpp_output_wait,  ///< encode_put_frame return to complete MppPacket.
-    mpp_encode,  ///< encode_put_frame entry to complete MppPacket.
+    mpp_prep,  ///< Application and MPP submission preparation before blocking encode.
+    mpp_encode,  ///< Blocking encode_put_frame, including driver queue and hardware work.
+    mpp_packet_get,  ///< Time spent retrieving the completed output packet.
+    mpp_total,  ///< MPP preparation entry to complete MppPacket.
     encoded_queue,  ///< Complete MppPacket to network-thread processing.
     packetize_send,  ///< Network-thread processing to final send return.
     protocol_host,  ///< V4L2 timestamp to network-thread processing.
@@ -120,8 +125,9 @@ namespace video {
     mpp_import,  ///< Non-cached MPP DMA-BUF import.
     mpp_output_buffer_acquire,  ///< MPP output-buffer allocation.
     mpp_output_packet_init,  ///< MPP output-packet wrapper initialization.
-    mpp_submit,  ///< Time spent in encode_put_frame.
-    mpp_output_wait,  ///< encode_put_frame return to complete MppPacket.
+    mpp_prep,  ///< Frame metadata and MPP submission preparation.
+    mpp_encode,  ///< Blocking encode_put_frame including hardware completion.
+    mpp_packet_get,  ///< Retrieval of the completed MppPacket.
     encoded_queue,  ///< Complete MppPacket to network-thread processing.
     packetize_send,  ///< Network-thread processing to final send return.
     count  ///< Number of concrete timeline stages.
@@ -195,11 +201,13 @@ namespace video {
       case frame_profile_timeline_stage_e::mpp_output_buffer_acquire:
         return "MPP OUT BUF";
       case frame_profile_timeline_stage_e::mpp_output_packet_init:
-        return "MPP PACKET";
-      case frame_profile_timeline_stage_e::mpp_submit:
-        return "MPP SUBMIT";
-      case frame_profile_timeline_stage_e::mpp_output_wait:
-        return "MPP WAIT";
+        return "MPP PACKET INIT";
+      case frame_profile_timeline_stage_e::mpp_prep:
+        return "MPP PREP";
+      case frame_profile_timeline_stage_e::mpp_encode:
+        return "MPP ENCODE";
+      case frame_profile_timeline_stage_e::mpp_packet_get:
+        return "MPP PACKET GET";
       case frame_profile_timeline_stage_e::encoded_queue:
         return "ENC QUEUE";
       case frame_profile_timeline_stage_e::packetize_send:
@@ -229,12 +237,14 @@ namespace video {
         return "MPP output buffer acquire";
       case frame_profile_metric_e::mpp_output_packet_init:
         return "MPP output packet init";
-      case frame_profile_metric_e::mpp_submit:
-        return "MPP submit";
-      case frame_profile_metric_e::mpp_output_wait:
-        return "MPP output wait";
+      case frame_profile_metric_e::mpp_prep:
+        return "MPP prep";
       case frame_profile_metric_e::mpp_encode:
         return "MPP encode";
+      case frame_profile_metric_e::mpp_packet_get:
+        return "MPP packet get";
+      case frame_profile_metric_e::mpp_total:
+        return "MPP total";
       case frame_profile_metric_e::encoded_queue:
         return "Encoded queue";
       case frame_profile_metric_e::packetize_send:
@@ -308,9 +318,10 @@ namespace video {
       collect_metric(frame_profile_metric_e::mpp_import, profile.mpp_import_begin, profile.mpp_import_end);
       collect_metric(frame_profile_metric_e::mpp_output_buffer_acquire, profile.mpp_output_buffer_begin, profile.mpp_output_buffer_end);
       collect_metric(frame_profile_metric_e::mpp_output_packet_init, profile.mpp_output_packet_begin, profile.mpp_output_packet_end);
-      collect_metric(frame_profile_metric_e::mpp_submit, profile.mpp_submit_begin, profile.mpp_submit_end);
-      collect_metric(frame_profile_metric_e::mpp_output_wait, profile.mpp_submit_end, profile.mpp_output);
-      collect_metric(frame_profile_metric_e::mpp_encode, profile.mpp_submit_begin, profile.mpp_output);
+      collect_metric(frame_profile_metric_e::mpp_prep, profile.mpp_prep_begin, profile.mpp_prep_end);
+      collect_metric(frame_profile_metric_e::mpp_encode, profile.mpp_encode_begin, profile.mpp_encode_end);
+      collect_metric(frame_profile_metric_e::mpp_packet_get, profile.mpp_packet_get_begin, profile.mpp_packet_get_end);
+      collect_metric(frame_profile_metric_e::mpp_total, profile.mpp_prep_begin, profile.mpp_output);
       collect_metric(frame_profile_metric_e::encoded_queue, profile.mpp_output, profile.packetize_begin);
       collect_metric(frame_profile_metric_e::packetize_send, profile.packetize_begin, profile.send_end);
       collect_metric(frame_profile_metric_e::protocol_host, profile.capture, profile.packetize_begin);
@@ -519,8 +530,9 @@ namespace video {
     append(frame_profile_timeline_stage_e::mpp_import, frame_profile_timeline_lane_e::mpp, profile.mpp_import_begin, profile.mpp_import_end);
     append(frame_profile_timeline_stage_e::mpp_output_buffer_acquire, frame_profile_timeline_lane_e::mpp, profile.mpp_output_buffer_begin, profile.mpp_output_buffer_end);
     append(frame_profile_timeline_stage_e::mpp_output_packet_init, frame_profile_timeline_lane_e::mpp, profile.mpp_output_packet_begin, profile.mpp_output_packet_end);
-    append(frame_profile_timeline_stage_e::mpp_submit, frame_profile_timeline_lane_e::mpp, profile.mpp_submit_begin, profile.mpp_submit_end);
-    append(frame_profile_timeline_stage_e::mpp_output_wait, frame_profile_timeline_lane_e::mpp, profile.mpp_submit_end, profile.mpp_output);
+    append(frame_profile_timeline_stage_e::mpp_prep, frame_profile_timeline_lane_e::mpp, profile.mpp_prep_begin, profile.mpp_prep_end);
+    append(frame_profile_timeline_stage_e::mpp_encode, frame_profile_timeline_lane_e::mpp, profile.mpp_encode_begin, profile.mpp_encode_end);
+    append(frame_profile_timeline_stage_e::mpp_packet_get, frame_profile_timeline_lane_e::mpp, profile.mpp_packet_get_begin, profile.mpp_packet_get_end);
     append(frame_profile_timeline_stage_e::encoded_queue, frame_profile_timeline_lane_e::network, profile.mpp_output, profile.packetize_begin);
     append(frame_profile_timeline_stage_e::packetize_send, frame_profile_timeline_lane_e::network, profile.packetize_begin, profile.send_end);
     return frame;

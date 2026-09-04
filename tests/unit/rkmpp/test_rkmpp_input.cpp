@@ -100,6 +100,17 @@ namespace {
     EXPECT_FALSE(platf::rkmpp::make_input_layout_from_plane(1920, 1080, MPP_FMT_YUV444SP, 1920, 1'920U * 3'240U - 1'920U));
   }
 
+  TEST(RkmppOutputPool, SizesSlotsFromTheFinalAlignedInputLayoutWithAnEightMiBMinimum) {
+    constexpr std::uint64_t eight_mib = 8U * 1024U * 1024U;
+    const auto nv12_1080p = nv12_layout();
+    const platf::rkmpp::input_layout_t nv12_4k {3840, 2160, 3840, 2160, MPP_FMT_YUV420SP};
+    const platf::rkmpp::input_layout_t bgr_4k {3840, 2160, 11520, 2160, MPP_FMT_BGR888};
+
+    EXPECT_EQ(platf::rkmpp::detail::output_buffer_size(nv12_1080p), eight_mib);
+    EXPECT_EQ(platf::rkmpp::detail::output_buffer_size(nv12_4k), 12'441'600U);
+    EXPECT_EQ(platf::rkmpp::detail::output_buffer_size(bgr_4k), 24'883'200U);
+  }
+
   TEST(RkmppInputLayout, RejectsUnsupportedFormatAndUndersizedAllocation) {
     auto layout = nv12_layout();
     layout.format = MPP_FMT_YUV420P;

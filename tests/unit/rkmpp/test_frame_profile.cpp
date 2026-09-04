@@ -23,8 +23,12 @@ namespace {
     profile.mpp_output_buffer_end = base + microseconds(257);
     profile.mpp_output_packet_begin = base + microseconds(258);
     profile.mpp_output_packet_end = base + microseconds(259);
-    profile.mpp_submit_begin = base + microseconds(260);
-    profile.mpp_submit_end = base + microseconds(280);
+    profile.mpp_prep_begin = base + microseconds(260);
+    profile.mpp_prep_end = base + microseconds(270);
+    profile.mpp_encode_begin = base + microseconds(270);
+    profile.mpp_encode_end = base + microseconds(480);
+    profile.mpp_packet_get_begin = base + microseconds(480);
+    profile.mpp_packet_get_end = base + microseconds(500);
     profile.mpp_output = base + microseconds(500);
     profile.packetize_begin = base + microseconds(550);
     profile.send_end = base + microseconds(650);
@@ -59,9 +63,10 @@ TEST(FrameProfileWindow, CalculatesEveryStage) {
   EXPECT_EQ(metric(video::frame_profile_metric_e::mpp_import).p50_us, 4);
   EXPECT_EQ(metric(video::frame_profile_metric_e::mpp_output_buffer_acquire).p50_us, 1);
   EXPECT_EQ(metric(video::frame_profile_metric_e::mpp_output_packet_init).p50_us, 1);
-  EXPECT_EQ(metric(video::frame_profile_metric_e::mpp_submit).p50_us, 20);
-  EXPECT_EQ(metric(video::frame_profile_metric_e::mpp_output_wait).p50_us, 220);
-  EXPECT_EQ(metric(video::frame_profile_metric_e::mpp_encode).p50_us, 240);
+  EXPECT_EQ(metric(video::frame_profile_metric_e::mpp_prep).p50_us, 10);
+  EXPECT_EQ(metric(video::frame_profile_metric_e::mpp_encode).p50_us, 210);
+  EXPECT_EQ(metric(video::frame_profile_metric_e::mpp_packet_get).p50_us, 20);
+  EXPECT_EQ(metric(video::frame_profile_metric_e::mpp_total).p50_us, 240);
   EXPECT_EQ(metric(video::frame_profile_metric_e::encoded_queue).p50_us, 50);
   EXPECT_EQ(metric(video::frame_profile_metric_e::packetize_send).p50_us, 100);
   EXPECT_EQ(metric(video::frame_profile_metric_e::protocol_host).p50_us, 550);
@@ -79,12 +84,12 @@ TEST(FrameProfileWindow, SeparatesBypassPlaceholderAndInvalidSamples) {
   window.collect(placeholder);
 
   auto invalid = complete_profile();
-  invalid.mpp_output = *invalid.mpp_submit_begin - std::chrono::microseconds(1);
+  invalid.mpp_output = *invalid.mpp_prep_begin - std::chrono::microseconds(1);
   window.collect(invalid);
 
   const auto snapshot = window.snapshot_and_reset();
   const auto rga = snapshot.metrics[static_cast<std::size_t>(video::frame_profile_metric_e::rga)];
-  const auto encode = snapshot.metrics[static_cast<std::size_t>(video::frame_profile_metric_e::mpp_encode)];
+  const auto encode = snapshot.metrics[static_cast<std::size_t>(video::frame_profile_metric_e::mpp_total)];
   EXPECT_EQ(snapshot.captured_frames, 2);
   EXPECT_EQ(snapshot.placeholder_frames, 1);
   EXPECT_EQ(snapshot.rga_bypass_frames, 1);
@@ -115,12 +120,12 @@ TEST(FrameProfileWindow, CalculatesNearestRankPercentiles) {
   video::frame_profile_window_t window;
   for (std::int64_t sample = 1; sample <= 100; ++sample) {
     auto profile = complete_profile(sample * 1000);
-    profile.mpp_submit_begin = video::frame_profile_t::time_point(std::chrono::microseconds(0));
+    profile.mpp_prep_begin = video::frame_profile_t::time_point(std::chrono::microseconds(0));
     profile.mpp_output = video::frame_profile_t::time_point(std::chrono::microseconds(sample));
     window.collect(profile);
   }
   const auto snapshot = window.snapshot_and_reset();
-  const auto metric = snapshot.metrics[static_cast<std::size_t>(video::frame_profile_metric_e::mpp_encode)];
+  const auto metric = snapshot.metrics[static_cast<std::size_t>(video::frame_profile_metric_e::mpp_total)];
   EXPECT_EQ(metric.count, 100);
   EXPECT_EQ(metric.minimum_us, 1);
   EXPECT_EQ(metric.p50_us, 50);
@@ -184,14 +189,23 @@ TEST(FrameProfileTimeline, PreservesRelativeStageBoundsAndOverlap) {
   };
   const auto *rga = find(video::frame_profile_timeline_stage_e::rga);
   const auto *ui_render = find(video::frame_profile_timeline_stage_e::ui_render);
+  const auto *mpp_prep = find(video::frame_profile_timeline_stage_e::mpp_prep);
+  const auto *mpp_encode = find(video::frame_profile_timeline_stage_e::mpp_encode);
+  const auto *mpp_packet_get = find(video::frame_profile_timeline_stage_e::mpp_packet_get);
   ASSERT_NE(rga, nullptr);
   ASSERT_NE(ui_render, nullptr);
+  ASSERT_NE(mpp_prep, nullptr);
+  ASSERT_NE(mpp_encode, nullptr);
+  ASSERT_NE(mpp_packet_get, nullptr);
   EXPECT_EQ(rga->start_us, 150);
   EXPECT_EQ(rga->end_us, 250);
   EXPECT_EQ(ui_render->start_us, 155);
   EXPECT_EQ(ui_render->end_us, 225);
   EXPECT_EQ(rga->lane, video::frame_profile_timeline_lane_e::rga);
   EXPECT_EQ(ui_render->lane, video::frame_profile_timeline_lane_e::ui);
+  EXPECT_EQ(mpp_prep->end_us, mpp_encode->start_us);
+  EXPECT_EQ(mpp_encode->end_us, mpp_packet_get->start_us);
+  EXPECT_EQ(mpp_packet_get->end_us - mpp_prep->start_us, 240);
 }
 
 TEST(FrameProfileTimeline, MarksMissingAndInvalidStagesWithoutCreatingZeroBars) {

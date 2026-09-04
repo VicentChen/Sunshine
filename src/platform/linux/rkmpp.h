@@ -111,6 +111,8 @@ namespace platf::rkmpp {
   };
 
   namespace detail {
+    inline constexpr std::uint32_t output_pool_slot_count = 6;  ///< Fixed maximum number of coded packets retained in flight.
+
     /**
      * @brief Return the minimum allocation for an input layout, or zero when invalid.
      *
@@ -118,6 +120,13 @@ namespace platf::rkmpp {
      * @return Required allocation in bytes, or zero when it is unrepresentable.
      */
     std::uint64_t minimum_allocation_size(const input_layout_t &layout) noexcept;
+    /**
+     * @brief Calculate one output-pool slot capacity from the final MPP input layout.
+     *
+     * @param layout Valid final input layout supplied to MPP.
+     * @return The larger of 8 MiB and the aligned input-frame allocation size.
+     */
+    std::uint64_t output_buffer_size(const input_layout_t &layout) noexcept;
     /** A non-partition packet is complete; partitions end only at EOI. */
     bool is_access_unit_complete(bool partition, bool eoi) noexcept;
     /**
@@ -189,6 +198,10 @@ namespace platf::rkmpp {
     std::uint64_t bytes {};  ///< Total coded bytes retained by output packets.
     std::uint32_t min_packet_bytes {};  ///< Smallest complete coded packet, or zero before output.
     std::uint32_t max_packet_bytes {};  ///< Largest complete coded packet, or zero before output.
+    std::uint64_t output_buffer_bytes {};  ///< Bytes reserved by each fixed output-pool slot.
+    std::uint32_t output_pool_capacity {};  ///< Fixed number of output slots created with the encoder.
+    std::uint32_t output_pool_peak_leases {};  ///< Largest number of slots concurrently retained by consumers.
+    std::uint64_t output_pool_waits {};  ///< Acquisitions that had to wait for a consumer to release a slot.
   };
 
   /**
@@ -211,9 +224,9 @@ namespace platf::rkmpp {
   };
 
   /**
-   * Owns the MPP output allocation until Sunshine's network consumer drops the
+   * Owns an output-pool lease until Sunshine's network consumer drops the
    * corresponding video packet. It is deliberately move-only: MppPacket and
-   * its backing MppBuffer have one unambiguous release point.
+   * the reusable backing slot have one unambiguous release point.
    */
   class encoded_packet_t {
   public:
