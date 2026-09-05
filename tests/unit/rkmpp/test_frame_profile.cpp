@@ -18,6 +18,8 @@ namespace {
     profile.rga_used = true;
     profile.rga_begin = base + microseconds(150);
     profile.rga_end = base + microseconds(250);
+    profile.preprocess_end = base + microseconds(250);
+    profile.prepared_queue_exit = base + microseconds(251);
     profile.mpp_import_begin = base + microseconds(251);
     profile.mpp_import_end = base + microseconds(255);
     profile.mpp_output_buffer_begin = base + microseconds(256);
@@ -63,6 +65,7 @@ TEST(FrameProfileWindow, CalculatesEveryStage) {
   EXPECT_EQ(metric(video::frame_profile_metric_e::rx_dequeue).p50_us, 10);
   EXPECT_EQ(metric(video::frame_profile_metric_e::capture_queue).p50_us, 50);
   EXPECT_EQ(metric(video::frame_profile_metric_e::rga).p50_us, 100);
+  EXPECT_EQ(metric(video::frame_profile_metric_e::prepared_queue).p50_us, 1);
   EXPECT_EQ(metric(video::frame_profile_metric_e::mpp_import).p50_us, 4);
   EXPECT_EQ(metric(video::frame_profile_metric_e::mpp_output_buffer_acquire).p50_us, 1);
   EXPECT_EQ(metric(video::frame_profile_metric_e::mpp_output_packet_init).p50_us, 1);
@@ -117,6 +120,22 @@ TEST(FrameProfileWindow, AggregatesFreshnessDropsOnlyForCapturedFrames) {
   window.collect(placeholder);
 
   EXPECT_EQ(window.snapshot_and_reset().freshness_drops, 5U);
+}
+
+TEST(FrameProfileWindow, AggregatesLatestOnlyPipelinePressure) {
+  video::frame_profile_window_t window;
+  auto profile = complete_profile();
+  profile.raw_replaced = 2;
+  profile.prepared_replaced = 3;
+  profile.target_waits = 1;
+  profile.sticky_idr_transfers = 4;
+  window.collect(profile);
+
+  const auto snapshot = window.snapshot_and_reset();
+  EXPECT_EQ(snapshot.raw_replaced, 2U);
+  EXPECT_EQ(snapshot.prepared_replaced, 3U);
+  EXPECT_EQ(snapshot.target_waits, 1U);
+  EXPECT_EQ(snapshot.sticky_idr_transfers, 4U);
 }
 
 TEST(FrameProfileWindow, CalculatesNearestRankPercentiles) {

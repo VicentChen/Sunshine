@@ -41,17 +41,23 @@ namespace video {
     std::uint32_t freshness_drops {};  ///< Older complete V4L2 frames returned to the driver before this frame was selected.
     std::int64_t frame_index {-1};  ///< Sunshine frame index assigned before packetization.
     bool rga_used {};  ///< Whether the frame passed through RGA conversion or fill.
+    std::uint32_t raw_replaced {};  ///< Raw latest-only frames displaced before preprocessing this frame.
+    std::uint32_t prepared_replaced {};  ///< Prepared latest-only frames displaced before this submission.
+    std::uint32_t target_waits {};  ///< Interruptible waits for a private RGA target attributed to this frame.
+    std::uint32_t sticky_idr_transfers {};  ///< IDR latches inherited from displaced raw or prepared frames.
 
     std::optional<time_point> capture;  ///< V4L2 CLOCK_MONOTONIC timestamp.
     std::optional<time_point> dequeue_begin;  ///< Time immediately before the successful VIDIOC_DQBUF call began.
     std::optional<time_point> dequeued;  ///< Time immediately after VIDIOC_DQBUF succeeded.
-    std::optional<time_point> capture_queue_exit;  ///< Time the encoder thread began processing the captured image.
+    std::optional<time_point> capture_queue_exit;  ///< Time the preprocess worker began processing the captured image.
     std::optional<time_point> rga_begin;  ///< Time immediately before RGA work began.
     std::optional<time_point> rga_end;  ///< Time immediately after RGA work completed.
     std::optional<time_point> ui_render_begin;  ///< Time immediately before a changed Vulkan UI snapshot was rendered.
     std::optional<time_point> ui_render_end;  ///< Time immediately after the changed Vulkan UI snapshot finished rendering.
     std::optional<time_point> ui_compose_begin;  ///< Time immediately before the cached UI panel was composed with RGA.
     std::optional<time_point> ui_compose_end;  ///< Time immediately after the cached UI panel was composed with RGA.
+    std::optional<time_point> preprocess_end;  ///< Time the immutable prepared input became ready for publication.
+    std::optional<time_point> prepared_queue_exit;  ///< Time the encode worker consumed the prepared input.
     std::optional<time_point> mpp_import_begin;  ///< Time immediately before a non-cached MPP DMA-BUF import.
     std::optional<time_point> mpp_import_end;  ///< Time immediately after a non-cached MPP DMA-BUF import.
     std::optional<time_point> mpp_output_buffer_begin;  ///< Time immediately before MPP allocates an output buffer.
@@ -76,6 +82,7 @@ namespace video {
     rx_dequeue,  ///< Successful VIDIOC_DQBUF system-call duration.
     capture_queue,  ///< Successful dequeue to encoder-thread processing.
     rga,  ///< RGA conversion or placeholder fill.
+    prepared_queue,  ///< Preprocessing completion to encode-worker consumption.
     mpp_import,  ///< Non-cached MPP DMA-BUF import.
     mpp_output_buffer_acquire,  ///< MPP output-buffer allocation.
     mpp_output_packet_init,  ///< MPP output-packet wrapper initialization.
@@ -115,6 +122,10 @@ namespace video {
     std::uint32_t repeated_frames {};  ///< Repeated frames observed.
     std::uint32_t rga_bypass_frames {};  ///< Real frames that bypassed RGA.
     std::uint64_t freshness_drops {};  ///< Total older V4L2 frames proactively discarded to keep the newest frame.
+    std::uint64_t raw_replaced {};  ///< Raw frames displaced by the latest-only preprocess mailbox.
+    std::uint64_t prepared_replaced {};  ///< Prepared frames displaced before MPP submission.
+    std::uint64_t target_waits {};  ///< Waits for both private RGA targets to become available.
+    std::uint64_t sticky_idr_transfers {};  ///< IDR requests transferred across displaced frames.
     std::uint32_t dropped_samples {};  ///< Samples discarded after the bounded buffer filled.
   };
 
@@ -126,6 +137,7 @@ namespace video {
     rga,  ///< Video conversion, scaling, fill, or letterbox work.
     ui_render,  ///< Changed Dear ImGui snapshot rendered through Vulkan.
     ui_compose,  ///< Cached Vulkan UI panel composed into the video through RGA.
+    prepared_queue,  ///< Prepared input waiting for the encode worker.
     mpp_import,  ///< Non-cached MPP DMA-BUF import.
     mpp_output_buffer_acquire,  ///< MPP output-buffer allocation.
     mpp_output_packet_init,  ///< MPP output-packet wrapper initialization.
@@ -195,13 +207,15 @@ namespace video {
       case frame_profile_timeline_stage_e::rx_dequeue:
         return "RX DQBUF";
       case frame_profile_timeline_stage_e::capture_queue:
-        return "CAP QUEUE";
+        return "RAW QUEUE";
       case frame_profile_timeline_stage_e::rga:
         return "RGA";
       case frame_profile_timeline_stage_e::ui_render:
         return "UI RENDER";
       case frame_profile_timeline_stage_e::ui_compose:
         return "UI COMPOSE";
+      case frame_profile_timeline_stage_e::prepared_queue:
+        return "PREPARED QUEUE";
       case frame_profile_timeline_stage_e::mpp_import:
         return "MPP IMPORT";
       case frame_profile_timeline_stage_e::mpp_output_buffer_acquire:
@@ -238,9 +252,11 @@ namespace video {
       case frame_profile_metric_e::rx_dequeue:
         return "RX dequeue";
       case frame_profile_metric_e::capture_queue:
-        return "Capture queue";
+        return "Raw preprocess queue";
       case frame_profile_metric_e::rga:
         return "RGA";
+      case frame_profile_metric_e::prepared_queue:
+        return "Prepared queue";
       case frame_profile_metric_e::mpp_import:
         return "MPP input import";
       case frame_profile_metric_e::mpp_output_buffer_acquire:
@@ -299,6 +315,10 @@ namespace video {
      * @param profile Completed per-frame timestamps.
      */
     void collect(const frame_profile_t &profile) noexcept {
+      raw_replaced_ += profile.raw_replaced;
+      prepared_replaced_ += profile.prepared_replaced;
+      target_waits_ += profile.target_waits;
+      sticky_idr_transfers_ += profile.sticky_idr_transfers;
       if (profile.kind == frame_profile_kind_e::placeholder) {
         ++placeholder_frames_;
         return;
@@ -327,6 +347,7 @@ namespace video {
       } else {
         ++rga_bypass_frames_;
       }
+      collect_metric(frame_profile_metric_e::prepared_queue, profile.preprocess_end, profile.prepared_queue_exit);
       collect_metric(frame_profile_metric_e::mpp_import, profile.mpp_import_begin, profile.mpp_import_end);
       collect_metric(frame_profile_metric_e::mpp_output_buffer_acquire, profile.mpp_output_buffer_begin, profile.mpp_output_buffer_end);
       collect_metric(frame_profile_metric_e::mpp_output_packet_init, profile.mpp_output_packet_begin, profile.mpp_output_packet_end);
@@ -356,6 +377,10 @@ namespace video {
       snapshot.repeated_frames = repeated_frames_;
       snapshot.rga_bypass_frames = rga_bypass_frames_;
       snapshot.freshness_drops = freshness_drops_;
+      snapshot.raw_replaced = raw_replaced_;
+      snapshot.prepared_replaced = prepared_replaced_;
+      snapshot.target_waits = target_waits_;
+      snapshot.sticky_idr_transfers = sticky_idr_transfers_;
       snapshot.dropped_samples = dropped_samples_;
 
       for (std::size_t index = 0; index < metric_count; ++index) {
@@ -437,6 +462,10 @@ namespace video {
       repeated_frames_ = 0;
       rga_bypass_frames_ = 0;
       freshness_drops_ = 0;
+      raw_replaced_ = 0;
+      prepared_replaced_ = 0;
+      target_waits_ = 0;
+      sticky_idr_transfers_ = 0;
       dropped_samples_ = 0;
     }
 
@@ -450,6 +479,10 @@ namespace video {
     std::uint32_t repeated_frames_ {};  ///< Repeated frames collected in this window.
     std::uint32_t rga_bypass_frames_ {};  ///< Real frames that skipped RGA.
     std::uint64_t freshness_drops_ {};  ///< Older V4L2 frames proactively discarded in this window.
+    std::uint64_t raw_replaced_ {};  ///< Raw latest-only replacements collected in this window.
+    std::uint64_t prepared_replaced_ {};  ///< Prepared latest-only replacements collected in this window.
+    std::uint64_t target_waits_ {};  ///< Private target waits collected in this window.
+    std::uint64_t sticky_idr_transfers_ {};  ///< Sticky IDR transfers collected in this window.
     std::uint32_t dropped_samples_ {};  ///< Samples discarded due to capacity.
   };
 
@@ -540,6 +573,7 @@ namespace video {
     if (profile.ui_compose_begin || profile.ui_compose_end) {
       append(frame_profile_timeline_stage_e::ui_compose, frame_profile_timeline_lane_e::ui, profile.ui_compose_begin, profile.ui_compose_end);
     }
+    append(frame_profile_timeline_stage_e::prepared_queue, frame_profile_timeline_lane_e::rga, profile.preprocess_end, profile.prepared_queue_exit);
     append(frame_profile_timeline_stage_e::mpp_import, frame_profile_timeline_lane_e::mpp, profile.mpp_import_begin, profile.mpp_import_end);
     append(frame_profile_timeline_stage_e::mpp_output_buffer_acquire, frame_profile_timeline_lane_e::mpp, profile.mpp_output_buffer_begin, profile.mpp_output_buffer_end);
     append(frame_profile_timeline_stage_e::mpp_output_packet_init, frame_profile_timeline_lane_e::mpp, profile.mpp_output_packet_begin, profile.mpp_output_packet_end);

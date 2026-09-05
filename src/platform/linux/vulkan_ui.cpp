@@ -295,6 +295,7 @@ namespace platf::vulkan_ui {
         IM_COL32(75, 205, 145, 230),
         IM_COL32(195, 105, 255, 230),
         IM_COL32(150, 85, 235, 230),
+        IM_COL32(115, 100, 225, 230),
         IM_COL32(255, 190, 75, 230),
         IM_COL32(245, 155, 55, 230),
         IM_COL32(230, 125, 45, 230),
@@ -511,8 +512,9 @@ namespace platf::vulkan_ui {
       constexpr std::array labels {
         "RX WAIT",
         "RX DQBUF",
-        "CAP QUEUE",
+        "RAW QUEUE",
         "RGA",
+        "PREPARED QUEUE",
         "MPP ENCODE",
         "ENC QUEUE",
         "PACKET-SEND",
@@ -563,12 +565,16 @@ namespace platf::vulkan_ui {
         );
       } else if (model.page == platf::ui::page_e::profile && model.profile.available) {
         ImGui::TextWrapped(
-          "Profile Statistics  C %u  P %u  R %u  BYPASS %u  FRESH-DROP %llu  SAMPLE-DROP %u  %ux%u -> %ux%u",
+          "Profile Statistics  C %u  P %u  R %u  BYPASS %u  FRESH %llu  RAW-REPL %llu  PREP-REPL %llu  TARGET-WAIT %llu  IDR-XFER %llu  SAMPLE-DROP %u  %ux%u -> %ux%u",
           model.profile.captured_frames,
           model.profile.placeholder_frames,
           model.profile.repeated_frames,
           model.profile.rga_bypass_frames,
           static_cast<unsigned long long>(model.profile.freshness_drops),
+          static_cast<unsigned long long>(model.profile.raw_replaced),
+          static_cast<unsigned long long>(model.profile.prepared_replaced),
+          static_cast<unsigned long long>(model.profile.target_waits),
+          static_cast<unsigned long long>(model.profile.sticky_idr_transfers),
           model.profile.dropped_samples,
           model.profile.hdmirx_width,
           model.profile.hdmirx_height,

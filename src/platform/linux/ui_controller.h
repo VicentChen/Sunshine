@@ -76,8 +76,9 @@ namespace platf::ui {
   enum class profile_metric_e : std::uint8_t {
     rx_ready_wait,  ///< HDMI RX timestamp to the start of VIDIOC_DQBUF.
     rx_dequeue,  ///< Successful VIDIOC_DQBUF system-call duration.
-    capture_queue,  ///< Dequeue to encoder-thread processing.
+    capture_queue,  ///< Dequeue to preprocess-worker processing.
     rga,  ///< RGA conversion or placeholder fill.
+    prepared_queue,  ///< Preprocessing completion to encode-worker processing.
     mpp_encode,  ///< MPP submit to complete encoded packet.
     encoded_queue,  ///< Encoded packet to network-thread processing.
     packetize_send,  ///< Network-thread processing to final send.
@@ -108,6 +109,10 @@ namespace platf::ui {
     std::uint32_t repeated_frames {};  ///< Repeated frames in the window.
     std::uint32_t rga_bypass_frames {};  ///< Real frames that bypassed RGA.
     std::uint64_t freshness_drops {};  ///< Older HDMI frames discarded for freshness.
+    std::uint64_t raw_replaced {};  ///< Raw frames displaced before preprocessing.
+    std::uint64_t prepared_replaced {};  ///< Prepared frames displaced before encoding.
+    std::uint64_t target_waits {};  ///< Waits for a private RGA target.
+    std::uint64_t sticky_idr_transfers {};  ///< IDR requests inherited from displaced frames.
     std::uint32_t dropped_samples {};  ///< Samples lost after bounded buffers filled.
     std::uint32_t hdmirx_width {};  ///< Latest HDMI RX width in the window.
     std::uint32_t hdmirx_height {};  ///< Latest HDMI RX height in the window.

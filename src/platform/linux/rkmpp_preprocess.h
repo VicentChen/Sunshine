@@ -1,0 +1,94 @@
+/**
+ * @file src/platform/linux/rkmpp_preprocess.h
+ * @brief Contracts shared by the RKMPP preprocess and encode workers.
+ */
+#pragma once
+
+#include "src/platform/linux/rkmpp.h"
+
+#include <chrono>
+#include <cstdint>
+#include <memory>
+#include <optional>
+
+namespace platf::rkmpp {
+  /** @brief Route used to produce one immutable RKMPP input. */
+  enum class prepared_route_e : std::uint8_t {
+    direct,  ///< HDMI RX DMA-BUF submitted without a full-frame copy.
+    rga,  ///< Session-private target populated by RGA before submission.
+    placeholder  ///< Session-private target containing the no-signal image.
+  };
+
+  /** @brief Format-aware UI preparation selected for one live frame. */
+  enum class ui_preprocess_path_e : std::uint8_t {
+    hidden,  ///< UI is hidden and does not alter the video path.
+    direct_bgr,  ///< Vulkan covers an exclusively leased BGR capture DMA-BUF.
+    private_bgr  ///< RGA produces a private BGR target before Vulkan covers it.
+  };
+
+  /**
+   * @brief Select the safe UI path without conflating visibility with scaling.
+   *
+   * Matching BGR capture can be covered in place only when the current frame
+   * is not shared by multiple encoder sessions. Every other visible-UI case
+   * uses a private BGR target, so an NV12 capture allocation is never written.
+   *
+   * @param input_format Native MPP layout of the captured frame.
+   * @param dimensions_match Whether capture and coded dimensions are equal.
+   * @param ui_visible Whether the controller currently exposes a UI page.
+   * @param direct_bgr_write_safe Whether only one session can mutate the frame.
+   * @return Format-aware preparation path for the current frame.
+   */
+  constexpr ui_preprocess_path_e select_ui_preprocess_path(
+    MppFrameFormat input_format,
+    bool dimensions_match,
+    bool ui_visible,
+    bool direct_bgr_write_safe
+  ) noexcept {
+    if (!ui_visible) {
+      return ui_preprocess_path_e::hidden;
+    }
+    if (input_format == MPP_FMT_BGR888 && dimensions_match && direct_bgr_write_safe) {
+      return ui_preprocess_path_e::direct_bgr;
+    }
+    return ui_preprocess_path_e::private_bgr;
+  }
+
+  /**
+   * @brief Immutable handoff from the preprocess worker to the encode worker.
+   *
+   * The holder pins either the source capture frame or one private RGA target.
+   * The encode worker is the only consumer and may submit this object at most
+   * once. Replacing or destroying it releases the holder immediately.
+   */
+  struct prepared_frame_t {
+    input_layout_t layout;  ///< Exact layout accepted by the next MPP session.
+    int dma_buf_fd {-1};  ///< Borrowed descriptor kept valid by `holder`.
+    std::uint64_t allocation_size {};  ///< Complete producer allocation.
+    std::int64_t pts {};  ///< Producer presentation timestamp.
+    std::uint64_t generation {};  ///< Producer allocation generation.
+    input_buffer_key_t cache_key;  ///< Stable import identity within `generation`.
+    input_holder_t holder;  ///< Direct-capture or private-target lifetime pin.
+    prepared_route_e route {prepared_route_e::direct};  ///< Preparation route.
+    bool request_idr {};  ///< Sticky IDR request attached to this submission.
+    std::optional<video::frame_profile_t> profile;  ///< Profile moved across the thread boundary.
+    std::optional<std::chrono::steady_clock::time_point> frame_timestamp;  ///< Capture timestamp forwarded to the packet.
+
+    /**
+     * @brief Build the short-lived MPP input view for synchronous submission.
+     *
+     * @return Input frame whose profile pointer refers to this object.
+     */
+    input_frame_t input_frame() {
+      return {
+        .layout = layout,
+        .dma_buf_fd = dma_buf_fd,
+        .allocation_size = allocation_size,
+        .pts = pts,
+        .holder = holder,
+        .profile = profile ? &*profile : nullptr,
+        .cache_key = cache_key
+      };
+    }
+  };
+}  // namespace platf::rkmpp

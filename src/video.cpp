@@ -10,7 +10,6 @@
 #include <limits>
 #include <list>
 #include <thread>
-#include <unordered_map>
 #include <utility>
 
 // lib includes
@@ -42,6 +41,7 @@ extern "C" {
   #include "platform/linux/hdmirx.h"
   #include "platform/linux/rga.h"
   #include "platform/linux/rkmpp.h"
+  #include "platform/linux/rkmpp_preprocess.h"
   #include "platform/linux/ui_controller.h"
   #ifdef SUNSHINE_BUILD_VULKAN
     #include "platform/linux/vulkan_ui.h"
@@ -727,10 +727,6 @@ namespace video {
   // Keep a reference counter to ensure the capture thread only runs when other threads have a reference to the capture thread
   auto capture_thread_async = safe::make_shared<capture_thread_async_ctx_t>(start_capture_async, end_capture_async);  ///< Capture thread async.
   auto capture_thread_sync = safe::make_shared<capture_thread_sync_ctx_t>(start_capture_sync, end_capture_sync);  ///< Capture thread sync.
-
-#ifdef SUNSHINE_BUILD_RKMPP
-  std::atomic_bool rkmpp_session_active {false};
-#endif
 
 #ifdef _WIN32
   /**
@@ -1719,6 +1715,11 @@ namespace video {
       bool artificial_reinit = false;
 
       auto push_captured_image_callback = [&](std::shared_ptr<platf::img_t> &&img, bool frame_captured) -> bool {
+#ifdef SUNSHINE_BUILD_RKMPP
+        const bool direct_bgr_ui_safe = encoder.name == "rkmpp" && std::count_if(capture_ctxs.begin(), capture_ctxs.end(), [](const auto &capture_ctx) {
+                                                                     return capture_ctx.images->running();
+                                                                   }) == 1;
+#endif
         KITTY_WHILE_LOOP(auto capture_ctx = std::begin(capture_ctxs), capture_ctx != std::end(capture_ctxs), {
           if (!capture_ctx->images->running()) {
             capture_ctx = capture_ctxs.erase(capture_ctx);
@@ -1727,7 +1728,62 @@ namespace video {
           }
 
           if (frame_captured) {
-            capture_ctx->images->raise(img);
+            auto session_image = img;
+#ifdef SUNSHINE_BUILD_RKMPP
+            if (encoder.name == "rkmpp") {
+              auto source = std::dynamic_pointer_cast<platf::hdmirx::hdmirx_img_t>(img);
+              if (!source) {
+                return false;
+              }
+              auto clone = std::make_shared<platf::hdmirx::hdmirx_img_t>();
+              clone->data = source->data;
+              clone->width = source->width;
+              clone->height = source->height;
+              clone->pixel_pitch = source->pixel_pitch;
+              clone->row_pitch = source->row_pitch;
+              clone->frame_timestamp = source->frame_timestamp;
+              clone->frame_profile = source->frame_profile;
+              clone->frame = source->frame;
+              clone->capture_format = source->capture_format;
+              clone->placeholder = source->placeholder;
+              clone->request_idr = source->request_idr;
+              clone->connection_state = source->connection_state;
+              clone->moonlight_width = capture_ctx->config.width;
+              clone->moonlight_height = capture_ctx->config.height;
+              clone->input_width = source->input_width;
+              clone->input_height = source->input_height;
+              clone->direct_bgr_ui_safe = direct_bgr_ui_safe;
+              if (clone->frame_profile) {
+                clone->frame_profile->moonlight_width = static_cast<std::uint32_t>(capture_ctx->config.width);
+                clone->frame_profile->moonlight_height = static_cast<std::uint32_t>(capture_ctx->config.height);
+              }
+              session_image = std::move(clone);
+            }
+#endif
+            capture_ctx->images->raise_latest(std::move(session_image), [](std::shared_ptr<platf::img_t> &displaced, std::shared_ptr<platf::img_t> &replacement) {
+#ifdef SUNSHINE_BUILD_RKMPP
+              auto old_rx = std::dynamic_pointer_cast<platf::hdmirx::hdmirx_img_t>(displaced);
+              auto new_rx = std::dynamic_pointer_cast<platf::hdmirx::hdmirx_img_t>(replacement);
+              if (!old_rx || !new_rx) {
+                return;
+              }
+              if (new_rx->frame_profile) {
+                new_rx->frame_profile->raw_replaced += 1U;
+                if (old_rx->frame_profile) {
+                  new_rx->frame_profile->raw_replaced += old_rx->frame_profile->raw_replaced;
+                  new_rx->frame_profile->prepared_replaced += old_rx->frame_profile->prepared_replaced;
+                  new_rx->frame_profile->target_waits += old_rx->frame_profile->target_waits;
+                  new_rx->frame_profile->sticky_idr_transfers += old_rx->frame_profile->sticky_idr_transfers;
+                }
+              }
+              if (old_rx->request_idr) {
+                new_rx->request_idr = true;
+                if (new_rx->frame_profile) {
+                  ++new_rx->frame_profile->sticky_idr_transfers;
+                }
+              }
+#endif
+            });
           }
 
           ++capture_ctx;
@@ -1882,11 +1938,10 @@ namespace video {
   /**
    * @brief Cache a Vulkan-rendered UI and cover each live HDMI RX DMA-BUF ROI.
    *
-   * The externally allocated BGR DMA-BUF is shared with RGA for converted NV12
-   * targets. Direct NV12 capture allocations remain read-only: while the UI is
-   * visible, the encoder path copies the frame to an isolated CMA target and
-   * overlays the panel there. On the direct BGR path Vulkan imports each
-   * capture slot and copies the cached panel into it.
+   * Matching BGR capture is covered directly while its exclusive dequeue lease
+   * is held. NV12 and shared-session input is first converted by RGA to a
+   * session-private BGR target, then Vulkan covers that BGR target directly.
+   * Vulkan output is never copied into an HDMI RX NV12 capture allocation.
    */
   class rkmpp_vulkan_ui_session_t {
     struct surface_t;
@@ -1948,8 +2003,8 @@ namespace video {
       platf::ui::global_controller().detach_backend();
     }
 
-    /** @brief Advance UI state and report whether an NV12 frame needs an isolated target. */
-    bool wants_nv12_target(platf::hdmirx::hdmirx_img_t &image) {
+    /** @brief Advance UI state and report whether the current page is visible. */
+    bool visible_for_frame(platf::hdmirx::hdmirx_img_t &image) {
       if (!backend_attached_) {
         return false;
       }
@@ -1957,8 +2012,60 @@ namespace video {
       return prepare_visible_panel(image) != nullptr;
     }
 
-    /** @brief Render a changed visible snapshot and cover one imported NV12 fallback destination. */
-    bool compose_into(platf::rga::imported_buffer_t &destination, platf::hdmirx::hdmirx_img_t &image) {
+    /** @brief Cover a visible page directly into an exclusively leased BGR capture frame. */
+    bool compose_capture_bgr(platf::hdmirx::hdmirx_img_t &image) {
+      if (!image.frame || !image.capture_format || image.frame->planes().size() != 1 || image.capture_format->planes.size() != 1) {
+        throw std::runtime_error("Vulkan UI requires one live HDMI RX plane");
+      }
+      const auto &format = *image.capture_format;
+      const auto &plane = image.frame->planes().front();
+      if (format.mpp_format != MPP_FMT_BGR888) {
+        throw std::runtime_error("direct Vulkan UI requires a BGR888 HDMI RX frame");
+      }
+      if (plane.data_offset != 0) {
+        throw std::runtime_error("Vulkan UI does not support a nonzero HDMI RX DMA-BUF data offset");
+      }
+      const auto minimum_stride = static_cast<std::uint64_t>(format.width) * 3U;
+      if (minimum_stride > std::numeric_limits<std::uint32_t>::max() || plane.bytesperline < minimum_stride || plane.bytesperline % 3U != 0 || static_cast<std::uint64_t>(format.height) > std::numeric_limits<std::uint64_t>::max() / plane.bytesperline) {
+        throw std::runtime_error("Vulkan UI BGR888 HDMI RX stride is invalid");
+      }
+      const auto required_size = static_cast<std::uint64_t>(format.height) * plane.bytesperline;
+      if (plane.payload_bytes < required_size || plane.sizeimage < required_size || plane.allocation_size < required_size) {
+        throw std::runtime_error("Vulkan UI HDMI RX DMA-BUF is smaller than its BGR888 layout");
+      }
+      return compose_bgr888(
+        {.dma_buf_fd = plane.dma_buf_fd,
+         .allocation_size = plane.allocation_size,
+         .width = format.width,
+         .height = format.height,
+         .stride = plane.bytesperline,
+         .generation = image.frame->generation(),
+         .slot = image.frame->buffer_index()},
+        image
+      );
+    }
+
+    /** @brief Cover a visible page directly into a session-private BGR target. */
+    bool compose_private_bgr(platf::rga::target_buffer_t &target, std::uint64_t generation, std::uint32_t slot, platf::hdmirx::hdmirx_img_t &image) {
+      const auto &layout = target.layout();
+      if (layout.format != platf::rga::pixel_format_e::bgr888) {
+        throw std::runtime_error("Vulkan UI private destination is not BGR888");
+      }
+      return compose_bgr888(
+        {.dma_buf_fd = layout.dma_buf_fd,
+         .allocation_size = layout.allocation_size,
+         .width = layout.width,
+         .height = layout.height,
+         .stride = layout.stride,
+         .generation = generation,
+         .slot = slot},
+        image
+      );
+    }
+
+  private:
+    /** @brief Publish and copy the selected panel into one BGR DMA-BUF ROI. */
+    bool compose_bgr888(const platf::vulkan_ui::bgr888_dma_buf_t &target, platf::hdmirx::hdmirx_img_t &image) {
       if (!backend_attached_) {
         return false;
       }
@@ -1972,85 +2079,10 @@ namespace video {
       }
   #ifdef SUNSHINE_BUILD_VULKAN
       (void) surface->renderer->publish();
-  #endif
-      compose_visible_into(destination, *surface);
-      if (image.frame_profile) {
-        image.frame_profile->ui_compose_end = std::chrono::steady_clock::now();
-      }
-      return true;
-    }
-
-    /** @brief Cover the already-rendered visible panel into an imported NV12 destination. */
-    void compose_visible_into(platf::rga::imported_buffer_t &destination, surface_t &surface) {
-      const auto &layout = destination.layout();
-      const auto &panel = surface.panel;
-      if (layout.format != platf::rga::pixel_format_e::nv12 || (layout.width & 1U) != 0 || (layout.height & 1U) != 0) {
-        throw std::runtime_error("Vulkan UI requires an even-sized NV12 destination");
-      }
-      if (layout.width < panel.width || layout.height < panel.height + metrics_.panel_margin) {
-        throw std::runtime_error("Vulkan UI ROI exceeds the destination frame");
-      }
-      const auto allocation_rows = static_cast<std::uint64_t>(layout.height) + layout.height / 2U;
-      if (layout.stride < layout.width || allocation_rows > std::numeric_limits<std::uint64_t>::max() / layout.stride || layout.allocation_size < allocation_rows * layout.stride) {
-        throw std::runtime_error("Vulkan UI destination layout is invalid");
-      }
-      const auto panel_left = ((layout.width - panel.width) / 2U) & ~1U;
-      const auto panel_top = layout.height - panel.height - metrics_.panel_margin;
-      platf::rga::process(
-        surface.source.rga_buffer(),
-        {0, 0, panel.width, panel.height},
-        destination,
-        {panel_left, panel_top, panel.width, panel.height},
-        platf::rga::color_space_e::rgb_to_yuv_bt709_limited
-      );
-      ++frames_composed_;
-      if (frames_composed_ == 1) {
-        BOOST_LOG(info) << "RKMPP Vulkan UI first DMA-BUF composition completed synchronously"sv;
-      }
-    }
-
-    /** @brief Synchronously use Vulkan to cover a direct BGR capture DMA-BUF when visible. */
-    bool compose(platf::hdmirx::hdmirx_img_t &image) {
-      if (!backend_attached_) {
-        return false;
-      }
-      observe_capture_generation(image);
-      auto *surface = prepare_visible_panel(image);
-      if (!surface) {
-        return false;
-      }
-      if (!image.frame || !image.capture_format || image.frame->planes().size() != 1 || image.capture_format->planes.size() != 1) {
-        throw std::runtime_error("Vulkan UI requires one live HDMI RX plane");
-      }
-      const auto &format = *image.capture_format;
-      const auto &plane = image.frame->planes().front();
-      if (plane.data_offset != 0) {
-        throw std::runtime_error("Vulkan UI does not support a nonzero HDMI RX DMA-BUF data offset");
-      }
-
-      const auto generation = image.frame->generation();
-      const auto index = image.frame->buffer_index();
-      if (format.mpp_format != MPP_FMT_BGR888) {
-        throw std::runtime_error("direct Vulkan UI requires a BGR888 HDMI RX frame");
-      }
-      const auto minimum_stride = static_cast<std::uint64_t>(format.width) * 3U;
-      if (minimum_stride > std::numeric_limits<std::uint32_t>::max() || plane.bytesperline < minimum_stride || plane.bytesperline % 3U != 0 || static_cast<std::uint64_t>(format.height) > std::numeric_limits<std::uint64_t>::max() / plane.bytesperline) {
-        throw std::runtime_error("Vulkan UI BGR888 HDMI RX stride is invalid");
-      }
-      const auto required_size = static_cast<std::uint64_t>(format.height) * plane.bytesperline;
-      if (plane.payload_bytes < required_size || plane.sizeimage < required_size || plane.allocation_size < required_size) {
-        throw std::runtime_error("Vulkan UI HDMI RX DMA-BUF is smaller than its BGR888 layout");
-      }
-  #ifdef SUNSHINE_BUILD_VULKAN
-      if (image.frame_profile) {
-        image.frame_profile->ui_compose_begin = std::chrono::steady_clock::now();
-      }
-      if (surface->renderer->cover_bgr888({.dma_buf_fd = plane.dma_buf_fd, .allocation_size = plane.allocation_size, .width = format.width, .height = format.height, .stride = plane.bytesperline, .generation = generation, .slot = index}, metrics_.panel_margin)) {
+      if (surface->renderer->cover_bgr888(target, metrics_.panel_margin)) {
         ++bgr_imported_slots_;
-        BOOST_LOG(info) << "RKMPP Vulkan UI imported BGR capture slot=" << index
-                        << " fd=" << plane.dma_buf_fd
-                        << " generation=" << generation;
       }
+  #endif
       if (image.frame_profile) {
         image.frame_profile->ui_compose_end = std::chrono::steady_clock::now();
       }
@@ -2059,12 +2091,8 @@ namespace video {
         BOOST_LOG(info) << "RKMPP Vulkan UI first direct BGR DMA-BUF cover completed synchronously"sv;
       }
       return true;
-  #else
-      return false;
-  #endif
     }
 
-  private:
     /** @brief One page-family surface with matching RGA and Vulkan resources. */
     struct surface_t {
       platf::vulkan_ui::panel_layout_t panel;
@@ -2170,6 +2198,7 @@ namespace video {
         frame_profile_metric_e::rx_dequeue,
         frame_profile_metric_e::capture_queue,
         frame_profile_metric_e::rga,
+        frame_profile_metric_e::prepared_queue,
         frame_profile_metric_e::mpp_encode,
         frame_profile_metric_e::encoded_queue,
         frame_profile_metric_e::packetize_send,
@@ -2182,6 +2211,10 @@ namespace video {
         .repeated_frames = snapshot.repeated_frames,
         .rga_bypass_frames = snapshot.rga_bypass_frames,
         .freshness_drops = snapshot.freshness_drops,
+        .raw_replaced = snapshot.raw_replaced,
+        .prepared_replaced = snapshot.prepared_replaced,
+        .target_waits = snapshot.target_waits,
+        .sticky_idr_transfers = snapshot.sticky_idr_transfers,
         .dropped_samples = snapshot.dropped_samples,
         .hdmirx_width = snapshot.hdmirx_width,
         .hdmirx_height = snapshot.hdmirx_height,
@@ -2195,7 +2228,7 @@ namespace video {
       return status;
     }
 
-    /** @brief Invalidate every direct-BGR Vulkan import as soon as capture is rebuilt. */
+    /** @brief Invalidate renderer-side capture identities before checking UI visibility. */
     void observe_capture_generation(const platf::hdmirx::hdmirx_img_t &image) {
       if (!image.frame || !image.capture_format || image.frame->planes().size() != 1 || image.capture_format->planes.size() != 1) {
         return;
@@ -2204,14 +2237,14 @@ namespace video {
       if (capture_generation_ && *capture_generation_ == generation) {
         return;
       }
-#ifdef SUNSHINE_BUILD_VULKAN
+  #ifdef SUNSHINE_BUILD_VULKAN
       if (standard_surface_) {
         standard_surface_->renderer->invalidate_capture_targets();
       }
       if (profile_surface_) {
         profile_surface_->renderer->invalidate_capture_targets();
       }
-#endif
+  #endif
       capture_generation_ = generation;
       ++capture_generations_;
       const auto &format = *image.capture_format;
@@ -2305,23 +2338,28 @@ namespace video {
     bool backend_attached_ {};  ///< Whether controller input may currently be intercepted for this renderer.
   };
 
-  class rkmpp_rga_encode_session_t final: public encode_session_t {
+  /** @brief Session-private RGA/Vulkan stage owned by the preprocess worker. */
+  class rkmpp_preprocessor_t: public std::enable_shared_from_this<rkmpp_preprocessor_t> {
   public:
-    platf::rkmpp::input_layout_t source_input_layout_;
+    using prepared_t = platf::rkmpp::prepared_frame_t;
+    using reclaim_callback_t = std::function<void(platf::hdmirx::hdmirx_img_t &)>;
 
-    rkmpp_rga_encode_session_t(const config_t &config, const platf::rkmpp::input_layout_t &input_layout, std::uint32_t coded_width, std::uint32_t coded_height, std::shared_ptr<rkmpp_vulkan_ui_session_t> vulkan_ui = {}):
-        source_input_layout_(input_layout),
-        vulkan_ui_(std::move(vulkan_ui)),
-        video_format_(config.videoFormat) {
-      if (!vulkan_ui_ && ::config::video.vulkan_ui) {
+    /**
+     * @brief Create the session UI/RGA state on its permanent worker thread.
+     *
+     * @param config Negotiated Moonlight encode configuration.
+     */
+    explicit rkmpp_preprocessor_t(const config_t &config):
+        target_resolution_ {static_cast<std::uint32_t>(config.width), static_cast<std::uint32_t>(config.height)} {
+      if (::config::video.vulkan_ui) {
         try {
           vulkan_ui_ = std::make_shared<rkmpp_vulkan_ui_session_t>(
-            coded_width,
-            coded_height,
+            target_resolution_.width,
+            target_resolution_.height,
             static_cast<std::uint32_t>(config.framerateX100 > 0 ? config.framerateX100 : config.framerate * 100)
           );
         } catch (const std::exception &e) {
-          BOOST_LOG(error) << "RKMPP Vulkan UI initialization failed in RGA path; continuing without overlay: " << e.what();
+          BOOST_LOG(error) << "RKMPP Vulkan UI initialization failed; continuing without overlay: " << e.what();
         }
       }
       if (vulkan_ui_) {
@@ -2334,453 +2372,618 @@ namespace video {
         rga_allocator_ = owned_rga_allocator_.get();
       }
       if (!rga_backend_ || !rga_allocator_) {
-        throw std::runtime_error("Failed to initialize RGA backend or allocator");
+        throw std::runtime_error("Failed to initialize RKMPP preprocess RGA resources");
       }
-
-      target_resolution_ = {coded_width, coded_height};
-
-      const auto nv12_layout = platf::hdmirx::make_nv12_layout(target_resolution_, 0, 64);
-      if (!nv12_layout) {
-        throw std::runtime_error("Failed to create NV12 layout for RGA target");
-      }
-      target_layout_ = {
-        .dma_buf_fd = -1,
-        .width = target_resolution_.width,
-        .height = target_resolution_.height,
-        .stride = nv12_layout->stride,
-        .allocation_size = nv12_layout->allocation_size,
-        .format = platf::rga::pixel_format_e::nv12
-      };
-
-      // MPP consumes the input synchronously before releasing its holder, so
-      // one reusable target is sufficient. At 4K this avoids retaining three
-      // extra 12 MiB DMA-BUFs.
-      for (std::uint32_t i = 0; i < 1; ++i) {
-        auto buf = std::make_shared<platf::rga::target_buffer_t>(platf::rga::target_buffer_t::allocate_nv12(*rga_backend_, *rga_allocator_, target_resolution_.width, target_resolution_.height, target_layout_.stride));
-        free_buffers_.push({std::move(buf), i});
-      }
-
-      auto encoder_input_layout = platf::rkmpp::make_input_layout_from_plane(target_resolution_.width, target_resolution_.height, MPP_FMT_YUV420SP, target_layout_.stride, target_layout_.allocation_size);
-      if (!encoder_input_layout) {
-        throw std::runtime_error("Failed to create encoder input layout");
-      }
-      encoder_input_layout_ = *encoder_input_layout;
-      encoder_ = platf::rkmpp::encoder_t::create(make_rkmpp_encoder_config(config, encoder_input_layout_));
     }
 
-    int convert(platf::img_t &img) override {
-      auto *image = dynamic_cast<platf::hdmirx::hdmirx_img_t *>(&img);
+    /** @brief Report bounded target-pool usage after every holder is released. */
+    ~rkmpp_preprocessor_t() {
+      BOOST_LOG(info) << "RKMPP preprocess stopped: targets_peak=" << target_peak_leases_ << "/2"
+                      << " target_waits=" << target_waits_;
+    }
+
+    /**
+     * @brief Prepare one raw image without invoking MPP.
+     *
+     * @param raw Shared capture fan-out object.
+     * @param stop_token Worker cancellation token used by target waits.
+     * @param reclaim_oldest Callback that may discard one stale prepared frame.
+     * @return Immutable prepared input, or empty after cancellation/failure.
+     */
+    std::optional<prepared_t> prepare(
+      const std::shared_ptr<platf::img_t> &raw,
+      std::stop_token stop_token,
+      const reclaim_callback_t &reclaim_oldest
+    ) {
+      auto image = std::dynamic_pointer_cast<platf::hdmirx::hdmirx_img_t>(raw);
       if (!image) {
-        return -1;
+        throw std::runtime_error("RKMPP preprocess received a non-HDMI image");
       }
-      discard_pending_input();
-      if (image->request_idr) {
-        request_idr_frame();
+      if (image->frame_profile) {
+        image->frame_profile->capture_queue_exit = std::chrono::steady_clock::now();
       }
       if (image->placeholder) {
-        return convert_placeholder(*image);
+        return prepare_placeholder(*image, stop_token, reclaim_oldest, prepare_ui_visibility(*image));
       }
-      if (!image->frame || !image->capture_format || image->frame->planes().empty()) {
-        return -1;
+      if (!image->frame || !image->capture_format || image->frame->planes().size() != 1) {
+        throw std::runtime_error("RKMPP preprocess received incomplete HDMI frame metadata");
       }
 
       const auto &plane = image->frame->planes().front();
-      const auto &capture_format = *image->capture_format;
-      const auto source_input_layout = platf::rkmpp::make_input_layout_from_plane(
-        capture_format.width,
-        capture_format.height,
-        capture_format.mpp_format,
-        plane.bytesperline,
-        plane.sizeimage
-      );
-      if (!source_input_layout) {
-        BOOST_LOG(error) << "RKMPP RGA source frame has an invalid post-recovery layout";
-        return -1;
-      }
-      auto src_format = rga_format_from_mpp(source_input_layout->format);
-      if (!src_format) {
-        BOOST_LOG(error) << "Unsupported V4L2 pixel format for RGA source";
-        return -1;
-      }
-
-      platf::rga::image_layout_t src_layout {
-        .dma_buf_fd = plane.dma_buf_fd,
-        .width = source_input_layout->visible_width,
-        .height = source_input_layout->visible_height,
-        .stride = plane.bytesperline,
-        .allocation_size = plane.allocation_size,
-        .format = *src_format
-      };
-
-      auto target = take_target_buffer();
-      auto target_buf = target.buffer;
-      const auto cache_key = platf::rkmpp::input_buffer_key_t {rga_input_generation_, target.index};
-      auto holder = retain_target_buffer(std::move(target));
-
-      try {
-        if (image->frame_profile) {
-          image->frame_profile->rga_used = true;
-          image->frame_profile->rga_begin = std::chrono::steady_clock::now();
-        }
-        auto src_rga = platf::rga::imported_buffer_t::import(*rga_backend_, src_layout);
-        auto viewport = platf::hdmirx::make_viewport({src_layout.width, src_layout.height}, target_resolution_, platf::hdmirx::pixel_format_e::nv12);
-        if (!viewport) {
-          throw std::runtime_error("Failed to calculate viewport");
-        }
-
-        // A full-frame conversion overwrites every target pixel, making the
-        // otherwise required letterbox/pillarbox clear redundant.
-        if (!platf::hdmirx::viewport_covers_target(*viewport, target_resolution_)) {
-          // imfill() consumes opaque ARGB even for an NV12 destination.
-          platf::rga::fill(target_buf->rga_buffer(), {0, 0, target_resolution_.width, target_resolution_.height}, 0xff000000U);
-        }
-        platf::rga::rectangle_t rga_src {viewport->source.left, viewport->source.top, viewport->source.width, viewport->source.height};
-        platf::rga::rectangle_t rga_dst {viewport->destination.left, viewport->destination.top, viewport->destination.width, viewport->destination.height};
-        platf::rga::process(src_rga, rga_src, target_buf->rga_buffer(), rga_dst);
-        if (image->frame_profile) {
-          image->frame_profile->rga_end = std::chrono::steady_clock::now();
-        }
-        if (vulkan_ui_ && vulkan_ui_enabled_) {
-          try {
-            const bool composed = vulkan_ui_->compose_into(target_buf->rga_buffer(), *image);
-            if (composed && !vulkan_ui_rga_logged_) {
-              vulkan_ui_rga_logged_ = true;
-              BOOST_LOG(info) << "RKMPP Vulkan UI active on RGA fallback target "
-                              << target_resolution_.width << 'x' << target_resolution_.height;
-            }
-          } catch (const std::exception &e) {
-            vulkan_ui_->disable();
-            vulkan_ui_enabled_ = false;
-            BOOST_LOG(error) << "RKMPP Vulkan UI RGA-path composition failed; disabling overlay for this session: " << e.what();
-          }
-        }
-      } catch (const std::exception &e) {
-        BOOST_LOG(error) << "RGA conversion failed: " << e.what();
-        return -1;
-      }
-
-      current_input_ = {
-        .layout = encoder_input_layout_,
-        .dma_buf_fd = target_buf->layout().dma_buf_fd,
-        .allocation_size = target_buf->layout().allocation_size,
-        .pts = image->frame->timestamp().time_since_epoch().count(),
-        .holder = holder,
-        .cache_key = cache_key
-      };
-      current_profile_ = std::move(image->frame_profile);
-      current_input_.profile = current_profile_ ? &*current_profile_ : nullptr;
-      image->frame.reset();
-      ready_ = true;
-      return 0;
-    }
-
-    int convert_placeholder(platf::hdmirx::hdmirx_img_t &image) {
-      rga_target_slot_t target;
-      try {
-        target = take_target_buffer();
-      } catch (const std::exception &e) {
-        BOOST_LOG(error) << "RKMPP RGA placeholder DMA-BUF pool is exhausted: " << e.what();
-        return -1;
-      }
-      auto target_buf = target.buffer;
-      const auto cache_key = platf::rkmpp::input_buffer_key_t {rga_input_generation_, target.index};
-      auto holder = retain_target_buffer(std::move(target));
-
-      try {
-        if (image.frame_profile) {
-          image.frame_profile->rga_used = true;
-          image.frame_profile->rga_begin = std::chrono::steady_clock::now();
-        }
-        // Opaque ARGB green matches the official librga fill sample.
-        platf::rga::fill(target_buf->rga_buffer(), {0, 0, target_resolution_.width, target_resolution_.height}, 0xff00ff00U);
-        if (vulkan_ui_ && vulkan_ui_enabled_) {
-          try {
-            const bool composed = vulkan_ui_->compose_into(target_buf->rga_buffer(), image);
-            if (composed && !vulkan_ui_rga_logged_) {
-              vulkan_ui_rga_logged_ = true;
-              BOOST_LOG(info) << "RKMPP Vulkan UI active on green placeholder target "
-                              << target_resolution_.width << 'x' << target_resolution_.height;
-            }
-          } catch (const std::exception &e) {
-            vulkan_ui_->disable();
-            vulkan_ui_enabled_ = false;
-            BOOST_LOG(error) << "RKMPP Vulkan UI placeholder composition failed; disabling overlay for this session: " << e.what();
-          }
-        }
-        if (image.frame_profile) {
-          image.frame_profile->rga_end = std::chrono::steady_clock::now();
-        }
-        current_input_ = {
-          .layout = encoder_input_layout_,
-          .dma_buf_fd = target_buf->layout().dma_buf_fd,
-          .allocation_size = target_buf->layout().allocation_size,
-          .pts = image.frame ? image.frame->timestamp().time_since_epoch().count() : 0,
-          .holder = holder,
-          .cache_key = cache_key
-        };
-        current_profile_ = std::move(image.frame_profile);
-        current_input_.profile = current_profile_ ? &*current_profile_ : nullptr;
-        ready_ = true;
-        image.frame.reset();
-        return 0;
-      } catch (const std::exception &e) {
-        BOOST_LOG(error) << "RGA placeholder failed: " << e.what();
-        return -1;
-      }
-    }
-
-    void request_idr_frame() override {
-      force_idr_ = true;
-    }
-
-    void request_normal_frame() override {
-      force_idr_ = false;
-    }
-
-    void invalidate_ref_frames(int64_t, int64_t) override {}
-
-    platf::rkmpp::encoded_packet_t encode() {
-      if (!ready_) {
-        throw std::runtime_error("RKMPP RGA encode called without a converted frame");
-      }
-      if (force_idr_) {
-        encoder_.request_idr();
-        force_idr_ = false;
-      }
-      auto packet = encoder_.encode_packet(current_input_);
-      encoded_profile_ = std::move(current_profile_);
-      discard_pending_input();
-      return packet;
-    }
-
-    int video_format() const noexcept {
-      return video_format_;
-    }
-
-    /** @brief Move the profile completed by the most recent encode operation. */
-    std::optional<frame_profile_t> take_frame_profile() {
-      return std::exchange(encoded_profile_, std::nullopt);
-    }
-
-  private:
-    /**
-     * @brief Release a converted input that has not been consumed by MPP.
-     *
-     * Synchronized session setup converts one initial image without encoding
-     * it. Releasing that pending lease before the next conversion allows the
-     * one-entry RGA target pool to be reused safely.
-     */
-    void discard_pending_input() noexcept {
-      current_input_.reset();
-      current_profile_.reset();
-      ready_ = false;
-    }
-
-    /** @brief One fixed RGA target and its stable cache index. */
-    struct rga_target_slot_t {
-      std::shared_ptr<platf::rga::target_buffer_t> buffer;
-      std::uint32_t index {};
-    };
-
-    /** @brief Lease one fixed target from the RGA conversion pool. */
-    rga_target_slot_t take_target_buffer() {
-      std::lock_guard<std::mutex> lock(pool_mutex_);
-      if (free_buffers_.empty()) {
-        throw std::runtime_error("RKMPP RGA target DMA-BUF pool is exhausted");
-      }
-      auto target = free_buffers_.front();
-      free_buffers_.pop();
-      return target;
-    }
-
-    /** @brief Return a target to the conversion pool when MPP releases its input holder. */
-    platf::rkmpp::input_holder_t retain_target_buffer(rga_target_slot_t target) {
-      return {target.buffer.get(), [this, target = std::move(target)](void *) mutable {
-                std::lock_guard<std::mutex> lock(pool_mutex_);
-                free_buffers_.push(std::move(target));
-              }};
-    }
-
-    std::shared_ptr<rkmpp_vulkan_ui_session_t> vulkan_ui_;
-    std::unique_ptr<platf::rga::backend_t> owned_rga_backend_;
-    std::unique_ptr<platf::rga::dma_allocator_t> owned_rga_allocator_;
-    platf::rga::backend_t *rga_backend_ {};
-    platf::rga::dma_allocator_t *rga_allocator_ {};
-    std::mutex pool_mutex_;
-    std::queue<rga_target_slot_t> free_buffers_;
-
-    platf::rkmpp::encoder_t encoder_;
-    platf::hdmirx::resolution_t target_resolution_;
-    platf::rga::image_layout_t target_layout_;
-    platf::rkmpp::input_layout_t encoder_input_layout_;
-    platf::rkmpp::input_frame_t current_input_;
-    std::optional<frame_profile_t> current_profile_;
-    std::optional<frame_profile_t> encoded_profile_;
-    std::uint64_t rga_input_generation_ {1};  ///< Fixed pool generation; a session recreation destroys its cache.
-    bool ready_ {false};
-    bool force_idr_ {false};
-    bool vulkan_ui_enabled_ {true};
-    bool vulkan_ui_rga_logged_ {false};
-    int video_format_;
-  };
-
-  class rkmpp_encode_session_t final: public encode_session_t {
-  public:
-    platf::rkmpp::input_layout_t input_layout_;
-
-    rkmpp_encode_session_t(const config_t &config, const platf::rkmpp::input_layout_t &input_layout):
-        input_layout_(input_layout),
-        config_(config),
-        video_format_(config.videoFormat) {
-      const platf::hdmirx::resolution_t input_resolution {input_layout.visible_width, input_layout.visible_height};
-      const platf::hdmirx::resolution_t target_resolution {static_cast<std::uint32_t>(config.width), static_cast<std::uint32_t>(config.height)};
-      if (!platf::hdmirx::needs_conversion(input_resolution, target_resolution)) {
-        encoder_ = platf::rkmpp::encoder_t::create(make_rkmpp_encoder_config(config, input_layout));
-        direct_encoder_ready_ = true;
-      }
-      if (config::video.vulkan_ui) {
-        try {
-          vulkan_ui_ = std::make_shared<rkmpp_vulkan_ui_session_t>(
-            static_cast<std::uint32_t>(config.width),
-            static_cast<std::uint32_t>(config.height),
-            static_cast<std::uint32_t>(config.framerateX100 > 0 ? config.framerateX100 : config.framerate * 100)
-          );
-        } catch (const std::exception &e) {
-          BOOST_LOG(error) << "RKMPP Vulkan UI initialization failed; continuing without overlay: " << e.what();
-        }
-      }
-    }
-
-    int convert(platf::img_t &img) override {
-      image_ = dynamic_cast<platf::hdmirx::hdmirx_img_t *>(&img);
-      if (!image_) {
-        return -1;
-      }
-      if (image_->placeholder) {
-        return convert_with_rga(img);
-      }
-      if (!image_->frame || !image_->capture_format || image_->frame->planes().empty()) {
-        return -1;
-      }
-      const auto &plane = image_->frame->planes().front();
       const auto live_layout = platf::rkmpp::make_input_layout_from_plane(
-        image_->capture_format->width,
-        image_->capture_format->height,
-        image_->capture_format->mpp_format,
+        image->capture_format->width,
+        image->capture_format->height,
+        image->capture_format->mpp_format,
         plane.bytesperline,
         plane.sizeimage
       );
       if (!live_layout) {
-        BOOST_LOG(error) << "RKMPP direct frame has an invalid post-recovery layout";
-        return -1;
+        throw std::runtime_error("RKMPP preprocess source frame has an invalid post-recovery layout");
       }
       const platf::hdmirx::resolution_t input_resolution {live_layout->visible_width, live_layout->visible_height};
-      const platf::hdmirx::resolution_t target_resolution {static_cast<std::uint32_t>(config_.width), static_cast<std::uint32_t>(config_.height)};
-      if (platf::hdmirx::needs_conversion(input_resolution, target_resolution)) {
-        return convert_with_rga(img);
+      const bool dimensions_match = !platf::hdmirx::needs_conversion(input_resolution, target_resolution_);
+      const auto ui_path = platf::rkmpp::select_ui_preprocess_path(
+        live_layout->format,
+        dimensions_match,
+        prepare_ui_visibility(*image),
+        image->direct_bgr_ui_safe
+      );
+      if (!dimensions_match || ui_path == platf::rkmpp::ui_preprocess_path_e::private_bgr) {
+        return prepare_rga(
+          *image,
+          *live_layout,
+          stop_token,
+          reclaim_oldest,
+          platf::rkmpp::prepared_route_e::rga,
+          ui_path == platf::rkmpp::ui_preprocess_path_e::private_bgr
+        );
       }
-      // The rk_hdmirx capture allocation is safe as an RGA source but not as
-      // an RGA destination: writing it makes subsequent driver-produced UV
-      // data alias luma. Keep the producer allocation read-only and compose a
-      // visible NV12 UI into the existing isolated CMA fallback target.
-      if (live_layout->format == MPP_FMT_YUV420SP && vulkan_ui_) {
-        try {
-          if (vulkan_ui_->wants_nv12_target(*image_)) {
-            return convert_with_rga(img);
+      if (ui_path == platf::rkmpp::ui_preprocess_path_e::direct_bgr) {
+        compose_direct_bgr(*image);
+      }
+
+      if (image->frame_profile) {
+        image->frame_profile->rga_used = false;
+        image->frame_profile->preprocess_end = std::chrono::steady_clock::now();
+      }
+      const auto generation = image->frame->generation();
+      const auto index = image->frame->buffer_index();
+      prepared_t prepared {
+        .layout = *live_layout,
+        .dma_buf_fd = plane.dma_buf_fd,
+        .allocation_size = plane.allocation_size,
+        .pts = static_cast<std::int64_t>(image->frame->timestamp().time_since_epoch().count()),
+        .generation = generation,
+        .cache_key = {generation, index},
+        .holder = std::move(image->frame),
+        .route = platf::rkmpp::prepared_route_e::direct,
+        .request_idr = image->request_idr,
+        .profile = std::move(image->frame_profile),
+        .frame_timestamp = image->frame_timestamp
+      };
+      image->capture_format.reset();
+      return prepared;
+    }
+
+  private:
+    /** @brief One private target and its stable import-cache slot. */
+    struct target_slot_t {
+      std::shared_ptr<platf::rga::target_buffer_t> buffer;
+      std::uint32_t index {};
+    };
+
+    /** @brief Derive the exact MPP input layout for one private RGA target. */
+    static platf::rkmpp::input_layout_t encoder_layout_for(const platf::rga::target_buffer_t &target) {
+      const auto &layout = target.layout();
+      const auto mpp_format = layout.format == platf::rga::pixel_format_e::bgr888 ? MPP_FMT_BGR888 : MPP_FMT_YUV420SP;
+      const auto encoder_layout = platf::rkmpp::make_input_layout_from_plane(
+        layout.width,
+        layout.height,
+        mpp_format,
+        layout.stride,
+        layout.allocation_size
+      );
+      if (!encoder_layout) {
+        throw std::runtime_error("Failed to derive RKMPP preprocess target layout");
+      }
+      return *encoder_layout;
+    }
+
+    /** @brief Allocate one target matching the required safe UI path. */
+    std::shared_ptr<platf::rga::target_buffer_t> allocate_target(platf::rga::pixel_format_e format) {
+      if (format == platf::rga::pixel_format_e::bgr888) {
+        return std::make_shared<platf::rga::target_buffer_t>(
+          platf::rga::target_buffer_t::allocate_bgr888(
+            *rga_backend_,
+            *rga_allocator_,
+            target_resolution_.width,
+            target_resolution_.height
+          )
+        );
+      }
+      if (format == platf::rga::pixel_format_e::nv12) {
+        return std::make_shared<platf::rga::target_buffer_t>(
+          platf::rga::target_buffer_t::allocate_nv12(
+            *rga_backend_,
+            *rga_allocator_,
+            target_resolution_.width,
+            target_resolution_.height
+          )
+        );
+      }
+      throw std::runtime_error("Unsupported RKMPP preprocess target format");
+    }
+
+    /**
+     * @brief Allocate or safely rebuild the fixed two-target pool.
+     *
+     * A visibility transition can change the required target from NV12 to BGR
+     * or back. The stale prepared frame is reclaimed first, then any target
+     * currently owned by MPP is returned before the two-buffer pool is rebuilt.
+     */
+    bool ensure_targets(
+      platf::rga::pixel_format_e format,
+      platf::hdmirx::hdmirx_img_t &image,
+      std::stop_token stop_token,
+      const reclaim_callback_t &reclaim_oldest
+    ) {
+      std::unique_lock lock(pool_mutex_);
+      if (targets_allocated_ && target_format_ == format) {
+        return true;
+      }
+      if (targets_allocated_) {
+        lock.unlock();
+        reclaim_oldest(image);
+        lock.lock();
+        if (target_leases_ != 0) {
+          ++target_waits_;
+          if (image.frame_profile) {
+            ++image.frame_profile->target_waits;
           }
-        } catch (const std::exception &e) {
-          BOOST_LOG(error) << "RKMPP Vulkan UI frame preparation failed; disabling overlay for this session: " << e.what();
-          vulkan_ui_->disable();
-          vulkan_ui_.reset();
+          if (!pool_cv_.wait(lock, stop_token, [this] {
+                return target_leases_ == 0;
+              })) {
+            return false;
+          }
+        }
+        std::queue<target_slot_t> empty;
+        free_targets_.swap(empty);
+        targets_allocated_ = false;
+        target_format_.reset();
+      }
+      lock.unlock();
+
+      std::array<std::shared_ptr<platf::rga::target_buffer_t>, 2> replacements {
+        allocate_target(format),
+        allocate_target(format)
+      };
+
+      lock.lock();
+      for (std::uint32_t index = 0; index < replacements.size(); ++index) {
+        free_targets_.push({std::move(replacements[index]), index});
+      }
+      target_generation_ = next_target_generation_.fetch_add(1, std::memory_order_relaxed);
+      target_format_ = format;
+      targets_allocated_ = true;
+      return true;
+    }
+
+    /**
+     * @brief Lease a target, first reclaiming an obsolete prepared frame.
+     *
+     * @param image Current raw image that inherits displaced control state.
+     * @param stop_token Cancellation token for a genuine two-target wait.
+     * @param reclaim_oldest Prepared-frame reclamation callback.
+     * @param format Required format of every target in the active pool.
+     * @return Target lease, or empty when cancellation wins.
+     */
+    std::optional<target_slot_t> take_target(
+      platf::hdmirx::hdmirx_img_t &image,
+      std::stop_token stop_token,
+      const reclaim_callback_t &reclaim_oldest,
+      platf::rga::pixel_format_e format
+    ) {
+      if (!ensure_targets(format, image, stop_token, reclaim_oldest)) {
+        return std::nullopt;
+      }
+      std::unique_lock lock(pool_mutex_);
+      if (free_targets_.empty()) {
+        lock.unlock();
+        reclaim_oldest(image);
+        lock.lock();
+      }
+      if (free_targets_.empty()) {
+        ++target_waits_;
+        if (image.frame_profile) {
+          ++image.frame_profile->target_waits;
+        }
+        if (!pool_cv_.wait(lock, stop_token, [this] {
+              return !free_targets_.empty();
+            })) {
+          return std::nullopt;
         }
       }
-      if (!direct_encoder_ready_ || *live_layout != input_layout_) {
-        try {
-          reconfigure_direct(*live_layout);
-        } catch (const std::exception &e) {
-          BOOST_LOG(error) << "RKMPP direct encoder reconfiguration failed: " << e.what();
+      auto target = std::move(free_targets_.front());
+      free_targets_.pop();
+      ++target_leases_;
+      target_peak_leases_ = std::max(target_peak_leases_, target_leases_);
+      return target;
+    }
+
+    /** @brief Create a holder that returns one target from the encode worker. */
+    platf::rkmpp::input_holder_t retain_target(target_slot_t target) {
+      auto self = shared_from_this();
+      return {target.buffer.get(), [self = std::move(self), target = std::move(target)](void *) mutable {
+                {
+                  std::lock_guard lock(self->pool_mutex_);
+                  self->free_targets_.push(std::move(target));
+                  --self->target_leases_;
+                }
+                self->pool_cv_.notify_one();
+              }};
+    }
+
+    /** @brief Fill and optionally decorate the private no-signal target. */
+    std::optional<prepared_t> prepare_placeholder(
+      platf::hdmirx::hdmirx_img_t &image,
+      std::stop_token stop_token,
+      const reclaim_callback_t &reclaim_oldest,
+      bool ui_visible
+    ) {
+      const auto target_format = ui_visible ? platf::rga::pixel_format_e::bgr888 : platf::rga::pixel_format_e::nv12;
+      auto target = take_target(image, stop_token, reclaim_oldest, target_format);
+      if (!target) {
+        return std::nullopt;
+      }
+      const auto target_index = target->index;
+      auto target_buffer = target->buffer;
+      const auto target_generation = target_generation_;
+      const auto encoder_layout = encoder_layout_for(*target_buffer);
+      auto holder = retain_target(std::move(*target));
+      if (image.frame_profile) {
+        image.frame_profile->rga_used = true;
+        image.frame_profile->rga_begin = std::chrono::steady_clock::now();
+      }
+      platf::rga::fill(target_buffer->rga_buffer(), {0, 0, target_resolution_.width, target_resolution_.height}, 0xff00ff00U);
+      if (image.frame_profile) {
+        image.frame_profile->rga_end = std::chrono::steady_clock::now();
+      }
+      if (ui_visible) {
+        compose_private_bgr(*target_buffer, target_generation, target_index, image);
+      }
+      if (image.frame_profile) {
+        image.frame_profile->preprocess_end = std::chrono::steady_clock::now();
+      }
+      return prepared_t {
+        .layout = encoder_layout,
+        .dma_buf_fd = target_buffer->layout().dma_buf_fd,
+        .allocation_size = target_buffer->layout().allocation_size,
+        .pts = image.frame_timestamp ? static_cast<std::int64_t>(image.frame_timestamp->time_since_epoch().count()) : 0,
+        .generation = target_generation,
+        .cache_key = {target_generation, target_index},
+        .holder = std::move(holder),
+        .route = platf::rkmpp::prepared_route_e::placeholder,
+        .request_idr = image.request_idr,
+        .profile = std::move(image.frame_profile),
+        .frame_timestamp = image.frame_timestamp
+      };
+    }
+
+    /** @brief Convert a real frame into the private NV12 or BGR target selected for this route. */
+    std::optional<prepared_t> prepare_rga(
+      platf::hdmirx::hdmirx_img_t &image,
+      const platf::rkmpp::input_layout_t &source_layout,
+      std::stop_token stop_token,
+      const reclaim_callback_t &reclaim_oldest,
+      platf::rkmpp::prepared_route_e route,
+      bool ui_visible
+    ) {
+      const auto source_format = rga_format_from_mpp(source_layout.format);
+      if (!source_format) {
+        throw std::runtime_error("Unsupported V4L2 format for RKMPP RGA preprocessing");
+      }
+      const auto target_format = ui_visible ? platf::rga::pixel_format_e::bgr888 : platf::rga::pixel_format_e::nv12;
+      auto target = take_target(image, stop_token, reclaim_oldest, target_format);
+      if (!target) {
+        return std::nullopt;
+      }
+      const auto target_index = target->index;
+      auto target_buffer = target->buffer;
+      const auto target_generation = target_generation_;
+      const auto encoder_layout = encoder_layout_for(*target_buffer);
+      auto holder = retain_target(std::move(*target));
+      const auto &plane = image.frame->planes().front();
+      platf::rga::image_layout_t source {
+        .dma_buf_fd = plane.dma_buf_fd,
+        .width = source_layout.visible_width,
+        .height = source_layout.visible_height,
+        .stride = plane.bytesperline,
+        .allocation_size = plane.allocation_size,
+        .format = *source_format
+      };
+      if (image.frame_profile) {
+        image.frame_profile->rga_used = true;
+        image.frame_profile->rga_begin = std::chrono::steady_clock::now();
+      }
+      auto imported_source = platf::rga::imported_buffer_t::import(*rga_backend_, source);
+      const auto viewport = platf::hdmirx::make_viewport(
+        {source.width, source.height},
+        target_resolution_,
+        target_format == platf::rga::pixel_format_e::nv12 ? platf::hdmirx::pixel_format_e::nv12 : platf::hdmirx::pixel_format_e::generic
+      );
+      if (!viewport) {
+        throw std::runtime_error("Failed to calculate RKMPP preprocess viewport");
+      }
+      if (!platf::hdmirx::viewport_covers_target(*viewport, target_resolution_)) {
+        platf::rga::fill(target_buffer->rga_buffer(), {0, 0, target_resolution_.width, target_resolution_.height}, 0xff000000U);
+      }
+      platf::rga::process(
+        imported_source,
+        {viewport->source.left, viewport->source.top, viewport->source.width, viewport->source.height},
+        target_buffer->rga_buffer(),
+        {viewport->destination.left, viewport->destination.top, viewport->destination.width, viewport->destination.height}
+      );
+      if (image.frame_profile) {
+        image.frame_profile->rga_end = std::chrono::steady_clock::now();
+      }
+      if (ui_visible) {
+        compose_private_bgr(*target_buffer, target_generation, target_index, image);
+      }
+      if (image.frame_profile) {
+        image.frame_profile->preprocess_end = std::chrono::steady_clock::now();
+      }
+      const auto pts = static_cast<std::int64_t>(image.frame->timestamp().time_since_epoch().count());
+      image.frame.reset();
+      image.capture_format.reset();
+      return prepared_t {
+        .layout = encoder_layout,
+        .dma_buf_fd = target_buffer->layout().dma_buf_fd,
+        .allocation_size = target_buffer->layout().allocation_size,
+        .pts = pts,
+        .generation = target_generation,
+        .cache_key = {target_generation, target_index},
+        .holder = std::move(holder),
+        .route = route,
+        .request_idr = image.request_idr,
+        .profile = std::move(image.frame_profile),
+        .frame_timestamp = image.frame_timestamp
+      };
+    }
+
+    /** @brief Advance controller/UI state while keeping failures session-local. */
+    bool prepare_ui_visibility(platf::hdmirx::hdmirx_img_t &image) {
+      if (!vulkan_ui_ || !vulkan_ui_enabled_) {
+        return false;
+      }
+      try {
+        return vulkan_ui_->visible_for_frame(image);
+      } catch (const std::exception &e) {
+        vulkan_ui_->disable();
+        vulkan_ui_enabled_ = false;
+        BOOST_LOG(error) << "RKMPP Vulkan UI preparation failed; disabling overlay for this session: " << e.what();
+      }
+      return false;
+    }
+
+    /** @brief Cover a matching, exclusively published BGR capture frame in place. */
+    void compose_direct_bgr(platf::hdmirx::hdmirx_img_t &image) {
+      if (!vulkan_ui_ || !vulkan_ui_enabled_) {
+        return;
+      }
+      try {
+        vulkan_ui_->compose_capture_bgr(image);
+      } catch (const std::exception &e) {
+        vulkan_ui_->disable();
+        vulkan_ui_enabled_ = false;
+        BOOST_LOG(error) << "RKMPP direct BGR Vulkan UI composition failed; disabling overlay for this session: " << e.what();
+      }
+    }
+
+    /** @brief Cover a session-private BGR target without an RGA UI copy. */
+    void compose_private_bgr(platf::rga::target_buffer_t &target, std::uint64_t generation, std::uint32_t slot, platf::hdmirx::hdmirx_img_t &image) {
+      if (!vulkan_ui_ || !vulkan_ui_enabled_) {
+        return;
+      }
+      try {
+        vulkan_ui_->compose_private_bgr(target, generation, slot, image);
+      } catch (const std::exception &e) {
+        vulkan_ui_->disable();
+        vulkan_ui_enabled_ = false;
+        BOOST_LOG(error) << "RKMPP private BGR Vulkan UI composition failed; disabling overlay for this session: " << e.what();
+      }
+    }
+
+    std::shared_ptr<rkmpp_vulkan_ui_session_t> vulkan_ui_;  ///< Declared before targets so its allocator outlives them.
+    std::unique_ptr<platf::rga::backend_t> owned_rga_backend_;
+    std::unique_ptr<platf::rga::dma_allocator_t> owned_rga_allocator_;
+    platf::rga::backend_t *rga_backend_ {};
+    platf::rga::dma_allocator_t *rga_allocator_ {};
+    platf::hdmirx::resolution_t target_resolution_;
+    std::mutex pool_mutex_;
+    std::condition_variable_any pool_cv_;
+    std::queue<target_slot_t> free_targets_;
+    std::uint64_t target_generation_ {};
+    std::uint32_t target_leases_ {};
+    std::uint32_t target_peak_leases_ {};
+    std::uint64_t target_waits_ {};
+    bool targets_allocated_ {};
+    std::optional<platf::rga::pixel_format_e> target_format_;  ///< Format shared by both live targets.
+    bool vulkan_ui_enabled_ {true};
+    inline static std::atomic<std::uint64_t> next_target_generation_ {1};
+  };
+
+  /** @brief RKMPP encode session with an internal latest-only preprocess worker. */
+  class rkmpp_encode_session_t final: public encode_session_t {
+  public:
+    using prepared_ptr_t = std::shared_ptr<platf::rkmpp::prepared_frame_t>;
+
+    rkmpp_encode_session_t(const config_t &config, const platf::rkmpp::input_layout_t &):
+        config_(config),
+        video_format_(config.videoFormat) {}
+
+    ~rkmpp_encode_session_t() override {
+      current_prepared_.reset();
+      stop_preprocess();
+      synchronous_preprocessor_.reset();
+    }
+
+    /** @brief Synchronously prepare one probe input outside the streaming pipeline. */
+    int convert(platf::img_t &img) override {
+      try {
+        if (!synchronous_preprocessor_) {
+          synchronous_preprocessor_ = std::make_shared<rkmpp_preprocessor_t>(config_);
+        }
+        auto alias = std::shared_ptr<platf::img_t>(&img, [](platf::img_t *) {
+        });
+        std::stop_source stop;
+        auto prepared = synchronous_preprocessor_->prepare(alias, stop.get_token(), [](platf::hdmirx::hdmirx_img_t &) {
+        });
+        if (!prepared) {
           return -1;
         }
+        current_prepared_ = std::make_shared<platf::rkmpp::prepared_frame_t>(std::move(*prepared));
+        return 0;
+      } catch (const std::exception &e) {
+        BOOST_LOG(error) << "RKMPP synchronous preprocess failed: " << e.what();
+        return -1;
       }
-      if (rga_fallback_) {
-        rga_fallback_.reset();
-        BOOST_LOG(info) << "RKMPP direct path activated for matching HDMI RX timing; released RGA fallback resources"sv;
+    }
+
+    /**
+     * @brief Start the per-session worker that exclusively owns RGA and Vulkan.
+     *
+     * @param images Shared raw latest-only capture event.
+     * @return True after worker initialization succeeds.
+     */
+    bool start_preprocess(const img_event_t &images) {
+      prepared_event_ = std::make_shared<safe::event_t<prepared_ptr_t>>();
+      {
+        std::lock_guard lock(worker_mutex_);
+        worker_initialized_ = false;
+        worker_error_.clear();
       }
-      use_rga_ = false;
-      if (image_->frame_profile) {
-        image_->frame_profile->rga_used = false;
+      preprocess_thread_ = std::jthread {[this, images](std::stop_token stop_token) {
+        try {
+          platf::set_thread_name("video::preprocess");
+          platf::adjust_thread_priority(platf::thread_priority_e::high);
+          auto preprocessor = std::make_shared<rkmpp_preprocessor_t>(config_);
+          signal_worker_initialized({});
+          while (!stop_token.stop_requested() && images->running()) {
+            auto raw = images->pop(stop_token);
+            if (!raw || stop_token.stop_requested()) {
+              break;
+            }
+            auto prepared = preprocessor->prepare(raw, stop_token, [this](platf::hdmirx::hdmirx_img_t &replacement) {
+              auto displaced = prepared_event_->try_pop();
+              if (displaced) {
+                transfer_displaced(*displaced, replacement);
+              }
+            });
+            if (!prepared || stop_token.stop_requested()) {
+              break;
+            }
+            auto next = std::make_shared<platf::rkmpp::prepared_frame_t>(std::move(*prepared));
+            prepared_event_->raise_latest(next, [](prepared_ptr_t &displaced, prepared_ptr_t &replacement) {
+              merge_displaced(*displaced, *replacement);
+            });
+          }
+          if (auto pending = prepared_event_->try_pop()) {
+            pending.reset();
+          }
+          prepared_event_->stop();
+        } catch (const std::exception &e) {
+          signal_worker_initialized(e.what());
+          if (prepared_event_) {
+            if (auto pending = prepared_event_->try_pop()) {
+              pending.reset();
+            }
+            prepared_event_->stop();
+          }
+        }
+      }};
+      std::unique_lock lock(worker_mutex_);
+      worker_cv_.wait(lock, [this] {
+        return worker_initialized_;
+      });
+      if (!worker_error_.empty()) {
+        BOOST_LOG(error) << "RKMPP preprocess worker initialization failed: " << worker_error_;
+        lock.unlock();
+        stop_preprocess();
+        return false;
       }
-      if (image_->request_idr) {
-        request_idr_frame();
+      return true;
+    }
+
+    /** @brief Stop and join the preprocess worker without stopping the reusable raw event. */
+    void stop_preprocess() noexcept {
+      current_prepared_.reset();
+      if (!preprocess_thread_.joinable()) {
+        return;
       }
-      return 0;
+      preprocess_thread_.request_stop();
+      preprocess_thread_.join();
+      prepared_event_.reset();
+    }
+
+    /** @brief Pop the newest prepared input with bounded lifecycle polling. */
+    prepared_ptr_t pop_prepared(std::chrono::milliseconds wait) {
+      return prepared_event_ ? prepared_event_->pop(wait) : nullptr;
+    }
+
+    /** @brief Return whether the preprocess stage can still publish frames. */
+    bool preprocess_running() const noexcept {
+      return prepared_event_ && prepared_event_->running();
+    }
+
+    /** @brief Install the only prepared input eligible for the next encode call. */
+    void set_prepared(prepared_ptr_t prepared) {
+      current_prepared_ = std::move(prepared);
+      if (current_prepared_ && current_prepared_->profile) {
+        current_prepared_->profile->prepared_queue_exit = std::chrono::steady_clock::now();
+      }
+    }
+
+    /** @brief Return the capture timestamp of the pending prepared input. */
+    std::optional<std::chrono::steady_clock::time_point> frame_timestamp() const noexcept {
+      return current_prepared_ ? current_prepared_->frame_timestamp : std::nullopt;
     }
 
     void request_idr_frame() override {
       force_idr_ = true;
-      if (use_rga_ && rga_fallback_) {
-        rga_fallback_->request_idr_frame();
-      }
     }
 
-    void request_normal_frame() override {
-      force_idr_ = false;
-      if (use_rga_ && rga_fallback_) {
-        rga_fallback_->request_normal_frame();
-      }
-    }
+    void request_normal_frame() override {}
 
     void invalidate_ref_frames(int64_t, int64_t) override {}
 
+    /** @brief Submit the pending immutable input exactly once on the encode worker. */
     platf::rkmpp::encoded_packet_t encode() {
-      if (use_rga_) {
-        if (!rga_fallback_) {
-          throw std::runtime_error("RKMPP RGA fallback is not initialized");
-        }
-        return rga_fallback_->encode();
+      if (!current_prepared_) {
+        throw std::runtime_error("RKMPP encode called without a prepared frame");
       }
-      if (!image_ || !image_->frame) {
-        throw std::runtime_error("RKMPP encode called without an HDMI RX frame");
+      const bool layout_changed = !encoder_layout_ || *encoder_layout_ != current_prepared_->layout;
+      if (layout_changed) {
+        auto replacement = platf::rkmpp::encoder_t::create(make_rkmpp_encoder_config(config_, current_prepared_->layout));
+        encoder_ = std::move(replacement);
+        encoder_layout_ = current_prepared_->layout;
+        input_generation_.reset();
+        input_route_.reset();
+        force_idr_ = true;
       }
-      if (!direct_encoder_ready_) {
-        throw std::runtime_error("RKMPP direct encoder is not initialized");
+      if (!input_generation_ || *input_generation_ != current_prepared_->generation || !input_route_ || *input_route_ != current_prepared_->route) {
+        encoder_.clear_input_cache();
+        input_generation_ = current_prepared_->generation;
+        input_route_ = current_prepared_->route;
+        force_idr_ = true;
       }
-      if (vulkan_ui_) {
-        try {
-          vulkan_ui_->compose(*image_);
-        } catch (const std::exception &e) {
-          BOOST_LOG(error) << "RKMPP Vulkan UI composition failed; disabling overlay for this session: " << e.what();
-          vulkan_ui_->disable();
-          vulkan_ui_.reset();
-        }
-      }
-      if (force_idr_) {
+      if (force_idr_ || current_prepared_->request_idr) {
         encoder_.request_idr();
         force_idr_ = false;
       }
-      const auto input_generation = image_->frame->generation();
-      if (!input_cache_generation_ || *input_cache_generation_ != input_generation) {
-        // HDMI RX rebuilds its DMA-BUF set after source recovery. The kernel
-        // may recycle file descriptor numbers, so discard imports by
-        // generation before a new capture allocation is encoded.
-        encoder_.clear_input_cache();
-        input_cache_generation_ = input_generation;
-      }
-      platf::rkmpp::input_frame_t rkmpp_frame {
-        .layout = input_layout_,
-        .dma_buf_fd = image_->frame->planes()[0].dma_buf_fd,
-        .allocation_size = image_->frame->planes()[0].allocation_size,
-        .pts = static_cast<std::int64_t>(image_->frame->timestamp().time_since_epoch().count()),
-        .holder = image_->frame,
-        .cache_key = platf::rkmpp::input_buffer_key_t {input_generation, image_->frame->buffer_index()}
-      };
-      current_profile_ = std::move(image_->frame_profile);
-      rkmpp_frame.profile = current_profile_ ? &*current_profile_ : nullptr;
-      auto packet = encoder_.encode_packet(rkmpp_frame);
-      encoded_profile_ = std::move(current_profile_);
-      image_->frame.reset();
-      image_->capture_format.reset();
-      image_ = nullptr;
+      auto input = current_prepared_->input_frame();
+      auto packet = encoder_.encode_packet(input);
+      encoded_profile_ = std::move(current_prepared_->profile);
+      current_prepared_.reset();
       return packet;
     }
 
@@ -2788,78 +2991,76 @@ namespace video {
       return video_format_;
     }
 
-    /** @brief Move the profile completed by the most recent direct or RGA encode. */
+    /** @brief Move the profile completed by the most recent MPP submission. */
     std::optional<frame_profile_t> take_frame_profile() {
-      if (use_rga_) {
-        return rga_fallback_->take_frame_profile();
-      }
       return std::exchange(encoded_profile_, std::nullopt);
     }
 
   private:
-    /**
-     * @brief Recreate the direct encoder for a same-sized HDMI RX layout change.
-     *
-     * HDMI RX can change its pixel format or stride after a source recovery
-     * while preserving the Moonlight-requested visible dimensions. RKMPP
-     * accepts those native layouts directly, so recreating the encoder avoids
-     * an unnecessary RGA conversion to NV12.
-     *
-     * @param input_layout Current HDMI RX DMA-BUF layout.
-     */
-    void reconfigure_direct(const platf::rkmpp::input_layout_t &input_layout) {
-      BOOST_LOG(info) << (direct_encoder_ready_ ? "RKMPP direct input layout changed; recreating encoder for " : "RKMPP matching input observed; creating direct encoder for ")
-                      << input_layout.visible_width << 'x' << input_layout.visible_height
-                      << " format=" << input_layout.format
-                      << " stride=" << input_layout.horizontal_stride << 'x' << input_layout.vertical_stride;
-      auto replacement = platf::rkmpp::encoder_t::create(make_rkmpp_encoder_config(config_, input_layout));
-      encoder_ = std::move(replacement);
-      direct_encoder_ready_ = true;
-      input_layout_ = input_layout;
-      input_cache_generation_.reset();
-      force_idr_ = true;
+    /** @brief Transfer a stale prepared frame into a raw replacement before RGA. */
+    static void transfer_displaced(platf::rkmpp::prepared_frame_t &displaced, platf::hdmirx::hdmirx_img_t &replacement) {
+      if (replacement.frame_profile) {
+        ++replacement.frame_profile->prepared_replaced;
+        if (displaced.profile) {
+          replacement.frame_profile->raw_replaced += displaced.profile->raw_replaced;
+          replacement.frame_profile->prepared_replaced += displaced.profile->prepared_replaced;
+          replacement.frame_profile->target_waits += displaced.profile->target_waits;
+          replacement.frame_profile->sticky_idr_transfers += displaced.profile->sticky_idr_transfers;
+        }
+      }
+      if (displaced.request_idr) {
+        replacement.request_idr = true;
+        if (replacement.frame_profile) {
+          ++replacement.frame_profile->sticky_idr_transfers;
+        }
+      }
     }
 
-    /**
-     * @brief Convert one placeholder or size-mismatched input through RGA.
-     *
-     * @param img Image to convert.
-     * @return Zero when RGA accepted the image; otherwise nonzero.
-     */
-    int convert_with_rga(platf::img_t &img) {
-      try {
-        if (!rga_fallback_) {
-          rga_fallback_ = std::make_unique<rkmpp_rga_encode_session_t>(
-            config_,
-            input_layout_,
-            static_cast<std::uint32_t>(config_.width),
-            static_cast<std::uint32_t>(config_.height),
-            vulkan_ui_
-          );
+    /** @brief Merge a displaced prepared frame into its latest-only replacement. */
+    static void merge_displaced(platf::rkmpp::prepared_frame_t &displaced, platf::rkmpp::prepared_frame_t &replacement) {
+      if (replacement.profile) {
+        ++replacement.profile->prepared_replaced;
+        if (displaced.profile) {
+          replacement.profile->raw_replaced += displaced.profile->raw_replaced;
+          replacement.profile->prepared_replaced += displaced.profile->prepared_replaced;
+          replacement.profile->target_waits += displaced.profile->target_waits;
+          replacement.profile->sticky_idr_transfers += displaced.profile->sticky_idr_transfers;
         }
-        if (force_idr_) {
-          rga_fallback_->request_idr_frame();
-          force_idr_ = false;
-        }
-        use_rga_ = true;
-        return rga_fallback_->convert(img);
-      } catch (const std::exception &e) {
-        BOOST_LOG(error) << "RKMPP RGA fallback initialization failed: " << e.what();
-        return -1;
       }
+      if (displaced.request_idr) {
+        replacement.request_idr = true;
+        if (replacement.profile) {
+          ++replacement.profile->sticky_idr_transfers;
+        }
+      }
+    }
+
+    /** @brief Publish one initialization result exactly once. */
+    void signal_worker_initialized(std::string error) {
+      std::lock_guard lock(worker_mutex_);
+      if (worker_initialized_) {
+        return;
+      }
+      worker_error_ = std::move(error);
+      worker_initialized_ = true;
+      worker_cv_.notify_all();
     }
 
     config_t config_;
     platf::rkmpp::encoder_t encoder_;
-    platf::hdmirx::hdmirx_img_t *image_ {};
-    std::shared_ptr<rkmpp_vulkan_ui_session_t> vulkan_ui_;
-    std::unique_ptr<rkmpp_rga_encode_session_t> rga_fallback_;
-    std::optional<frame_profile_t> current_profile_;
+    std::optional<platf::rkmpp::input_layout_t> encoder_layout_;
+    std::optional<std::uint64_t> input_generation_;
+    std::optional<platf::rkmpp::prepared_route_e> input_route_;
+    prepared_ptr_t current_prepared_;
     std::optional<frame_profile_t> encoded_profile_;
-    std::optional<std::uint64_t> input_cache_generation_;  ///< HDMI RX allocation generation currently imported by MPP.
-    bool use_rga_ {};
+    std::shared_ptr<rkmpp_preprocessor_t> synchronous_preprocessor_;
+    std::shared_ptr<safe::event_t<prepared_ptr_t>> prepared_event_;
+    std::jthread preprocess_thread_;
+    std::mutex worker_mutex_;
+    std::condition_variable worker_cv_;
+    std::string worker_error_;
+    bool worker_initialized_ {};
     bool force_idr_ {};
-    bool direct_encoder_ready_ {};
     int video_format_ {};
   };
 
@@ -2985,11 +3186,10 @@ namespace video {
     } else if (auto nvenc_session = dynamic_cast<nvenc_encode_session_t *>(&session)) {
       return encode_nvenc(frame_nr, *nvenc_session, packets, channel_data, frame_timestamp);
 #ifdef SUNSHINE_BUILD_RKMPP
-    } else if (auto rkmpp_session = dynamic_cast<rkmpp_encode_session_t *>(&session); rkmpp_session || dynamic_cast<rkmpp_rga_encode_session_t *>(&session)) {
-      auto rga_session = dynamic_cast<rkmpp_rga_encode_session_t *>(&session);
+    } else if (auto rkmpp_session = dynamic_cast<rkmpp_encode_session_t *>(&session)) {
       try {
         auto t0 = std::chrono::steady_clock::now();
-        auto encoded = rkmpp_session ? rkmpp_session->encode() : rga_session->encode();
+        auto encoded = rkmpp_session->encode();
         auto t1 = std::chrono::steady_clock::now();
         if (frame_timestamp) {
           BOOST_LOG(debug) << "RKMPP capture-to-encode-output latency: " << std::chrono::duration_cast<std::chrono::microseconds>(t1 - *frame_timestamp).count() << " us";
@@ -3002,12 +3202,12 @@ namespace video {
           encoded.output_intra(),
           encoded.data(),
           encoded.size(),
-          (rkmpp_session ? rkmpp_session->video_format() : rga_session->video_format()) == 0 ? platf::rkmpp::codec_e::h264 : platf::rkmpp::codec_e::h265
+          rkmpp_session->video_format() == 0 ? platf::rkmpp::codec_e::h264 : platf::rkmpp::codec_e::h265
         );
         auto packet = std::make_unique<packet_raw_rkmpp>(std::move(encoded), frame_nr, idr);
         packet->channel_data = channel_data;
         packet->frame_timestamp = frame_timestamp;
-        packet->frame_profile = rkmpp_session ? rkmpp_session->take_frame_profile() : rga_session->take_frame_profile();
+        packet->frame_profile = rkmpp_session->take_frame_profile();
         if (packet->frame_profile) {
           packet->frame_profile->frame_index = frame_nr;
         }
@@ -3546,6 +3746,52 @@ namespace video {
     auto packets = mail::man->queue<packet_t>(mail::video_packets);
     auto idr_events = mail->event<bool>(mail::idr);
     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
+
+#ifdef SUNSHINE_BUILD_RKMPP
+    if (auto *rkmpp_session = dynamic_cast<rkmpp_encode_session_t *>(session.get())) {
+      if (!rkmpp_session->start_preprocess(images)) {
+        return;
+      }
+      auto preprocess_guard = util::fail_guard([rkmpp_session] {
+        rkmpp_session->stop_preprocess();
+      });
+      while (true) {
+        while (invalidate_ref_frames_events->peek()) {
+          if (auto frames = invalidate_ref_frames_events->pop(0ms)) {
+            rkmpp_session->invalidate_ref_frames(frames->first, frames->second);
+          }
+        }
+        if (idr_events->peek()) {
+          idr_events->pop();
+          rkmpp_session->request_idr_frame();
+        }
+        if (shutdown_event->peek() || !images->running() || (reinit_event.peek() && frame_nr > 1)) {
+          break;
+        }
+
+        auto prepared = rkmpp_session->pop_prepared(20ms);
+        if (!prepared) {
+          if (!rkmpp_session->preprocess_running()) {
+            BOOST_LOG(error) << "RKMPP preprocess worker stopped before the stream ended"sv;
+            return;
+          }
+          continue;
+        }
+        if (shutdown_event->peek() || !images->running() || (reinit_event.peek() && frame_nr > 1)) {
+          break;
+        }
+        rkmpp_session->set_prepared(std::move(prepared));
+        const auto frame_timestamp = rkmpp_session->frame_timestamp();
+        if (encode(frame_nr++, *rkmpp_session, packets, channel_data, frame_timestamp)) {
+          BOOST_LOG(error) << "Could not encode RKMPP video packet"sv;
+          return;
+        }
+        rkmpp_session->request_normal_frame();
+        platf::enable_mouse_keys();
+      }
+      return;
+    }
+#endif
 
     // convert() may retain references into its input until the following encode().
     // Keep the dummy image alive for that interval, just like captured images in
@@ -4124,21 +4370,6 @@ namespace video {
     config_t config,
     void *channel_data
   ) {
-#ifdef SUNSHINE_BUILD_RKMPP
-    const bool rkmpp = chosen_encoder && chosen_encoder->name == "rkmpp";
-    if (rkmpp) {
-      bool expected = false;
-      if (!rkmpp_session_active.compare_exchange_strong(expected, true)) {
-        BOOST_LOG(error) << "RKMPP/HDMI RX rejects a second streaming session while one is active";
-        return;
-      }
-    }
-    auto rkmpp_guard = util::fail_guard([&]() {
-      if (rkmpp) {
-        rkmpp_session_active.store(false);
-      }
-    });
-#endif
     auto idr_events = mail->event<bool>(mail::idr);
 
     idr_events->raise(true);

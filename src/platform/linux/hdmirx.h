@@ -226,6 +226,7 @@ namespace platf::hdmirx {
     std::uint32_t moonlight_height {};  ///< Requested Moonlight height for the UI snapshot.
     std::uint32_t input_width {};  ///< Current HDMI input width, or zero when unavailable.
     std::uint32_t input_height {};  ///< Current HDMI input height, or zero when unavailable.
+    bool direct_bgr_ui_safe {};  ///< Whether this frame is published to only one session and may receive a Vulkan BGR ROI cover.
   };
 
   /**

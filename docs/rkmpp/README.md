@@ -16,7 +16,10 @@
 ```text
 HDMI 信号源
   → HDMI RX / V4L2 DMA-BUF（RX 输出的原始帧格式）
-  → RKMPP 硬件编码（H.264/H.265）
+  → 共享 capture thread（DQBUF + latest-only 扇出）
+  → 会话 preprocess worker（RGA / Vulkan UI / 双 target）
+  → prepared latest-only mailbox（容量 1）
+  → 会话 encode worker（RKMPP H.264/H.265）
   → 可由 CPU 映射的码流缓冲
   → Sunshine RTP/UDP
   → Moonlight
@@ -25,6 +28,8 @@ HDMI 信号源
 - HDMI 输入模式由信号源决定，RX 通过 EDID 宣告可接受的能力。
 - 捕获后端不假定或强制 HDMI RX 输出为 NV12，应支持 RX / V4L2 驱动提供的所有原始帧格式。
 - HDMI RX 到 RKMPP 以 DMA-BUF 传递原始帧及其格式信息，避免 CPU 复制或软件颜色转换；编码所需的格式处理由 RKMPP 硬件编码链路完成。
+- 输入尺寸/layout 匹配且 UI 隐藏时，preprocess 直接转移 capture lease，保持零拷贝；单会话、尺寸匹配的 BGR888 可见 UI 也直接由 Vulkan 写 capture DMA-BUF，不经过 RGA。NV12 可见 UI、缩放或多会话写隔离使用每会话独占的两个 BGR888 target，使下一帧预处理可与上一帧 MPP 编码并行。
+- raw 与 prepared 队列都只保留最新一帧。压力下优先丢弃尚未编码的旧 prepared，立即回收其 target，并把 IDR 请求转移到下一张实际编码帧；队列不会动态增长，也不会用重复帧填满 VPU。
 - RKMPP 输出码流直接包装为 Sunshine 所需的数据包后发送，避免额外的码流复制。
 - RK3588 不具备 AV1 硬件编码能力，本项目暂不支持 AV1 编码。
 
@@ -222,15 +227,14 @@ rkmpp_disable_reencode = disabled
 先按住 `Start`，再点按 `Back/Select` 即可立即打开或关闭，触发后需要完全释放组合键。Start
 会先作为 UI 修饰键被截获；如果没有继续按 Select，松开 Start 时会向当前应用补发一次普通点击。
 Dear ImGui 通过官方 Vulkan renderer backend 在按输出分辨率和 UI 大小档位自适应的 BGR surface 中绘制
-当前页面。BGR888 直通时，Vulkan 按 capture generation 与 slot 缓存 buffer import，并把
-面板直接 copy 到当前 HDMI RX DMA-BUF 底部居中的 ROI；这条路径不经过 RGA，也不做 CPU
-像素复制。NV12 UI 可见时，HDMI RX capture DMA-BUF 始终作为只读 RGA source：RGA 先把
-完整帧复制到隔离的 CMA NV12 target，再把 Vulkan 发布到共享 BGR DMA-BUF 的面板转换覆盖到
-target 的 UI ROI，最后由 RKMPP 编码 target。不得把 rk_hdmirx 的生产者 allocation 作为 RGA
-destination；实机证明这样会使后续 capture 的 UV 数据别名到 Y 数据并产生持续绿屏。视频本身
-进入尺寸不匹配的 RGA fallback 时复用同一 target 和面板。页面状态不变时不会重复提交 ImGui
-绘制；UI 隐藏且尺寸匹配时 NV12 继续直通，不执行 RGA。ROI 的下边缘安全距离与页面尺寸一起
-按输出分辨率和 UI 大小档位缩放。
+当前页面。单会话且尺寸匹配的 BGR888 输入由 Vulkan 直接覆盖 HDMI RX capture DMA-BUF 的 UI ROI，
+不执行 RGA。NV12 输入则由 RGA 把完整帧转换到会话私有的 CMA BGR888 target，Vulkan 再直接覆盖
+该 BGR target，最后由 RKMPP 编码；多会话或尺寸不匹配的 BGR888 也使用同一隔离路径。不得把
+rk_hdmirx 的 NV12 生产者 allocation 作为 RGA destination，也不得用 RGA 把 Vulkan 渲染结果拷回
+NV12；实机证明前一种写法会使后续 capture 的 UV 数据别名到 Y 数据，后一种写法会产生整幅绿屏。
+私有路径复用同一组两个 target，使下一帧 RGA/Vulkan 可以与上一帧 MPP 重叠。页面状态不变时不会
+重复提交 ImGui 绘制；UI 隐藏且尺寸/layout 匹配时所有支持的输入格式都继续零拷贝直通，不执行 RGA。
+ROI 的下边缘安全距离与页面尺寸一起按输出分辨率和 UI 大小档位缩放。
 
 ~~~text
 vulkan_ui = enabled
@@ -248,15 +252,14 @@ fallback RGA 失败时，Sunshine 会在当前会话中关闭 UI 并继续基本
 
 Moonlight 请求的分辨率与 HDMI RX 实际可见分辨率不一致时，Sunshine 使用 RGA 执行视频
 硬件缩放、颜色转换以及保持宽高比的黑边或居中裁剪。尺寸一致且 UI 隐藏时，原始 HDMI RX
-DMA-BUF 直接交给 RKMPP；恢复后格式或 stride 变化会重建直通编码器。BGR888 可见 UI 仍由
-Vulkan 直接写 capture ROI；NV12 可见 UI 则临时走隔离 target 的完整帧 RGA copy，再在 target
-上做 UI ROI 合成，避免向 rk_hdmirx capture allocation 写入。
+DMA-BUF 直接交给 RKMPP；恢复后格式或 stride 变化会重建直通编码器。单会话 BGR888 可见 UI
+仍由 Vulkan 直接写 capture ROI；NV12 可见 UI 则完整 RGA 转换到隔离的 BGR888 target，再由
+Vulkan 直接写 target 的 UI ROI，避免向 rk_hdmirx capture allocation 写入或让 RGA 接触 Vulkan
+渲染结果。
 
-RGA 转换路径使用一个可复用的 NV12 目标 DMA-BUF。同步编码在消费完成后归还该缓冲；
-初始化阶段产生但未编码的占位图像也会在下一次转换前主动释放。这样可以降低 4K CMA
-峰值，并避免唯一缓冲被占用后导致首帧断流。1080p 与 4K 的精确输入均已验证进入直通
-编码；RGA fallback 的 DMA-BUF smoke 连续三轮后 FD 数保持不变，4K fallback
-长时间稳定性验收也已完成。
+RGA 转换路径使用两个可复用目标 DMA-BUF，并按当前路径整体保持为 NV12 或 BGR888；切换格式前
+会回收旧 prepared frame 并等待 MPP 归还 lease，任何时刻都不会扩展到第三个 target。同步编码在
+消费完成后归还该缓冲；初始化阶段产生但未编码的占位图像也会在下一次转换前主动释放。
 
 ## EDID 协商
 
@@ -306,7 +309,7 @@ PulseAudio 后端使用 `pa_threaded_mainloop`，并在 mainloop lock 内串行�
 启用 Trace/Debug 日志或 `rkmpp_profile` 后，可观察：
 
 - **RGA timings**：`setup`、`fill`、`process/resize` 的微秒级耗时。
-- **NV12 UI compose**：可见 UI 的隔离 target 完整帧 copy 计入 RGA 指标，面板 ROI 合成计入 Timeline 的 UI compose 阶段。
+- **NV12 UI compose**：NV12 到私有 BGR888 target 的完整帧转换计入 RGA 指标，Vulkan 对 BGR target 的 ROI 覆盖计入 Timeline 的 UI compose 阶段。
 - **MPP encode latency**：MPP submit、output wait 和完整编码耗时。
 - **RKMPP capture-to-send latency**：HDMI RX dequeue、编码、封包到网络提交的主机侧分段耗时。
 

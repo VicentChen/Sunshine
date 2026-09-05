@@ -11,6 +11,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <stop_token>
 #include <vector>
 
 // local includes
@@ -50,6 +51,41 @@ namespace safe {
     }
 
     /**
+     * @brief Replace the pending value while atomically merging displaced state.
+     *
+     * This is intended for latest-only mailboxes whose control bits must not
+     * disappear when a producer outruns its consumer. The merge callable is
+     * invoked under the event lock before the replacement becomes visible.
+     *
+     * @param value New latest value.
+     * @param merge Callable receiving the displaced and replacement values.
+     * @return True when an older pending value was replaced.
+     */
+    template<class Merge>
+    bool raise_latest(T value, Merge &&merge) {
+      std::lock_guard lg {_lock};
+      if (!_continue) {
+        return false;
+      }
+
+      const bool replaced = static_cast<bool>(_status);
+      if (replaced) {
+        if constexpr (std::is_same_v<std::optional<T>, status_t>) {
+          std::invoke(std::forward<Merge>(merge), *_status, value);
+        } else {
+          std::invoke(std::forward<Merge>(merge), _status, value);
+        }
+      }
+      if constexpr (std::is_same_v<std::optional<T>, status_t>) {
+        _status = std::make_optional<T>(std::move(value));
+      } else {
+        _status = std::move(value);
+      }
+      _cv.notify_all();
+      return replaced;
+    }
+
+    /**
      * @brief Try to remove and return the next queued item without any further wait
      *
      * @return Removed queue item, or empty result when the queue is stopped or empty.
@@ -81,6 +117,34 @@ namespace safe {
         _cv.wait(ul);
 
         if (!_continue) {
+          return util::false_v<status_t>;
+        }
+      }
+
+      auto val = std::move(_status);
+      _status = util::false_v<status_t>;
+      return val;
+    }
+
+    /**
+     * @brief Remove the pending value, waiting until data, closure, or cancellation.
+     *
+     * @param stop_token Cooperative cancellation token that interrupts the wait.
+     * @return Removed value, or empty status after closure/cancellation.
+     */
+    status_t pop(std::stop_token stop_token) {
+      std::stop_callback wake_waiter {stop_token, [this]() {
+                                        std::lock_guard lock {_lock};
+                                        _cv.notify_all();
+                                      }};
+      std::unique_lock ul {_lock};
+      if (!_continue || stop_token.stop_requested()) {
+        return util::false_v<status_t>;
+      }
+
+      while (!_status) {
+        _cv.wait(ul);
+        if (!_continue || stop_token.stop_requested()) {
           return util::false_v<status_t>;
         }
       }
