@@ -45,6 +45,7 @@ extern "C" {
   #include "platform/linux/ui_controller.h"
   #ifdef SUNSHINE_BUILD_VULKAN
     #include "platform/linux/vulkan_ui.h"
+    #include "platform/linux/vulkan_ui_surface.h"
   #endif
 #endif
 
@@ -1957,9 +1958,9 @@ namespace video {
       if (!backend_ || !allocator_) {
         throw std::runtime_error("Vulkan UI failed to initialize RGA resources");
       }
-      rebuild_surfaces(platf::ui::ui_size_e::standard);
+      rebuild_surface(platf::ui::ui_size_e::standard, false);
   #ifdef SUNSHINE_BUILD_VULKAN
-      BOOST_LOG(info) << "RKMPP Vulkan UI initialized on " << standard_surface_->renderer->device_name()
+      BOOST_LOG(info) << "RKMPP Vulkan UI initialized on " << surface_->renderer->device_name()
                       << ": hidden until Start is held and Select/Back is pressed; standard="
                       << metrics_.standard_panel.width << 'x' << metrics_.standard_panel.height
                       << " profile=" << metrics_.profile_panel.width << 'x' << metrics_.profile_panel.height
@@ -2001,6 +2002,8 @@ namespace video {
       }
       backend_attached_ = false;
       platf::ui::global_controller().detach_backend();
+      // Release optional CMA surfaces and their DMA-BUF imports before retrying video.
+      surface_.reset();
     }
 
     /** @brief Advance UI state and report whether the current page is visible. */
@@ -2137,46 +2140,50 @@ namespace video {
     }
 
     /**
-     * @brief Atomically rebuild cached UI surfaces after the user changes size.
+     * @brief Keep only the active page-family surface within the CMA budget.
      *
-     * A failed runtime resize retains the last working surfaces so the
-     * controller can still close or reopen the UI.
+     * Release the old surface and renderer imports before changing page family
+     * or size. A failed change recreates the last working layout for rendering.
+     *
+     * @param size Requested UI size tier.
+     * @param profile Whether the visible page needs the wider Profile layout.
      */
-    void rebuild_surfaces(platf::ui::ui_size_e size) {
-      if (rendered_ui_size_ && *rendered_ui_size_ == size) {
-        return;
+    void rebuild_surface(platf::ui::ui_size_e size, bool profile) {
+      const auto request = std::pair {size, profile};
+      if (failed_surface_request_ && *failed_surface_request_ != request) {
+        failed_surface_request_.reset();
       }
-      if (failed_ui_size_ && *failed_ui_size_ == size) {
+      if (surface_ && ((rendered_ui_size_ == size && rendered_profile_ == profile) || failed_surface_request_ == request)) {
         return;
       }
       const auto next_metrics = platf::vulkan_ui::make_layout_metrics(output_width_, output_height_, size);
-      std::unique_ptr<surface_t> next_standard;
-      std::unique_ptr<surface_t> next_profile;
+      const auto previous_panel = surface_ ? std::make_optional(surface_->panel) : std::nullopt;
       try {
-        next_standard = make_surface(next_metrics.standard_panel, next_metrics);
-        next_profile = make_surface(next_metrics.profile_panel, next_metrics);
+        platf::vulkan_ui::replace_surface_without_overlap(
+          surface_,
+          [&] {
+            return make_surface(profile ? next_metrics.profile_panel : next_metrics.standard_panel, next_metrics);
+          },
+          [&] {
+            return previous_panel ? make_surface(*previous_panel, metrics_) : nullptr;
+          }
+        );
       } catch (const std::exception &e) {
-        if (!standard_surface_ || !profile_surface_) {
+        if (!surface_) {
           throw;
         }
-        failed_ui_size_ = size;
-        BOOST_LOG(error) << "RKMPP Vulkan UI size change failed; retaining the last working surfaces: " << e.what();
+        failed_surface_request_ = request;
+        BOOST_LOG(error) << "RKMPP Vulkan UI surface change failed; restored the last working layout: " << e.what();
         return;
       }
       metrics_ = next_metrics;
-      standard_surface_ = std::move(next_standard);
-      profile_surface_ = std::move(next_profile);
       rendered_ui_size_ = size;
-      failed_ui_size_.reset();
-      BOOST_LOG(info) << "RKMPP Vulkan UI size changed to " << static_cast<unsigned int>(size)
-                      << ": standard=" << metrics_.standard_panel.width << 'x' << metrics_.standard_panel.height
-                      << " profile=" << metrics_.profile_panel.width << 'x' << metrics_.profile_panel.height
+      rendered_profile_ = profile;
+      failed_surface_request_.reset();
+      BOOST_LOG(info) << "RKMPP Vulkan UI active surface: size=" << static_cast<unsigned int>(size)
+                      << " profile=" << profile
+                      << " dimensions=" << surface_->panel.width << 'x' << surface_->panel.height
                       << " body-font=" << metrics_.body_font_pixels;
-    }
-
-    /** @brief Select the wide Profile surface without changing its information topology. */
-    surface_t &surface_for_page(platf::ui::page_e page) noexcept {
-      return page == platf::ui::page_e::profile ? *profile_surface_ : *standard_surface_;
     }
 
     /** @brief Convert one collector metric to the renderer-independent UI form. */
@@ -2238,11 +2245,8 @@ namespace video {
         return;
       }
   #ifdef SUNSHINE_BUILD_VULKAN
-      if (standard_surface_) {
-        standard_surface_->renderer->invalidate_capture_targets();
-      }
-      if (profile_surface_) {
-        profile_surface_->renderer->invalidate_capture_targets();
+      if (surface_) {
+        surface_->renderer->invalidate_capture_targets();
       }
   #endif
       capture_generation_ = generation;
@@ -2296,8 +2300,8 @@ namespace video {
         return nullptr;
       }
   #ifdef SUNSHINE_BUILD_VULKAN
-      rebuild_surfaces(snapshot.ui_size);
-      auto &surface = surface_for_page(snapshot.page);
+      rebuild_surface(snapshot.ui_size, snapshot.page == platf::ui::page_e::profile);
+      auto &surface = *surface_;
       const auto model = platf::vulkan_ui::make_render_model(surface.panel.width, surface.panel.height, snapshot);
       const auto ui_render_begin = std::chrono::steady_clock::now();
       if (surface.renderer->render(model)) {
@@ -2321,10 +2325,10 @@ namespace video {
     platf::vulkan_ui::layout_metrics_t metrics_;
     std::unique_ptr<platf::rga::backend_t> backend_;
     std::unique_ptr<platf::rga::dma_allocator_t> allocator_;
-    std::unique_ptr<surface_t> standard_surface_;
-    std::unique_ptr<surface_t> profile_surface_;
-    std::optional<platf::ui::ui_size_e> rendered_ui_size_;  ///< Size tier used by the allocated surfaces.
-    std::optional<platf::ui::ui_size_e> failed_ui_size_;  ///< Failed tier suppressed until the user selects another size.
+    std::unique_ptr<surface_t> surface_;  ///< Only the visible page family owns a CMA surface.
+    std::optional<platf::ui::ui_size_e> rendered_ui_size_;  ///< Size tier of the active surface.
+    bool rendered_profile_ {};  ///< Whether the active surface has the wider Profile layout.
+    std::optional<std::pair<platf::ui::ui_size_e, bool>> failed_surface_request_;  ///< Suppress a failed request until selection changes.
     std::optional<std::uint64_t> capture_generation_;
     input::xbox_remote_status_t gamepad_status_;  ///< Last sanitized gamepad lifecycle poll.
     std::optional<std::chrono::steady_clock::time_point> last_gamepad_poll_;  ///< Limits lifecycle polling on the frame path.
@@ -2402,67 +2406,79 @@ namespace video {
       if (image->frame_profile) {
         image->frame_profile->capture_queue_exit = std::chrono::steady_clock::now();
       }
-      if (image->placeholder) {
-        return prepare_placeholder(*image, stop_token, reclaim_oldest, prepare_ui_visibility(*image));
-      }
-      if (!image->frame || !image->capture_format || image->frame->planes().size() != 1) {
-        throw std::runtime_error("RKMPP preprocess received incomplete HDMI frame metadata");
-      }
-
-      const auto &plane = image->frame->planes().front();
-      const auto live_layout = platf::rkmpp::make_input_layout_from_plane(
-        image->capture_format->width,
-        image->capture_format->height,
-        image->capture_format->mpp_format,
-        plane.bytesperline,
-        plane.sizeimage
-      );
-      if (!live_layout) {
-        throw std::runtime_error("RKMPP preprocess source frame has an invalid post-recovery layout");
-      }
-      const platf::hdmirx::resolution_t input_resolution {live_layout->visible_width, live_layout->visible_height};
-      const bool dimensions_match = !platf::hdmirx::needs_conversion(input_resolution, target_resolution_);
-      const auto ui_path = platf::rkmpp::select_ui_preprocess_path(
-        live_layout->format,
-        dimensions_match,
+      return platf::rkmpp::prepare_with_optional_ui(
         prepare_ui_visibility(*image),
-        image->direct_bgr_ui_safe
-      );
-      if (!dimensions_match || ui_path == platf::rkmpp::ui_preprocess_path_e::private_bgr) {
-        return prepare_rga(
-          *image,
-          *live_layout,
-          stop_token,
-          reclaim_oldest,
-          platf::rkmpp::prepared_route_e::rga,
-          ui_path == platf::rkmpp::ui_preprocess_path_e::private_bgr
-        );
-      }
-      if (ui_path == platf::rkmpp::ui_preprocess_path_e::direct_bgr) {
-        compose_direct_bgr(*image);
-      }
+        [&](bool ui_visible) -> std::optional<prepared_t> {
+          if (image->placeholder) {
+            return prepare_placeholder(*image, stop_token, reclaim_oldest, ui_visible);
+          }
+          if (!image->frame || !image->capture_format || image->frame->planes().size() != 1) {
+            throw std::runtime_error("RKMPP preprocess received incomplete HDMI frame metadata");
+          }
 
-      if (image->frame_profile) {
-        image->frame_profile->rga_used = false;
-        image->frame_profile->preprocess_end = std::chrono::steady_clock::now();
-      }
-      const auto generation = image->frame->generation();
-      const auto index = image->frame->buffer_index();
-      prepared_t prepared {
-        .layout = *live_layout,
-        .dma_buf_fd = plane.dma_buf_fd,
-        .allocation_size = plane.allocation_size,
-        .pts = static_cast<std::int64_t>(image->frame->timestamp().time_since_epoch().count()),
-        .generation = generation,
-        .cache_key = {generation, index},
-        .holder = std::move(image->frame),
-        .route = platf::rkmpp::prepared_route_e::direct,
-        .request_idr = image->request_idr,
-        .profile = std::move(image->frame_profile),
-        .frame_timestamp = image->frame_timestamp
-      };
-      image->capture_format.reset();
-      return prepared;
+          const auto &plane = image->frame->planes().front();
+          const auto live_layout = platf::rkmpp::make_input_layout_from_plane(
+            image->capture_format->width,
+            image->capture_format->height,
+            image->capture_format->mpp_format,
+            plane.bytesperline,
+            plane.sizeimage
+          );
+          if (!live_layout) {
+            throw std::runtime_error("RKMPP preprocess source frame has an invalid post-recovery layout");
+          }
+          const platf::hdmirx::resolution_t input_resolution {live_layout->visible_width, live_layout->visible_height};
+          const bool dimensions_match = !platf::hdmirx::needs_conversion(input_resolution, target_resolution_);
+          const auto ui_path = platf::rkmpp::select_ui_preprocess_path(
+            live_layout->format,
+            dimensions_match,
+            ui_visible,
+            image->direct_bgr_ui_safe
+          );
+          if (!dimensions_match || ui_path == platf::rkmpp::ui_preprocess_path_e::private_bgr) {
+            return prepare_rga(
+              *image,
+              *live_layout,
+              stop_token,
+              reclaim_oldest,
+              platf::rkmpp::prepared_route_e::rga,
+              ui_path == platf::rkmpp::ui_preprocess_path_e::private_bgr
+            );
+          }
+          if (ui_path == platf::rkmpp::ui_preprocess_path_e::direct_bgr) {
+            compose_direct_bgr(*image);
+          }
+
+          if (image->frame_profile) {
+            image->frame_profile->rga_used = false;
+            image->frame_profile->preprocess_end = std::chrono::steady_clock::now();
+          }
+          const auto generation = image->frame->generation();
+          const auto index = image->frame->buffer_index();
+          prepared_t prepared {
+            .layout = *live_layout,
+            .dma_buf_fd = plane.dma_buf_fd,
+            .allocation_size = plane.allocation_size,
+            .pts = static_cast<std::int64_t>(image->frame->timestamp().time_since_epoch().count()),
+            .generation = generation,
+            .cache_key = {generation, index},
+            .holder = std::move(image->frame),
+            .route = platf::rkmpp::prepared_route_e::direct,
+            .request_idr = image->request_idr,
+            .profile = std::move(image->frame_profile),
+            .frame_timestamp = image->frame_timestamp
+          };
+          image->capture_format.reset();
+          return prepared;
+        },
+        [&](const std::system_error &error) {
+          vulkan_ui_enabled_ = false;
+          if (vulkan_ui_) {
+            vulkan_ui_->disable();
+          }
+          BOOST_LOG(warning) << "RKMPP UI buffer allocation failed; continuing this session without overlay: " << error.what();
+        }
+      );
     }
 
   private:
@@ -2892,6 +2908,7 @@ namespace video {
           }
           prepared_event_->stop();
         } catch (const std::exception &e) {
+          BOOST_LOG(error) << "RKMPP preprocess worker failed: " << e.what();
           signal_worker_initialized(e.what());
           if (prepared_event_) {
             if (auto pending = prepared_event_->try_pop()) {
@@ -3750,6 +3767,7 @@ namespace video {
 #ifdef SUNSHINE_BUILD_RKMPP
     if (auto *rkmpp_session = dynamic_cast<rkmpp_encode_session_t *>(session.get())) {
       if (!rkmpp_session->start_preprocess(images)) {
+        shutdown_event->raise(true);
         return;
       }
       auto preprocess_guard = util::fail_guard([rkmpp_session] {
@@ -3771,8 +3789,13 @@ namespace video {
 
         auto prepared = rkmpp_session->pop_prepared(20ms);
         if (!prepared) {
+          // A capture stop or display reinit can race with the blocking pop.
+          if (shutdown_event->peek() || !images->running() || reinit_event.peek()) {
+            break;
+          }
           if (!rkmpp_session->preprocess_running()) {
-            BOOST_LOG(error) << "RKMPP preprocess worker stopped before the stream ended"sv;
+            BOOST_LOG(error) << "RKMPP preprocess worker stopped before the stream ended; ending session"sv;
+            shutdown_event->raise(true);
             return;
           }
           continue;
@@ -3784,6 +3807,7 @@ namespace video {
         const auto frame_timestamp = rkmpp_session->frame_timestamp();
         if (encode(frame_nr++, *rkmpp_session, packets, channel_data, frame_timestamp)) {
           BOOST_LOG(error) << "Could not encode RKMPP video packet"sv;
+          shutdown_event->raise(true);
           return;
         }
         rkmpp_session->request_normal_frame();

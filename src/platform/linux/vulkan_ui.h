@@ -79,7 +79,7 @@ namespace platf::vulkan_ui {
 
   /** @brief Latest-frame and recent-frame-average geometry derived without Vulkan state. */
   struct timeline_geometry_t {
-    static constexpr std::size_t bar_capacity = video::frame_profile_timeline_snapshot_t::frame_capacity * video::frame_profile_timeline_frame_t::max_spans;
+    static constexpr std::size_t bar_capacity = video::frame_profile_timeline_frame_t::max_spans;  ///< Each view holds one bar per stage; history is aggregated, not concatenated.
 
     std::array<timeline_bar_t, bar_capacity> bars;  ///< Event bars from only the latest completed frame.
     std::array<timeline_bar_t, bar_capacity> average_bars;  ///< RX EOF-aligned averages from recent frames.

@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <system_error>
 
 namespace platf::rkmpp {
   /** @brief Route used to produce one immutable RKMPP input. */
@@ -52,6 +53,31 @@ namespace platf::rkmpp {
       return ui_preprocess_path_e::direct_bgr;
     }
     return ui_preprocess_path_e::private_bgr;
+  }
+
+  /**
+   * @brief Retry a frame without optional UI when its contiguous allocation fails.
+   *
+   * The prepare callback must retain the raw input until it returns successfully.
+   * Only memory exhaustion in a visible-UI attempt permits one retry; errors in
+   * the required video path propagate to the session failure handler.
+   *
+   * @param ui_visible Whether this frame requests UI composition.
+   * @param prepare Prepare the same raw frame with the requested UI state.
+   * @param disable_ui Release optional UI resources and report the allocation error.
+   * @return The prepared frame, including an empty result after cancellation.
+   */
+  template<class Prepare, class DisableUi>
+  auto prepare_with_optional_ui(bool ui_visible, Prepare &&prepare, DisableUi &&disable_ui) -> decltype(prepare(ui_visible)) {
+    try {
+      return prepare(ui_visible);
+    } catch (const std::system_error &error) {
+      if (!ui_visible || error.code() != std::errc::not_enough_memory) {
+        throw;
+      }
+      disable_ui(error);
+    }
+    return prepare(false);
   }
 
   /**

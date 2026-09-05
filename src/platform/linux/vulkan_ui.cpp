@@ -533,7 +533,7 @@ namespace platf::vulkan_ui {
       ImGui::EndTable();
     }
 
-    /** @brief Build the current modal page entirely through Dear ImGui. */
+    /** @brief Build the modal widgets while the render-pass clear supplies the opaque root background. */
     void build_modal_imgui_page(const render_model_t &model, const layout_metrics_t &metrics, ImFont *title_font) {
       auto &io = ImGui::GetIO();
       io.DisplaySize = {static_cast<float>(model.width), static_cast<float>(model.height)};
@@ -551,7 +551,7 @@ namespace platf::vulkan_ui {
       ImGui::SetNextWindowSize(io.DisplaySize);
       constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                                          ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus |
-                                         ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs;
+                                         ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBackground;
       ImGui::Begin("Sunshine Vulkan UI", nullptr, flags);
       if (model.page == platf::ui::page_e::profile && model.profile.timeline.frame_count != 0) {
         const auto &latest = model.profile.timeline.frames[model.profile.timeline.frame_count - 1U];
@@ -718,6 +718,9 @@ namespace platf::vulkan_ui {
       for (std::size_t span_index = 0; span_index < span_count; ++span_index) {
         const auto &span = frame.spans[span_index];
         const auto stage_index = static_cast<std::size_t>(span.stage);
+        if (stage_index >= average_count.size()) {
+          return {};
+        }
         average_start_sum[stage_index] += span.start_us;
         average_duration_sum[stage_index] += span.end_us - span.start_us;
         ++average_count[stage_index];

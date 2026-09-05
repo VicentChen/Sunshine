@@ -291,6 +291,55 @@ namespace {
     EXPECT_LT(average.left, average.right);
   }
 
+  TEST(VulkanUiModel, RetainsEveryStageWhenAveragingAFullHistory) {
+    video::frame_profile_timeline_snapshot_t timeline {};
+    timeline.frame_count = timeline.frames.size();
+    for (std::size_t frame_index = 0; frame_index < timeline.frames.size(); ++frame_index) {
+      auto &frame = timeline.frames[frame_index];
+      frame.frame_index = frame_index;
+      frame.end_us = 20000;
+      frame.span_count = frame.spans.size();
+      for (std::size_t stage = 0; stage < frame.spans.size(); ++stage) {
+        const auto start = static_cast<std::int64_t>(stage * 1000 + frame_index * 2);
+        frame.spans[stage] = {
+          static_cast<video::frame_profile_timeline_stage_e>(stage),
+          video::frame_profile_timeline_lane_e::ui,
+          start,
+          start + 100 + static_cast<std::int64_t>(frame_index * 2)
+        };
+      }
+    }
+
+    const auto geometry = platf::vulkan_ui::make_timeline_geometry(timeline);
+    ASSERT_EQ(geometry.bar_count, video::frame_profile_timeline_frame_t::max_spans);
+    ASSERT_EQ(geometry.average_bar_count, video::frame_profile_timeline_frame_t::max_spans);
+    const auto last_frame = static_cast<std::int64_t>(timeline.frame_count - 1U);
+    for (std::size_t stage = 0; stage < geometry.bar_count; ++stage) {
+      SCOPED_TRACE(stage);
+      const auto base = static_cast<std::int64_t>(stage * 1000);
+      const auto &latest = geometry.bars[stage];
+      const auto &average = geometry.average_bars[stage];
+      EXPECT_EQ(latest.stage, static_cast<video::frame_profile_timeline_stage_e>(stage));
+      EXPECT_EQ(latest.frame_index, last_frame);
+      EXPECT_EQ(latest.start_us, base + last_frame * 2);
+      EXPECT_EQ(latest.end_us, base + 100 + last_frame * 4);
+      EXPECT_EQ(average.stage, latest.stage);
+      EXPECT_EQ(average.sample_count, timeline.frame_count);
+      EXPECT_EQ(average.start_us, base + last_frame);
+      EXPECT_EQ(average.end_us, base + 100 + last_frame * 2);
+    }
+  }
+
+  TEST(VulkanUiModel, RejectsOutOfRangeStageBeforeIndexingTimelineAccumulators) {
+    video::frame_profile_timeline_snapshot_t timeline {.frame_count = 1};
+    timeline.frames[0].span_count = 1;
+    timeline.frames[0].spans[0].stage = video::frame_profile_timeline_stage_e::count;
+    const auto geometry = platf::vulkan_ui::make_timeline_geometry(timeline);
+    EXPECT_EQ(geometry.frame_count, 0U);
+    EXPECT_EQ(geometry.bar_count, 0U);
+    EXPECT_EQ(geometry.average_bar_count, 0U);
+  }
+
   TEST(VulkanUiModel, RejectsInvalidTimelineStageBounds) {
     platf::ui::snapshot_t snapshot {
       .visible = true,

@@ -115,3 +115,131 @@ TEST(RkmppPreprocessPipeline, HiddenUiNeverChangesTheNativeRoute) {
     platf::rkmpp::ui_preprocess_path_e::hidden
   );
 }
+
+TEST(RkmppPreprocessPipeline, UiAllocationFailureReleasesPartialTargetsAndRetriesSameRawFrame) {
+  auto raw = std::make_shared<int>(42);
+  std::weak_ptr<int> raw_lifetime = raw;
+  std::weak_ptr<int> partial_target;
+  bool ui_resources_released = false;
+  int attempts = 0;
+  auto result = platf::rkmpp::prepare_with_optional_ui(
+    true,
+    [&](bool ui_visible) {
+      ++attempts;
+      if (ui_visible) {
+        auto first_target = std::make_shared<int>(1);
+        partial_target = first_target;
+        throw std::system_error(std::make_error_code(std::errc::not_enough_memory), "second CMA target");
+      }
+      EXPECT_TRUE(partial_target.expired());
+      EXPECT_TRUE(ui_resources_released);
+      EXPECT_FALSE(raw_lifetime.expired());
+      return prepared(false, std::move(raw));
+    },
+    [&](const std::system_error &error) {
+      EXPECT_EQ(error.code(), std::errc::not_enough_memory);
+      EXPECT_TRUE(partial_target.expired());
+      ui_resources_released = true;
+    }
+  );
+  EXPECT_EQ(attempts, 2);
+  EXPECT_EQ(result.route, platf::rkmpp::prepared_route_e::direct);
+  EXPECT_FALSE(raw_lifetime.expired());
+  result.holder.reset();
+  EXPECT_TRUE(raw_lifetime.expired());
+}
+
+TEST(RkmppPreprocessPipeline, SuccessfulVisibleUiAndCancellationDoNotDisableOverlay) {
+  for (bool has_frame : {false, true}) {
+    int attempts = 0;
+    auto result = platf::rkmpp::prepare_with_optional_ui(
+      true,
+      [&](bool ui_visible) -> std::optional<platf::rkmpp::prepared_frame_t> {
+        EXPECT_TRUE(ui_visible);
+        ++attempts;
+        return has_frame ? std::make_optional(prepared(true)) : std::nullopt;
+      },
+      [](const std::system_error &) {
+        FAIL() << "Successful or cancelled preparation must not disable UI";
+      }
+    );
+    EXPECT_EQ(attempts, 1);
+    EXPECT_EQ(result.has_value(), has_frame);
+    if (result) {
+      EXPECT_TRUE(result->request_idr);
+    }
+  }
+}
+
+TEST(RkmppPreprocessPipeline, RequiredVideoAllocationFailureIsNotRetried) {
+  int attempts = 0;
+  EXPECT_THROW(
+    platf::rkmpp::prepare_with_optional_ui(
+      false,
+      [&](bool ui_visible) -> int {
+        EXPECT_FALSE(ui_visible);
+        ++attempts;
+        throw std::system_error(std::make_error_code(std::errc::not_enough_memory));
+      },
+      [](const std::system_error &) {
+        FAIL() << "Already hidden UI cannot recover a video allocation failure";
+      }
+    ),
+    std::system_error
+  );
+  EXPECT_EQ(attempts, 1);
+}
+
+TEST(RkmppPreprocessPipeline, FailedFallbackPropagatesAfterExactlyOneRetry) {
+  int attempts = 0;
+  int disabled = 0;
+  EXPECT_THROW(
+    platf::rkmpp::prepare_with_optional_ui(
+      true,
+      [&](bool ui_visible) -> int {
+        EXPECT_EQ(ui_visible, attempts == 0);
+        ++attempts;
+        throw std::system_error(std::make_error_code(std::errc::not_enough_memory));
+      },
+      [&](const std::system_error &) {
+        ++disabled;
+      }
+    ),
+    std::system_error
+  );
+  EXPECT_EQ(attempts, 2);
+  EXPECT_EQ(disabled, 1);
+}
+
+TEST(RkmppPreprocessPipeline, NonMemorySystemErrorsAreNotMaskedByUiFallback) {
+  int attempts = 0;
+  EXPECT_THROW(
+    platf::rkmpp::prepare_with_optional_ui(
+      true,
+      [&](bool) -> int {
+        ++attempts;
+        throw std::system_error(std::make_error_code(std::errc::io_error));
+      },
+      [](const std::system_error &) {
+        FAIL() << "An I/O failure must retain its original cause";
+      }
+    ),
+    std::system_error
+  );
+  EXPECT_EQ(attempts, 1);
+}
+
+TEST(RkmppPreprocessPipeline, NonSystemExceptionsAreNotMaskedByUiFallback) {
+  EXPECT_THROW(
+    platf::rkmpp::prepare_with_optional_ui(
+      true,
+      [](bool) -> int {
+        throw std::runtime_error("invalid frame metadata");
+      },
+      [](const std::system_error &) {
+        FAIL() << "Invalid frame metadata is not a recoverable UI allocation failure";
+      }
+    ),
+    std::runtime_error
+  );
+}
