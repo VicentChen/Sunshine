@@ -227,13 +227,23 @@ rkmpp_disable_reencode = disabled
 先按住 `Start`，再点按 `Back/Select` 即可立即打开或关闭，触发后需要完全释放组合键。Start
 会先作为 UI 修饰键被截获；如果没有继续按 Select，松开 Start 时会向当前应用补发一次普通点击。
 Dear ImGui 通过官方 Vulkan renderer backend 在按输出分辨率和 UI 大小档位自适应的 BGR surface 中绘制
-当前页面。单会话且尺寸匹配的 BGR888 输入由 Vulkan 直接覆盖 HDMI RX capture DMA-BUF 的 UI ROI，
-不执行 RGA。NV12 输入则由 RGA 把完整帧转换到会话私有的 CMA BGR888 target，Vulkan 再直接覆盖
-该 BGR target，最后由 RKMPP 编码；多会话或尺寸不匹配的 BGR888 也使用同一隔离路径。不得把
-rk_hdmirx 的 NV12 生产者 allocation 作为 RGA destination，也不得用 RGA 把 Vulkan 渲染结果拷回
-NV12；实机证明前一种写法会使后续 capture 的 UV 数据别名到 Y 数据，后一种写法会产生整幅绿屏。
-私有路径复用同一组两个 target，使下一帧 RGA/Vulkan 可以与上一帧 MPP 重叠。页面状态不变时不会
-重复提交 ImGui 绘制；UI 隐藏且尺寸/layout 匹配时所有支持的输入格式都继续零拷贝直通，不执行 RGA。
+当前页面。单会话且尺寸匹配的 BGR888 输入由 Vulkan 直接覆盖 HDMI RX capture DMA-BUF 的 UI ROI。
+匹配尺寸的独占 NV12 输入通过布局校验后，先等待 Vulkan 完成并发布 BGR 面板，再由同步 RGA
+转换成 BT.709 limited NV12 写回 capture ROI，最后将同一 DMA-BUF 交给 RKMPP。
+该路径要求逐行、单平面、BT.709 limited（或对应默认量化范围）、偶数尺寸、64-byte 对齐 stride、
+零 data_offset，且 sizeimage、bytesused 和有效 payload 都等于 stride × height × 3/2；allocation
+可含页对齐余量。写回结束立即释放 RGA destination import，编码消费完成前不归还 capture lease。
+多会话、尺寸不匹配或不满足布局条件时，由 RGA 把完整帧转换到会话私有 CMA BGR888 target，
+Vulkan 再覆盖该 target；隔离路径复用两个 target，使下一帧预处理可以与上一帧编码重叠。
+NV12 原位路径省去这两个完整 BGR target，4K 下约节省 47.46 MiB CMA；仍需分配 UI 面板。
+页面状态不变时不会重复提交 ImGui 绘制；UI 隐藏且尺寸/layout 匹配时继续零拷贝直通。
+
+历史版本曾出现写回后的整幅绿屏，但 2026-09-05 的独立实机探针完成了同一 capture fd 上的
+Vulkan → RGA → MPP 编码验证（4K NV12 连续 1,200 帧，以及底部居中面板 120 帧逐帧校验），
+未发现 ROI 外修改或后续 UV/Y 别名。因此不能将历史故障概括为 NV12 capture allocation 不可写；
+具体触发条件仍未定位。新分支已通过构建及 61 项针对性单测，用户随后实测反馈运行正常并确认提交。
+每帧释放目标 import 的追加长测因 HDMI 无信号在首帧前退出，不计入通过；用户反馈不替代未执行的
+长测或完整故障恢复矩阵。
 ROI 的下边缘安全距离与页面尺寸一起按输出分辨率和 UI 大小档位缩放。
 
 ~~~text
@@ -245,7 +255,8 @@ vulkan_ui = enabled
 和 completed-window 指标可以上下滚动；Event 名称前的色块与对应时间条同色。owner 断开或输入
 状态重置会关闭 UI 并执行中立状态清理。切换 UI 大小会在新 surface 全部创建成功后才替换当前
 surface；失败时保留最后可用页面。其他 Vulkan 初始化、模型校验、DMA-BUF import/copy 或
-fallback RGA 失败时，Sunshine 会在当前会话中关闭 UI 并继续基本编码。
+fallback RGA 失败时，Sunshine 会在当前会话中关闭 UI 并继续基本编码。NV12 原位路径发生错误时，
+该帧可能已被部分修改，因此丢弃该帧并通过现有 worker 错误处理结束会话，不继续编码它。
 若需临时绕过所有 Vulkan UI 路径，可将唯一总控设置为 `vulkan_ui = disabled`。
 
 ## RGA 视频缩放与格式转换
@@ -253,9 +264,9 @@ fallback RGA 失败时，Sunshine 会在当前会话中关闭 UI 并继续基本
 Moonlight 请求的分辨率与 HDMI RX 实际可见分辨率不一致时，Sunshine 使用 RGA 执行视频
 硬件缩放、颜色转换以及保持宽高比的黑边或居中裁剪。尺寸一致且 UI 隐藏时，原始 HDMI RX
 DMA-BUF 直接交给 RKMPP；恢复后格式或 stride 变化会重建直通编码器。单会话 BGR888 可见 UI
-仍由 Vulkan 直接写 capture ROI；NV12 可见 UI 则完整 RGA 转换到隔离的 BGR888 target，再由
-Vulkan 直接写 target 的 UI ROI，避免向 rk_hdmirx capture allocation 写入或让 RGA 接触 Vulkan
-渲染结果。
+仍由 Vulkan 直接写 capture ROI；满足上述布局和独占条件的 NV12 可见 UI 使用局部同步 RGA
+写回 capture ROI，其余情况完整转换到隔离的 BGR888 target，再由 Vulkan 写 target 的 UI ROI。
+Profile 的 `ui_compose` 包含局部 RGA 工作；视频缩放 bypass 只表示未执行完整视频帧的转换。
 
 RGA 转换路径使用两个可复用目标 DMA-BUF，并按当前路径整体保持为 NV12 或 BGR888；切换格式前
 会回收旧 prepared frame 并等待 MPP 归还 lease，任何时刻都不会扩展到第三个 target。同步编码在

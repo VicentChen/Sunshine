@@ -1717,9 +1717,9 @@ namespace video {
 
       auto push_captured_image_callback = [&](std::shared_ptr<platf::img_t> &&img, bool frame_captured) -> bool {
 #ifdef SUNSHINE_BUILD_RKMPP
-        const bool direct_bgr_ui_safe = encoder.name == "rkmpp" && std::count_if(capture_ctxs.begin(), capture_ctxs.end(), [](const auto &capture_ctx) {
-                                                                     return capture_ctx.images->running();
-                                                                   }) == 1;
+        const bool direct_ui_write_safe = encoder.name == "rkmpp" && std::count_if(capture_ctxs.begin(), capture_ctxs.end(), [](const auto &capture_ctx) {
+                                                                       return capture_ctx.images->running();
+                                                                     }) == 1;
 #endif
         KITTY_WHILE_LOOP(auto capture_ctx = std::begin(capture_ctxs), capture_ctx != std::end(capture_ctxs), {
           if (!capture_ctx->images->running()) {
@@ -1753,7 +1753,7 @@ namespace video {
               clone->moonlight_height = capture_ctx->config.height;
               clone->input_width = source->input_width;
               clone->input_height = source->input_height;
-              clone->direct_bgr_ui_safe = direct_bgr_ui_safe;
+              clone->direct_ui_write_safe = direct_ui_write_safe;
               if (clone->frame_profile) {
                 clone->frame_profile->moonlight_width = static_cast<std::uint32_t>(capture_ctx->config.width);
                 clone->frame_profile->moonlight_height = static_cast<std::uint32_t>(capture_ctx->config.height);
@@ -1939,10 +1939,9 @@ namespace video {
   /**
    * @brief Cache a Vulkan-rendered UI and cover each live HDMI RX DMA-BUF ROI.
    *
-   * Matching BGR capture is covered directly while its exclusive dequeue lease
-   * is held. NV12 and shared-session input is first converted by RGA to a
-   * session-private BGR target, then Vulkan covers that BGR target directly.
-   * Vulkan output is never copied into an HDMI RX NV12 capture allocation.
+   * Matching exclusive BGR capture is covered by Vulkan. Validated exclusive
+   * NV12 capture receives a synchronous RGA conversion of the published panel.
+   * Shared input and unsupported layouts use a session-private BGR target.
    */
   class rkmpp_vulkan_ui_session_t {
     struct surface_t;
@@ -1981,7 +1980,8 @@ namespace video {
       if (frames_composed_ != 0) {
         BOOST_LOG(info) << "RKMPP Vulkan UI stopped: composed=" << frames_composed_
                         << " capture_generations=" << capture_generations_
-                        << " bgr_imported_slots=" << bgr_imported_slots_;
+                        << " bgr_imported_slots=" << bgr_imported_slots_
+                        << " nv12_in_place=" << nv12_frames_composed_;
       }
     }
 
@@ -2046,6 +2046,51 @@ namespace video {
          .slot = image.frame->buffer_index()},
         image
       );
+    }
+
+    /** @brief Synchronously convert the published panel into a leased NV12 ROI. */
+    bool compose_capture_nv12(platf::hdmirx::hdmirx_img_t &image) {
+      if (!image.direct_ui_write_safe || !image.frame || !image.capture_format || image.frame->planes().size() != 1 || !platf::hdmirx::supports_nv12_ui_cover(*image.capture_format, image.frame->planes().front())) {
+        throw std::runtime_error("NV12 UI cover requires an exclusive, complete BT.709 limited capture plane");
+      }
+      observe_capture_generation(image);
+      auto *surface = prepare_visible_panel(image);
+      if (!surface) {
+        return false;
+      }
+      const auto &format = *image.capture_format;
+      const auto &plane = image.frame->planes().front();
+      const auto &panel = surface->panel;
+      if (panel.width > format.width || panel.height > format.height || metrics_.panel_margin > format.height - panel.height) {
+        throw std::runtime_error("NV12 UI panel exceeds the capture frame");
+      }
+      const platf::rga::rectangle_t roi {
+        ((format.width - panel.width) / 2U) & ~1U,
+        (format.height - panel.height - metrics_.panel_margin) & ~1U,
+        panel.width,
+        panel.height
+      };
+      if (image.frame_profile) {
+        image.frame_profile->ui_compose_begin = std::chrono::steady_clock::now();
+      }
+  #ifdef SUNSHINE_BUILD_VULKAN
+      // publish() waits for Vulkan and releases the linear panel to external devices.
+      (void) surface->renderer->publish();
+  #endif
+      {
+        // Do not retain an RGA destination attachment across QBUF or a capture
+        // generation change. The caller retains the DQBUF lease through MPP.
+        auto destination = platf::rga::imported_buffer_t::import(*backend_, {plane.dma_buf_fd, format.width, format.height, plane.bytesperline, plane.allocation_size, platf::rga::pixel_format_e::nv12});
+        platf::rga::process(surface->source.rga_buffer(), {0, 0, panel.width, panel.height}, destination, roi, platf::rga::color_space_e::rgb_to_yuv_bt709_limited);
+      }
+      if (image.frame_profile) {
+        image.frame_profile->ui_compose_end = std::chrono::steady_clock::now();
+      }
+      ++frames_composed_;
+      if (++nv12_frames_composed_ == 1) {
+        BOOST_LOG(info) << "RKMPP Vulkan UI first in-place NV12 RGA cover completed synchronously";
+      }
+      return true;
     }
 
     /** @brief Cover a visible page directly into a session-private BGR target. */
@@ -2339,6 +2384,7 @@ namespace video {
     std::uint64_t frames_composed_ {};
     std::uint64_t capture_generations_ {};
     std::uint64_t bgr_imported_slots_ {};
+    std::uint64_t nv12_frames_composed_ {};  ///< Successful synchronous capture ROI conversions.
     bool backend_attached_ {};  ///< Whether controller input may currently be intercepted for this renderer.
   };
 
@@ -2433,7 +2479,8 @@ namespace video {
             live_layout->format,
             dimensions_match,
             ui_visible,
-            image->direct_bgr_ui_safe
+            image->direct_ui_write_safe,
+            platf::hdmirx::supports_nv12_ui_cover(*image->capture_format, plane)
           );
           if (!dimensions_match || ui_path == platf::rkmpp::ui_preprocess_path_e::private_bgr) {
             return prepare_rga(
@@ -2447,6 +2494,8 @@ namespace video {
           }
           if (ui_path == platf::rkmpp::ui_preprocess_path_e::direct_bgr) {
             compose_direct_bgr(*image);
+          } else if (ui_path == platf::rkmpp::ui_preprocess_path_e::direct_nv12) {
+            compose_direct_nv12(*image);
           }
 
           if (image->frame_profile) {
@@ -2792,6 +2841,22 @@ namespace video {
         vulkan_ui_->disable();
         vulkan_ui_enabled_ = false;
         BOOST_LOG(error) << "RKMPP direct BGR Vulkan UI composition failed; disabling overlay for this session: " << e.what();
+      }
+    }
+
+    /** @brief Cover a validated exclusive NV12 capture frame before MPP submission. */
+    void compose_direct_nv12(platf::hdmirx::hdmirx_img_t &image) {
+      if (!vulkan_ui_ || !vulkan_ui_enabled_) {
+        return;
+      }
+      try {
+        vulkan_ui_->compose_capture_nv12(image);
+      } catch (const std::exception &e) {
+        vulkan_ui_->disable();
+        vulkan_ui_enabled_ = false;
+        // A failed DMA write may have partially modified this frame. Let the
+        // existing session recovery discard it rather than encoding it.
+        throw std::runtime_error(std::string("RKMPP in-place NV12 UI composition failed: ") + e.what());
       }
     }
 

@@ -95,6 +95,22 @@ namespace platf::hdmirx {
     });
   }
 
+  bool supports_nv12_ui_cover(const capture_format_t &format, const frame_plane_t &plane) noexcept {
+    if (format.fourcc != V4L2_PIX_FMT_NV12 || format.mpp_format != MPP_FMT_YUV420SP || format.planes.size() != 1 || format.field != V4L2_FIELD_NONE || format.colorspace != V4L2_COLORSPACE_REC709 || (format.quantization != V4L2_QUANTIZATION_DEFAULT && format.quantization != V4L2_QUANTIZATION_LIM_RANGE) || format.width == 0 || format.height == 0 || ((format.width | format.height) & 1U) != 0 || plane.dma_buf_fd < 0 || plane.data_offset != 0 || plane.bytesperline < format.width || plane.bytesperline % 64U != 0) {
+      return false;
+    }
+    const auto rows = static_cast<std::uint64_t>(format.height) + format.height / 2U;
+    if (rows > std::numeric_limits<std::uint64_t>::max() / plane.bytesperline) {
+      return false;
+    }
+    const auto required_size = static_cast<std::uint64_t>(plane.bytesperline) * rows;
+    // Exact plane extent proves that RGA's height-derived UV offset is the
+    // producer's UV offset. Page padding belongs to allocation_size only.
+    return required_size == plane.sizeimage && required_size == plane.payload_bytes && required_size == plane.bytesused &&
+           required_size <= plane.allocation_size && format.planes.front().bytesperline == plane.bytesperline &&
+           format.planes.front().sizeimage == plane.sizeimage;
+  }
+
   bool timestamp_is_monotonic(std::uint32_t flags) noexcept {
     return (flags & V4L2_BUF_FLAG_TIMESTAMP_MASK) == V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
   }
@@ -421,6 +437,7 @@ namespace platf::hdmirx {
     state->format.fourcc = pixel_format.pixelformat;
     state->format.field = pixel_format.field;
     state->format.colorspace = pixel_format.colorspace;
+    state->format.quantization = pixel_format.quantization;
     state->format.mpp_format = *mpp_format;
     state->format.planes.reserve(pixel_format.num_planes);
     for (std::uint32_t plane = 0; plane < pixel_format.num_planes; ++plane) {

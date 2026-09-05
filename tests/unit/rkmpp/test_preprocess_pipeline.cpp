@@ -87,9 +87,30 @@ TEST(RkmppPreprocessPipeline, VisibleMatchingBgrUsesDirectVulkanCoverForExclusiv
   );
 }
 
-TEST(RkmppPreprocessPipeline, VisibleNv12UsesPrivateBgrTarget) {
+TEST(RkmppPreprocessPipeline, UnvalidatedNv12UsesPrivateBgrTarget) {
   EXPECT_EQ(
     platf::rkmpp::select_ui_preprocess_path(MPP_FMT_YUV420SP, true, true, true),
+    platf::rkmpp::ui_preprocess_path_e::private_bgr
+  );
+}
+
+TEST(RkmppPreprocessPipeline, ValidatedExclusiveNv12UsesInPlaceRgaCover) {
+  EXPECT_EQ(
+    platf::rkmpp::select_ui_preprocess_path(MPP_FMT_YUV420SP, true, true, true, true),
+    platf::rkmpp::ui_preprocess_path_e::direct_nv12
+  );
+  for (const auto [matching, exclusive] : {std::pair {false, true}, std::pair {true, false}, std::pair {false, false}}) {
+    EXPECT_EQ(
+      platf::rkmpp::select_ui_preprocess_path(MPP_FMT_YUV420SP, matching, true, exclusive, true),
+      platf::rkmpp::ui_preprocess_path_e::private_bgr
+    );
+  }
+  EXPECT_EQ(
+    platf::rkmpp::select_ui_preprocess_path(MPP_FMT_YUV420SP, true, false, true, true),
+    platf::rkmpp::ui_preprocess_path_e::hidden
+  );
+  EXPECT_EQ(
+    platf::rkmpp::select_ui_preprocess_path(MPP_FMT_YUV422SP, true, true, true, true),
     platf::rkmpp::ui_preprocess_path_e::private_bgr
   );
 }

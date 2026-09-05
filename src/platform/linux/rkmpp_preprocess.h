@@ -24,33 +24,39 @@ namespace platf::rkmpp {
   enum class ui_preprocess_path_e : std::uint8_t {
     hidden,  ///< UI is hidden and does not alter the video path.
     direct_bgr,  ///< Vulkan covers an exclusively leased BGR capture DMA-BUF.
+    direct_nv12,  ///< RGA converts a completed Vulkan panel into an exclusively leased NV12 ROI.
     private_bgr  ///< RGA produces a private BGR target before Vulkan covers it.
   };
 
   /**
    * @brief Select the safe UI path without conflating visibility with scaling.
    *
-   * Matching BGR capture can be covered in place only when the current frame
-   * is not shared by multiple encoder sessions. Every other visible-UI case
-   * uses a private BGR target, so an NV12 capture allocation is never written.
+   * Matching capture can be covered in place only when the current frame is
+   * not shared by multiple encoder sessions. NV12 additionally requires an
+   * explicitly validated plane layout and color range.
    *
    * @param input_format Native MPP layout of the captured frame.
    * @param dimensions_match Whether capture and coded dimensions are equal.
    * @param ui_visible Whether the controller currently exposes a UI page.
-   * @param direct_bgr_write_safe Whether only one session can mutate the frame.
+   * @param direct_write_safe Whether only one session can mutate the frame.
+   * @param nv12_layout_safe Whether the native plane supports BT.709 limited ROI writes.
    * @return Format-aware preparation path for the current frame.
    */
   constexpr ui_preprocess_path_e select_ui_preprocess_path(
     MppFrameFormat input_format,
     bool dimensions_match,
     bool ui_visible,
-    bool direct_bgr_write_safe
+    bool direct_write_safe,
+    bool nv12_layout_safe = false
   ) noexcept {
     if (!ui_visible) {
       return ui_preprocess_path_e::hidden;
     }
-    if (input_format == MPP_FMT_BGR888 && dimensions_match && direct_bgr_write_safe) {
+    if (input_format == MPP_FMT_BGR888 && dimensions_match && direct_write_safe) {
       return ui_preprocess_path_e::direct_bgr;
+    }
+    if (input_format == MPP_FMT_YUV420SP && dimensions_match && direct_write_safe && nv12_layout_safe) {
+      return ui_preprocess_path_e::direct_nv12;
     }
     return ui_preprocess_path_e::private_bgr;
   }

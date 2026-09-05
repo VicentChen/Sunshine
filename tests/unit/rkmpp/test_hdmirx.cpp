@@ -4,6 +4,8 @@
  */
 #include "../../tests_common.h"
 
+#include <functional>
+
 #ifdef SUNSHINE_BUILD_RKMPP
   #include <linux/videodev2.h>
   #include <src/platform/linux/hdmirx.h>
@@ -33,6 +35,112 @@ TEST(HdmirxMppFormat, ValidatesCompleteCaptureMetadata) {
   format.planes.front().sizeimage = 6220800;
   format.fourcc = v4l2_fourcc('T', 'E', 'S', 'T');
   EXPECT_FALSE(platf::hdmirx::capture_format_is_valid(format));
+}
+
+TEST(HdmirxNv12UiCover, RequiresExactPlaneExtentAndLimitedBt709) {
+  using namespace platf::hdmirx;
+  capture_format_t format;
+  format.width = 3840;
+  format.height = 2160;
+  format.fourcc = V4L2_PIX_FMT_NV12;
+  format.field = V4L2_FIELD_NONE;
+  format.colorspace = V4L2_COLORSPACE_REC709;
+  format.quantization = V4L2_QUANTIZATION_LIM_RANGE;
+  format.mpp_format = MPP_FMT_YUV420SP;
+  format.planes.push_back({3840, 12441600});
+  const frame_plane_t plane {12441600, 0, 12441600, 3840, 12441600, 12443648, 7};
+  EXPECT_TRUE(supports_nv12_ui_cover(format, plane));
+  format.quantization = V4L2_QUANTIZATION_DEFAULT;
+  EXPECT_TRUE(supports_nv12_ui_cover(format, plane));
+
+  for (const auto change : std::vector<std::function<void(capture_format_t &)>> {
+         [](auto &f) {
+           f.fourcc = V4L2_PIX_FMT_NV16;
+         },
+         [](auto &f) {
+           f.mpp_format = MPP_FMT_BGR888;
+         },
+         [](auto &f) {
+           f.field = V4L2_FIELD_INTERLACED;
+         },
+         [](auto &f) {
+           f.colorspace = V4L2_COLORSPACE_SMPTE170M;
+         },
+         [](auto &f) {
+           f.quantization = V4L2_QUANTIZATION_FULL_RANGE;
+         },
+         [](auto &f) {
+           f.width = 0;
+         },
+         [](auto &f) {
+           f.height = 0;
+         },
+         [](auto &f) {
+           --f.width;
+         },
+         [](auto &f) {
+           --f.height;
+         },
+         [](auto &f) {
+           f.planes.clear();
+         },
+         [](auto &f) {
+           f.planes.push_back(f.planes.front());
+         },
+         [](auto &f) {
+           ++f.planes.front().bytesperline;
+         },
+         [](auto &f) {
+           ++f.planes.front().sizeimage;
+         }
+       }) {
+    auto invalid = format;
+    change(invalid);
+    EXPECT_FALSE(supports_nv12_ui_cover(invalid, plane));
+  }
+  for (const auto change : std::vector<std::function<void(frame_plane_t &)>> {
+         [](auto &p) {
+           p.dma_buf_fd = -1;
+         },
+         [](auto &p) {
+           p.data_offset = 64;
+         },
+         [](auto &p) {
+           p.bytesperline = 1920;
+         },
+         [](auto &p) {
+           ++p.bytesperline;
+         },
+         [](auto &p) {
+           --p.bytesused;
+         },
+         [](auto &p) {
+           --p.payload_bytes;
+         },
+         [](auto &p) {
+           p.sizeimage += 3840 * 16;
+         },
+         [](auto &p) {
+           p.allocation_size = p.sizeimage - 1;
+         }
+       }) {
+    auto invalid = plane;
+    change(invalid);
+    EXPECT_FALSE(supports_nv12_ui_cover(format, invalid));
+  }
+}
+
+TEST(HdmirxNv12UiCover, RejectsOverflowingPlaneArithmetic) {
+  platf::hdmirx::capture_format_t format;
+  format.width = 3840;
+  format.height = 0xfffffffeU;
+  format.fourcc = V4L2_PIX_FMT_NV12;
+  format.field = V4L2_FIELD_NONE;
+  format.colorspace = V4L2_COLORSPACE_REC709;
+  format.mpp_format = MPP_FMT_YUV420SP;
+  format.planes.push_back({0xffffffc0U, 12441600});
+  const platf::hdmirx::frame_plane_t plane {12441600, 0, 12441600, 0xffffffc0U, 12441600, 12443648, 7};
+  EXPECT_FALSE(platf::hdmirx::supports_nv12_ui_cover(format, plane));
 }
 
 TEST(HdmirxBootstrapPolicy, InitializationNeverWaitsForLiveHdmi) {

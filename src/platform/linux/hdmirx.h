@@ -59,6 +59,7 @@ namespace platf::hdmirx {
     std::uint32_t colorspace {};
     std::vector<plane_layout_t> planes;
     MppFrameFormat mpp_format {};
+    std::uint32_t quantization {};  ///< Native V4L2 range used to validate in-place YUV UI conversion.
   };
 
   struct device_info_t {
@@ -86,6 +87,15 @@ namespace platf::hdmirx {
 
   /** Validate the format metadata returned by VIDIOC_G_FMT. */
   bool capture_format_is_valid(const capture_format_t &format) noexcept;
+
+  /**
+   * @brief Check that a dequeued plane has the exact NV12 layout supported by UI ROI writes.
+   *
+   * @param format Native capture geometry and color metadata.
+   * @param plane Dequeued payload and exported allocation metadata.
+   * @return True for a complete, unoffset, progressive BT.709 limited NV12 image.
+   */
+  bool supports_nv12_ui_cover(const capture_format_t &format, const frame_plane_t &plane) noexcept;
 
   /**
    * @brief Test whether V4L2 marked a buffer timestamp as CLOCK_MONOTONIC.
@@ -226,7 +236,7 @@ namespace platf::hdmirx {
     std::uint32_t moonlight_height {};  ///< Requested Moonlight height for the UI snapshot.
     std::uint32_t input_width {};  ///< Current HDMI input width, or zero when unavailable.
     std::uint32_t input_height {};  ///< Current HDMI input height, or zero when unavailable.
-    bool direct_bgr_ui_safe {};  ///< Whether this frame is published to only one session and may receive a Vulkan BGR ROI cover.
+    bool direct_ui_write_safe {};  ///< Whether this frame is published to only one session and may receive an in-place UI ROI cover.
   };
 
   /**
